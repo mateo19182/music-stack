@@ -1,0 +1,7 @@
+# Existing album folders define releases until beets reviews inconsistent MBIDs.
+[PID]
+Album = "folder"
+
+# Import portable musical key tags for future DJ browsing and smart playlists.
+[Tags.key]
+Aliases = ["key", "initialkey", "tkey"]

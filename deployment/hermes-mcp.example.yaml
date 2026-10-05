@@ -1,0 +1,27 @@
+# Merge this server into ~/.hermes/config.yaml under mcp_servers.
+# Existing platform toolsets and other MCP servers stay in place.
+mcp_servers:
+  music-acquisition:
+    command: /path/to/music-stack/acquisition/.venv/bin/python
+    args:
+      - /path/to/music-stack/acquisition/agent_tools.py
+      - --credentials
+      - /path/to/acquisition-agent-credentials.json
+    cwd: /path/to/music-stack
+    connect_timeout: 20
+    tool_timeout: 45
+    tools:
+      include:
+        - health
+        - search_music
+        - get_search
+        - list_jobs
+        - get_job
+        - list_reviews
+        - request_review_advice
+        - library
+        - enqueue
+        - enqueue_url
+        - retry_job
+        - cancel_job
+        - import_files

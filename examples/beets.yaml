@@ -1,0 +1,22 @@
+# Optional manual maintenance in separate staging; acquisition has its own Beets state.
+directory: /data/tagged
+library: /config/library.db
+plugins: chroma duplicates embedart
+import:
+  copy: true
+  move: false
+  write: true
+  timid: true
+  resume: ask
+  incremental: true
+  log: /config/import.log
+match:
+  preferred:
+    media:
+    - Digital Media
+    - CD
+paths:
+  default: $albumartist/$album ($year)/$track $title
+  singleton: Singles/$artist/$title
+embedart:
+  auto: false

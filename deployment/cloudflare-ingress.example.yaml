@@ -1,0 +1,13 @@
+# Targets for a host-managed Cloudflare tunnel; credentials are private.
+ingress:
+  - hostname: acquire.example.com
+    service: http://127.0.0.1:4534
+  - hostname: navidrome.example.com
+    service: http://127.0.0.1:4533
+  - hostname: aurral.example.com
+    service: http://127.0.0.1:3015
+  - hostname: deemix.example.com
+    service: http://127.0.0.1:6595
+  - hostname: lidarr.example.com
+    service: http://127.0.0.1:8687
+  - service: http_status:404

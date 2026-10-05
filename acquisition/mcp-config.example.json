@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "music-acquisition": {
+      "command": "/path/to/music-stack/acquisition/.venv/bin/python",
+      "args": ["/path/to/music-stack/acquisition/agent_tools.py"]
+    }
+  }
+}

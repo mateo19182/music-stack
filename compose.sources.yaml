@@ -1,0 +1,82 @@
+services:
+  slskd:
+    image: slskd/slskd@sha256:ecd4026d4f8fb504e2cc55323efa2c1f5b56d20d3686b48ea17a6
+    container_name: slskd
+    user: 1000:1000
+    environment:
+      TZ: Europe/Madrid
+      SLSKD_REMOTE_CONFIGURATION: 'true'
+    volumes:
+    - ${SLSKD_STATE_DIR:-./config/slskd}:/app
+    - ${MUSIC_DATA_ROOT:-/mnt/data/music-library}:/data
+    restart: unless-stopped
+    network_mode: service:gluetun
+    depends_on:
+      gluetun:
+        condition: service_healthy
+        restart: true
+  deemix:
+    image: ghcr.io/bambanah/deemix@sha256:9450515dcf049ce764e4d08fed74b6a429ade83e1fe5424cd18482aa6f1683a2
+    container_name: deemix
+    environment:
+      PUID: '1000'
+      PGID: '1000'
+      TZ: Europe/Madrid
+      DEEMIX_SINGLE_USER: 'true'
+      DEEMIX_MUSIC_DIR: /downloads
+    volumes:
+    - ${DEEMIX_STATE_DIR:-./config/deemix}:/config
+    - ${MUSIC_DATA_ROOT:-/mnt/data/music-library}/downloads/deemix:/downloads
+    restart: unless-stopped
+  deemix-web:
+    image: nginx@sha256:df221db836e1754089190208cee7eeda94f233197056426eda74a43ab1abeac2
+    container_name: deemix-web
+    volumes:
+    - ${DEEMIX_PROXY_CONF:-./deployment/deemix-proxy.conf}:/etc/nginx/conf.d/default.conf:ro
+    - ${DEEMIX_HTPASSWD_FILE:-./config/deemix/htpasswd}:/etc/nginx/htpasswd:ro
+    ports:
+    - 127.0.0.1:6595:80
+    - 127.0.0.1:8687:81
+    depends_on:
+    - deemix
+    restart: unless-stopped
+  beets:
+    image: lscr.io/linuxserver/beets@sha256:99582f104d04241b46a4a7071d424d0529800f9e3d04baa36db47b5e8cda6e96
+    profiles:
+    - tools
+    user: 1000:1000
+    environment:
+      PUID: '1000'
+      PGID: '1000'
+      TZ: Europe/Madrid
+    volumes:
+    - ${BEETS_STATE_DIR:-./config/beets}:/config
+    - ${MUSIC_DATA_ROOT:-/mnt/data/music-library}:/data
+    restart: 'no'
+  gluetun:
+    image: qmcgaw/gluetun:v3.41.1@sha256:1a5bf4b4820a879cdf8d93d7ef0d2d963af56670c9ebff8981860b6804ebc8ab
+    container_name: slskd-vpn
+    cap_add:
+    - NET_ADMIN
+    devices:
+    - /dev/net/tun:/dev/net/tun
+    env_file:
+    - ${AIRVPN_ENV_FILE:-./config/airvpn/airvpn.env}
+    environment:
+      TZ: Europe/Madrid
+      VPN_SERVICE_PROVIDER: airvpn
+      VPN_TYPE: wireguard
+      FIREWALL_INPUT_PORTS: '5030'
+    volumes:
+    - ${GLUETUN_STATE_DIR:-./config/airvpn/gluetun}:/gluetun
+    ports:
+    - 127.0.0.1:5030:5030
+    networks:
+      default:
+        aliases:
+        - slskd
+    restart: unless-stopped
+name: lidarr
+networks:
+  default:
+    name: ${SOURCE_NETWORK:-lidarr_default}

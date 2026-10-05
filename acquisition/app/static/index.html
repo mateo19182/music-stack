@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>Acquire</title>
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v=20261005-2" />
+    <link rel="stylesheet" href="/static/style.css?v=20261005-4" />
+    <script defer src="/static/app.js?v=20261005-4"></script>
+  </head>
+  <body>
+    <div id="toast" role="status" aria-live="polite" hidden></div>
+    <section id="login-view" class="login" hidden>
+      <form id="login-form" class="panel">
+        <h1>Acquire</h1>
+        <p class="muted">Sign in with your Navidrome account.</p>
+        <label
+          >Username<input
+            name="username"
+            autocomplete="username"
+            required /></label
+        ><label
+          >Password<input
+            name="password"
+            type="password"
+            autocomplete="current-password"
+            required /></label
+        ><button type="submit">Sign in</button>
+        <p id="login-error" class="error" role="alert"></p>
+      </form>
+    </section>
+    <div id="app" hidden>
+      <header>
+        <a class="brand" href="/">Acquire</a>
+        <div class="account">
+          <a id="listen" href="http://localhost:4533" target="_blank" rel="noopener"
+            >Listen ↗</a
+          ><span id="username"></span
+          ><button id="logout" class="quiet">Sign out</button>
+        </div>
+      </header>
+      <main>
+        <nav aria-label="Main">
+          <button data-tab="search" class="selected">Search</button
+          ><button data-tab="activity">
+            Queue <span id="active-count"></span></button
+          ><button data-tab="library">Library</button>
+        </nav>
+        <section id="search-view">
+          <div class="intro">
+            <h1>Add music</h1>
+            <p class="muted">
+              Find a track or paste a media link. Review it before adding it to
+              your library.
+            </p>
+          </div>
+          <form id="search-form" class="panel">
+            <div class="search-row">
+              <label class="grow"
+                >Search or paste a link<input
+                  name="query"
+                  placeholder="Artist, track, album or URL"
+                  required /></label
+              ><button type="submit">Search</button>
+            </div>
+            <div class="options search-options">
+              <label
+                >Source<select name="source">
+                  <option value="all">All sources</option>
+                  <option value="soulseek">Soulseek</option>
+                  <option value="youtube">YouTube</option>
+                </select></label
+              ><label
+                >Looking for<select name="kind">
+                  <option value="track">Track</option>
+                  <option value="album">Album / playlist</option>
+                </select></label
+              >
+            </div>
+            <details>
+              <summary>More precise search</summary>
+              <div class="options">
+                <label class="grow"
+                  >Artist<input
+                    name="artist"
+                    placeholder="Artist name" /></label
+                ><label class="grow"
+                  >Title<input name="title" placeholder="Track title" /></label
+                ><label class="grow"
+                  >Album<input name="album" placeholder="Album name"
+                /></label>
+              </div>
+            </details>
+          </form>
+          <details class="panel url-panel">
+            <summary>Link options</summary>
+            <p class="muted">
+              Paste a YouTube, SoundCloud, Bandcamp or Vimeo URL. Playlists can
+              be queued together.
+            </p>
+            <form id="url-form">
+              <label
+                >URL<input
+                  name="url"
+                  type="url"
+                  placeholder="https://www.youtube.com/watch?v=…"
+                  required
+              /></label>
+              <div class="options">
+                <label
+                  >Download<select name="kind">
+                    <option value="track">Single track</option>
+                    <option value="album">Album / playlist</option>
+                  </select></label
+                ><button type="submit">Queue link</button>
+              </div>
+            </form>
+          </details>
+          <div class="section-title">
+            <h2>Results</h2>
+            <span id="search-status" class="muted"
+              >Search to find available downloads.</span
+            >
+          </div>
+          <div id="results"></div>
+        </section>
+        <section id="activity-view" hidden>
+          <div class="section-title">
+            <h1>Queue</h1>
+            <button id="refresh-jobs" class="quiet">Refresh</button>
+          </div>
+          <p class="muted">
+            Downloads appear here. Check their tags and add them to the library
+            when ready.
+          </p>
+          <div class="section-title">
+            <h2>Ready to add <span id="review-count"></span></h2>
+          </div>
+          <div id="reviews"></div>
+          <div class="section-title"><h2>Downloads</h2></div>
+          <label class="checkbox history-toggle"
+            ><input type="checkbox" id="show-history" />Show completed and
+            rejected downloads</label
+          >
+          <div id="jobs"></div>
+          <details id="import-existing" class="utility-section" hidden>
+            <summary>Import existing files</summary>
+            <p class="muted">
+              Files downloaded outside Acquire. Select files to check their tags
+              before adding them to the library.
+            </p>
+            <button id="refresh-inbox" class="quiet" type="button">
+              Refresh files
+            </button>
+            <form id="inbox-form">
+              <div class="panel">
+                <div class="inbox-tools">
+                  <label class="checkbox"
+                    ><input type="checkbox" id="inbox-all" />Select up to 100
+                    files</label
+                  ><span id="inbox-count" class="muted"></span
+                  ><button type="submit">Prepare selected files</button>
+                </div>
+                <div id="inbox"></div>
+              </div>
+            </form>
+          </details>
+        </section>
+        <section id="library-view" hidden>
+          <div class="section-title">
+            <div>
+              <h1>Library</h1>
+            </div>
+            <span id="library-count" class="muted"></span>
+          </div>
+          <form id="library-form" class="panel library-tools">
+            <div class="search-row">
+              <label class="grow"
+                >Search library<input
+                  name="q"
+                  placeholder="Artist, title or album" /></label
+              ><label
+                >Sort<select name="sort">
+                  <option value="title">Title</option>
+                  <option value="artist">Artist</option>
+                  <option value="album">Album</option>
+                  <option value="genre">Genre</option>
+                  <option value="bpm">BPM</option>
+                  <option value="key">Key</option>
+                </select></label
+              ><button type="submit">Search</button
+              ><button type="button" class="quiet" id="reset-filters">
+                Reset
+              </button>
+            </div>
+            <details>
+              <summary>
+                Genre, key and tempo <span id="filter-summary"></span>
+              </summary>
+              <div class="options filters">
+                <label
+                  >Genre<select name="genre">
+                    <option value="">All genres</option>
+                  </select></label
+                ><label
+                  >Key<select name="key">
+                    <option value="">All keys</option>
+                  </select></label
+                ><label
+                  >BPM from<input
+                    name="bpm_min"
+                    type="number"
+                    min="0"
+                    max="400"
+                    placeholder="Any" /></label
+                ><label
+                  >BPM to<input
+                    name="bpm_max"
+                    type="number"
+                    min="0"
+                    max="400"
+                    placeholder="Any"
+                /></label>
+              </div>
+            </details>
+          </form>
+          <details id="sharing-settings" class="utility-section" hidden>
+            <summary>Soulseek sharing</summary>
+            <p class="muted">
+              All library music is shared by default. Use More on a track to
+              keep it private.
+            </p>
+            <label class="checkbox"
+              ><input id="sharing-enabled" type="checkbox" />Share the library
+              on Soulseek</label
+            >
+            <p id="sharing-status" class="muted" role="status"></p>
+            <p id="sharing-error" class="error" role="alert"></p>
+          </details>
+          <div id="library"></div>
+          <div id="pagination" class="pagination"></div>
+        </section>
+        <div id="player-bar" hidden>
+          <div>
+            <strong id="player-title">Preview</strong
+            ><span id="player-subtitle" class="muted"></span>
+          </div>
+          <audio id="player" controls></audio
+          ><button
+            id="close-player"
+            class="quiet"
+            aria-label="Close audio preview"
+          >
+            ✕
+          </button>
+        </div>
+      </main>
+    </div>
+  </body>
+</html>

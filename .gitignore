@@ -1,0 +1,30 @@
+# Only source, documentation, and templates belong in this repository.
+.env
+.env.*
+!.env.example
+!.env.current-server.example
+config/
+state/
+data/
+music/
+downloads/
+backups/
+reports/
+credentials*
+*credentials.json
+*.db
+*.db-*
+*.sqlite*
+*.log
+*.pem
+*.key
+htpasswd
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+node_modules/
+.DS_Store
+
+# Server-specific notes and real deployment values; never published.
+local/

@@ -1,0 +1,65 @@
+services:
+  navidrome:
+    image: deluan/navidrome:0.64.2@sha256:38dc2727bfcfd5ede290f8ada114fc90368146f265ae4701ddddbcbe2a44ee52
+    container_name: navidrome
+    user: 1000:1000
+    environment:
+      TZ: Europe/Madrid
+      ND_MUSICFOLDER: /music
+      ND_DATAFOLDER: /data
+      ND_CONFIGFILE: /data/navidrome.toml
+      ND_SCANSCHEDULE: '@every 5m'
+      ND_ENABLEDOWNLOADS: 'true'
+      ND_ENABLESHARING: 'false'
+      ND_ENABLEINSIGHTSCOLLECTOR: 'false'
+    volumes:
+    - ${NAVIDROME_STATE_DIR:-./config/navidrome}:/data
+    - ${MUSIC_DATA_ROOT:-/mnt/data/music-library}/library:/music:ro
+    ports:
+    - 127.0.0.1:4533:4533
+    restart: unless-stopped
+  music-redirect:
+    image: nginx:alpine@sha256:df221db836e1754089190208cee7eeda94f233197056426eda74a43ab1abeac2
+    container_name: music-redirect
+    volumes:
+    - ${REDIRECT_CONF:-./deployment/aurral-redirect.conf}:/etc/nginx/conf.d/default.conf:ro
+    ports:
+    - 127.0.0.1:3015:8080
+    restart: unless-stopped
+  acquisition:
+    image: music-acquisition:0.1.0
+    build: ./acquisition
+    container_name: music-acquisition
+    user: 1000:1000
+    environment:
+      TZ: Europe/Madrid
+      ACQUISITION_CONFIG: /state/config.json
+    volumes:
+    - ${ACQUISITION_STATE_DIR:-./config/acquisition}:/state
+    - ${NAVIDROME_STATE_DIR:-./config/navidrome}:/navidrome:ro
+    - ${MUSIC_DATA_ROOT:-/mnt/data/music-library}/library:/library
+    - ${MUSIC_DATA_ROOT:-/mnt/data/music-library}:/music-storage
+    - ${MUSIC_DATA_ROOT:-/mnt/data/music-library}/incoming/acquisition:/staging
+    - ${MUSIC_DATA_ROOT:-/mnt/data/music-library}/downloads/slskd:/downloads/slskd:ro
+    ports:
+    - 127.0.0.1:4534:4534
+    networks:
+    - default
+    - lidarr
+    restart: unless-stopped
+    stop_grace_period: 30s
+    healthcheck:
+      test:
+      - CMD
+      - python
+      - -c
+      - import urllib.request; urllib.request.urlopen('http://localhost:4534/api/health',
+        timeout=5)
+      interval: 30s
+      timeout: 10s
+      retries: 3
+networks:
+  lidarr:
+    external: true
+    name: ${SOURCE_NETWORK:-lidarr_default}
+name: aurral
