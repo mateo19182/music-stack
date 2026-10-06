@@ -6,8 +6,8 @@
     <meta name="color-scheme" content="light" />
     <title>Acquire</title>
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v=20261005-2" />
-    <link rel="stylesheet" href="/static/style.css?v=20261006-2" />
-    <script defer src="/static/app.js?v=20261006-2"></script>
+    <link rel="stylesheet" href="/static/style.css?v=20261006-3" />
+    <script defer src="/static/app.js?v=20261006-3"></script>
   </head>
   <body>
     <div id="toast" role="status" aria-live="polite" hidden></div>
@@ -135,13 +135,26 @@
             when ready.
           </p>
           <div class="section-title">
-            <h2>Ready to add <span id="review-count"></span></h2>
+            <h2>Needs you <span id="review-count"></span></h2>
+          </div>
+          <div class="auto-add">
+            <span>Add to the library automatically when nothing needs you:</span>
+            <label class="checkbox"
+              ><input type="checkbox" data-auto-add="search" />Searches and
+              links</label
+            >
+            <label class="checkbox"
+              ><input type="checkbox" data-auto-add="import" />Inbox
+              imports</label
+            >
           </div>
           <p class="muted review-help">
-            Play anything you're unsure about, fix the tracks marked Check, then
-            press Add. Click a track to edit its tags.
+            Tags, album, cover art, duplicates and better versions are handled
+            for you. Answer what's left here, or click a track to edit it.
           </p>
           <div id="reviews"></div>
+          <div class="section-title"><h2>Recently added</h2></div>
+          <div id="recent"></div>
           <div class="section-title"><h2>Downloads</h2></div>
           <label class="checkbox history-toggle"
             ><input type="checkbox" id="show-history" />Show completed and

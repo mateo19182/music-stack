@@ -15,12 +15,12 @@ from pathlib import Path
 
 import numpy as np
 from beets.library import Item, Library
-from mediafile import MediaFile
+from mediafile import Image, ImageType, MediaFile
 
 from .keys import camelot, key_fields
 from .audio_models import SAMPLE_RATE, models_at
 from .descriptors import fill_descriptors
-from .lookup import Catalog
+from .lookup import Catalog, _identity
 from .tags import set_tag, split_values
 
 
@@ -28,6 +28,8 @@ class IngestionCancelled(RuntimeError):
     pass
 
 
+# A catalog match renames a track only at the same length; remixes run longer or shorter.
+SAME_LENGTH_SECONDS = 5
 # A full album, live set or mix in one file has no single tempo or key.
 MAX_ANALYSIS_SECONDS = 20 * 60
 # DJ mixes and live sets have no single tempo or key worth tagging.
@@ -284,10 +286,6 @@ class Ingestor:
                     media.title = source.stem
                 if not media.artist and len(paths) == 1 and not _preserve_tags:
                     media.artist = candidate.get('artist') or candidate.get('requested_artist') or ''
-                if candidate.get('source') == 'youtube' and len(paths) == 1 and not media.album and not _preserve_tags:
-                    # Uploads rarely declare an album; without one Navidrome lists the file
-                    # under Unknown Album, so treat it as a single named after its title.
-                    media.album = media.title
                 duration = float(stream.get('duration') or probe['format'].get('duration') or 0)
                 analysis_note = None
                 if not _preserve_tags:
@@ -313,6 +311,11 @@ class Ingestor:
                                                 lambda: _decode(work, SAMPLE_RATE, cancelled),
                                                 analyze_audio=duration <= MAX_ANALYSIS_SECONDS)
                     estimates.update(found)
+                    estimates.update(self._fill_release(media))
+                if candidate.get('source') == 'youtube' and len(paths) == 1 and not media.album and not _preserve_tags:
+                    # Uploads rarely declare an album; without one Navidrome lists the file
+                    # under Unknown Album, so treat it as a single named after its title.
+                    media.album = media.title
                 media.save()
                 check()
                 item = Item.from_path(str(work))
@@ -348,6 +351,21 @@ class Ingestor:
                 _json(manifest_path, manifest)
                 results.append(record)
             return results
+
+    def _fill_release(self, media):
+        """Fill a missing album and cover art from MusicBrainz and the Cover Art Archive."""
+        release = getattr(self.catalog, 'release', None)
+        if not release or not media.artist or not media.title or (media.album and media.art):
+            return {}
+        found = release(media.artist, media.title, media.album or None, need_cover=not media.art) or {}
+        sources = {}
+        if found.get('album') and not media.album:
+            media.album = found['album']
+            sources['album'] = 'musicbrainz-release'
+        if found.get('cover') and not media.art:
+            media.images = [Image(found['cover'], desc='', type=ImageType.front)]
+            sources['cover'] = 'cover-art-archive'
+        return sources
 
     def prepare(self, paths, candidate, job_id, progress=lambda *args: None, cancelled=lambda: False, skipped=None):
         """Prepare tagged copies privately; publication requires publish()."""
@@ -388,9 +406,26 @@ class Ingestor:
                 record['catalog_matches'] = matches
                 if warning:
                     record['warnings'].append(warning)
-                if matches:
-                    best = matches[0]
-                    record['warnings'].append(f"Catalog suggests {best.get('artist')} / {best.get('title')} ({best.get('recommendation')} match). Confirm version before changing existing tags.")
+                best = matches[0] if matches else {}
+                # MusicBrainz names the track, but only when it is the same recording: an
+                # unlisted remix matches its original strongly yet runs a different length.
+                same_length = bool(best.get('length') and record.get('duration')
+                                   and abs(best['length'] - record['duration']) <= SAME_LENGTH_SECONDS)
+                changed = {field: best[field] for field in ('artist', 'title')
+                           if best.get('recommendation') == 'strong' and same_length and best.get(field)
+                           and _identity(best[field]) != _identity(record.get(field))}
+                if changed:
+                    # A strong MusicBrainz match names the track; the file's own spelling is kept for reference.
+                    media = MediaFile(record['path'])
+                    for field, value in changed.items():
+                        setattr(media, field, value)
+                    media.save()
+                    record['catalog_applied'] = {field: record.get(field) for field in changed}
+                    record.update(changed)
+                    record['proposed_tags'].update(changed)
+                    record['analysis_source'] = {**(record.get('analysis_source') or {}), **{field: 'musicbrainz-match' for field in changed}}
+                    record['warnings'].append('Named from MusicBrainz; the file said ' + ' / '.join(
+                        str(record['catalog_applied'][field]) for field in changed) + '.')
             record['prepared_path'] = record['path']
             record['duplicate'] = False
             record['audio_sha256'] = record.get('audio_sha256') or _audio_hash(Path(record['source_path']), cancelled)
@@ -474,6 +509,60 @@ class Ingestor:
             _json(Path(published['path']).with_name(Path(published['path']).name + '.provenance.json'), published)
             results.append(published)
         return results
+
+    def retire(self, path, trash):
+        """Move a library file and its provenance to trash, out of beets and the audio index.
+
+        Used by Replace and Undo; restore() puts the file back.
+        """
+        path = Path(path).resolve()
+        if not path.is_relative_to(self.library) or not path.is_file():
+            raise ValueError('Only files inside the library can be removed')
+        target = Path(trash) / path.relative_to(self.library)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.state / 'publish.lock', 'a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            database = Library(str(self.beets_path), directory=str(self.library))
+            for item in database.items():
+                if item.path == os.fsencode(path):
+                    item.remove()
+            shutil.move(str(path), str(target))
+            sidecar = path.with_name(path.name + '.provenance.json')
+            if sidecar.exists():
+                shutil.move(str(sidecar), str(target.with_name(target.name + '.provenance.json')))
+            with _audio_index_lock:
+                index_path = self.state / 'audio-index.json'
+                try:
+                    index = json.loads(index_path.read_text())
+                except (OSError, ValueError):
+                    index = {}
+                if index.pop(str(path), None) is not None:
+                    _json(index_path, index)
+            parent = path.parent
+            while parent != self.library and parent.is_relative_to(self.library):
+                try:
+                    parent.rmdir()
+                except OSError:
+                    break
+                parent = parent.parent
+        return {'path': str(path), 'trash': str(target)}
+
+    def restore(self, entry):
+        """Put a retired file back where it was."""
+        path, target = Path(entry['path']), Path(entry['trash'])
+        if path.exists() or not target.is_file():
+            raise RuntimeError(f'Cannot restore {path.name}: the place is taken or the copy is gone')
+        if not path.resolve().is_relative_to(self.library):
+            raise ValueError('Restore target escapes the library')
+        with open(self.state / 'publish.lock', 'a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            sidecar = target.with_name(target.name + '.provenance.json')
+            if sidecar.exists():
+                shutil.move(str(sidecar), str(path.with_name(path.name + '.provenance.json')))
+            shutil.move(str(target), str(path))
+            self._register(Library(str(self.beets_path), directory=str(self.library)), path)
+        return str(path)
 
     def _find_existing_audio(self, digest, cancelled, progress=lambda *args: None):
         # Workers share one index file; serialize so their cache updates are not lost.

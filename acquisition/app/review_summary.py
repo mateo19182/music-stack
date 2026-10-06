@@ -11,7 +11,8 @@ def positive(value):
         return None
 
 
-def summarize(job, files):
+def summarize(job, files, per_track=True):
+    """Album-level concerns. Without per_track, track issues are left to each file's own plan."""
     concerns, notes = [], []
     if not files:
         concerns.append('No prepared tracks are available.')
@@ -32,19 +33,19 @@ def summarize(job, files):
     result = result or {}
     by_id = {entry.get('id'): entry for entry in result.get('files', [])}
     duplicate_count = sum(bool(f.get('duplicate') or f.get('duplicate_of')) for f in files)
-    if duplicate_count:
+    if duplicate_count and per_track:
         concerns.append(f'{duplicate_count} identical track(s) already in the library. Adding them reuses the existing audio and tags.')
     possible = sum(bool(f.get('possible_duplicates')) for f in files)
-    if possible:
+    if possible and per_track:
         concerns.append(f'{possible} track(s) have another library version. Compare the recordings.')
     warnings = []
     for file in files:
         innocuous = set(by_id.get(file.get('id'), {}).get('innocuous_warnings', []))
         warnings.extend(w for w in file.get('warnings', []) if w not in innocuous)
-        for field in ('artist', 'title'):
+        for field in ('artist', 'title') if per_track else ():
             if not str((file.get('proposed') or {}).get(field) or file.get(field) or '').strip():
                 concerns.append(f'Missing {field} on {file.get("title") or file.get("filename") or "a track"}.')
-    if warnings:
+    if warnings and per_track:
         concerns.append(f'{len(warnings)} metadata concern(s). Check the affected tracks below.')
     if result.get('status') == 'check':
         concerns.append(result.get('summary') or 'AI advice suggests checking the metadata.')

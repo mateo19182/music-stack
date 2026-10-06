@@ -55,20 +55,57 @@ def _top_genres(entity):
     return genres([g['name'] for g in ranked if int(g.get('count') or 0) > 0][:2])
 
 
-def musicbrainz(client, artist, title, need_genre=True):
+def recordings(client, artist, title):
+    """MusicBrainz recordings whose title and artist match exactly."""
+    with _musicbrainz:
+        response = client.get('https://musicbrainz.org/ws/2/recording', params={
+            'query': f'artist:"{artist}" AND recording:"{title}"', 'fmt': 'json', 'limit': 5})
+    response.raise_for_status()
+    return [recording for recording in response.json().get('recordings', [])
+            if recording.get('score', 0) >= 95
+            and _identity(recording.get('title')) == _identity(title)
+            and any(_artist_matches(artist, credit.get('name')) for credit in recording.get('artist-credit', []))]
+
+
+def release(matches, album=None):
+    """The release a recording belongs to: the named album if given, else its earliest official album, EP or single."""
+    rank = {'Album': 0, 'EP': 1, 'Single': 2}
+    found = []
+    for recording in matches:
+        for entry in recording.get('releases') or []:
+            group = entry.get('release-group') or {}
+            if album:
+                if _identity(entry.get('title')) == _identity(album) and group.get('id'):
+                    found.append((0, entry.get('date') or '9999', entry))
+            elif (entry.get('status') == 'Official' and not group.get('secondary-types')
+                  and group.get('primary-type') in rank and group.get('id')):
+                found.append((rank[group['primary-type']], entry.get('date') or '9999', entry))
+    if not found:
+        return None
+    entry = min(found, key=lambda item: item[:2])[2]
+    return {'album': entry.get('title'), 'release_group': entry['release-group']['id']}
+
+
+def cover_art(client, release_group):
+    """Front cover from the Cover Art Archive, or None."""
+    response = client.get(f'https://coverartarchive.org/release-group/{release_group}/front-500', follow_redirects=True)
+    if response.status_code == 404:
+        return None
+    response.raise_for_status()
+    kind = response.headers.get('content-type', '')
+    if not kind.startswith('image/') or len(response.content) > 5_000_000:
+        return None
+    return response.content
+
+
+def musicbrainz(client, artist, title, need_genre=True, matches=None):
     """Original release year and genres from MusicBrainz.
 
     Only exact title and artist matches count. Genres come from the recording,
     or from the artist when nobody has voted on the recording.
     """
-    with _musicbrainz:
-        response = client.get('https://musicbrainz.org/ws/2/recording', params={
-            'query': f'artist:"{artist}" AND recording:"{title}"', 'fmt': 'json', 'limit': 5})
-    response.raise_for_status()
-    matches = [recording for recording in response.json().get('recordings', [])
-               if recording.get('score', 0) >= 95
-               and _identity(recording.get('title')) == _identity(title)
-               and any(_artist_matches(artist, credit.get('name')) for credit in recording.get('artist-credit', []))]
+    if matches is None:
+        matches = recordings(client, artist, title)
     year = min((y for y in (_year(r.get('first-release-date')) for r in matches) if y), default=None)
     found = []
     if need_genre and matches:
@@ -121,6 +158,34 @@ class Catalog:
         self.lastfm_key = config.get('lastfm_api_key') or ''
         self.enabled = bool(config.get('catalog_matching', True))
         self.cache = {}
+        self.searches = {}
+
+    def _recordings(self, client, artist, title, attempt):
+        key = (_identity(artist), _identity(title))
+        if key not in self.searches:
+            self.searches[key] = attempt('MusicBrainz', lambda: recordings(client, artist, title)) or []
+        return self.searches[key]
+
+    def release(self, artist, title, album=None, need_cover=False):
+        """{'album', 'release_group', 'cover'} for the track's release, or {} when nothing matches.
+
+        With an album the cover must come from a release of that name; without one,
+        the earliest official album, EP or single is used.
+        """
+        if not self.enabled or not artist or not title:
+            return {}
+        with httpx.Client(headers={'User-Agent': USER_AGENT}, timeout=10) as client:
+            def attempt(name, call):
+                try:
+                    return call()
+                except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+                    log.info('%s lookup failed for %s - %s: %s', name, artist, title, exc)
+                    return None
+
+            found = release(self._recordings(client, artist, title, attempt), album) or {}
+            if found and need_cover:
+                found['cover'] = attempt('Cover Art Archive', lambda: cover_art(client, found['release_group']))
+        return found
 
     def lookup(self, artist, title, need_genre=True, need_year=True):
         """Return {'genre': [...], 'year': int, 'sources': {...}} with whatever was found."""
@@ -143,7 +208,8 @@ class Catalog:
                     log.info('%s lookup failed for %s - %s: %s', name, artist, title, exc)
                     return None
 
-            year, names = attempt('MusicBrainz', lambda: musicbrainz(client, artist, title, need_genre)) or (None, [])
+            matches = self._recordings(client, artist, title, attempt)
+            year, names = attempt('MusicBrainz', lambda: musicbrainz(client, artist, title, need_genre, matches)) or (None, [])
             if need_year:
                 found('year', year, 'musicbrainz-first-release')
             if need_genre:

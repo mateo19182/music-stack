@@ -13,6 +13,8 @@ def respond(monkeypatch):
     def handler(request):
         seen.append(request)
         body = routes.get(request.url.path, routes.get(request.url.host, {}))
+        if isinstance(body, bytes):
+            return httpx.Response(200, content=body, headers={'content-type': 'image/jpeg'})
         return httpx.Response(routes.get('status', 200), json=body)
 
     real = httpx.Client
@@ -65,3 +67,25 @@ def test_musicbrainz_genres_win_over_discogs(respond):
     assert found == {'year': 1994, 'genre': ['Hip Hop', 'Boom Bap'],
                      'sources': {'year': 'musicbrainz-first-release', 'genre': 'musicbrainz'}}
     assert all(r.url.host == 'musicbrainz.org' for r in seen)
+
+
+def release_entry(id, title, kind='Album', date='2010', status='Official', secondary=()):
+    return {'title': title, 'date': date, 'status': status,
+            'release-group': {'id': id, 'primary-type': kind, 'secondary-types': list(secondary)}}
+
+
+def test_release_fills_the_earliest_official_album_and_its_cover(respond):
+    routes, seen = respond
+    routes['musicbrainz.org'] = {'recordings': [{'id': 'rec', 'score': 100, 'title': 'Song',
+                                 'artist-credit': [{'name': 'Artist'}], 'releases': [
+        release_entry('hits', 'Greatest Hits', date='2001', secondary=['Compilation']),
+        release_entry('single', 'Song', kind='Single', date='1998'),
+        release_entry('lp', 'The Album', date='1999'),
+        release_entry('bootleg', 'Bootleg', date='1990', status='Bootleg')]}]}
+    routes['/release-group/lp/front-500'] = b'jpeg'
+    catalog = lookup.Catalog({})
+    assert catalog.release('Artist', 'Song', need_cover=True) == {'album': 'The Album', 'release_group': 'lp', 'cover': b'jpeg'}
+    # A file that names its album only takes that release's cover; one search serves both lookups.
+    assert catalog.release('Artist', 'Song', 'Song') == {'album': 'Song', 'release_group': 'single'}
+    assert catalog.release('Artist', 'Song', 'Unknown Mixtape', need_cover=True) == {}
+    assert sum(r.url.host == 'musicbrainz.org' for r in seen) == 1

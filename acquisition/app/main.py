@@ -24,6 +24,7 @@ from .audio_models import models_at
 from .sharing import Sharing
 from .llm_review import Reviewer, ReviewError
 from .review_summary import summarize
+from .review_questions import plan as review_plan
 
 log = logging.getLogger("acquisition")
 CONFIG_PATH = Path(os.environ.get("ACQUISITION_CONFIG", "/state/config.json"))
@@ -83,6 +84,17 @@ class Approval(BaseModel):
     selected_file_ids: list[str] | None = Field(default=None, max_length=500)
     # Tracks to leave in Review as a separate download instead of keeping them privately.
     later_file_ids: list[str] | None = Field(default=None, max_length=500)
+    # Prepared file id -> ids of library versions to retire once it is published.
+    replace: dict[str, list[str]] | None = None
+
+
+class FileChoice(BaseModel):
+    file_ids: list[str] | None = Field(default=None, max_length=500)
+
+
+class AutoAdd(BaseModel):
+    search: bool
+    imports: bool = Field(alias="import")
 
 
 class SharingConfig(BaseModel):
@@ -238,6 +250,8 @@ def file_view(record):
         {
             **{k: v for k, v in duplicate.items() if k != "path"},
             "id": hashlib.sha256(str(duplicate["path"]).encode()).hexdigest()[:32],
+            # Replace only ever retires files the app manages, never legacy roots.
+            "replaceable": Path(duplicate["path"]).resolve().is_relative_to(LIBRARY),
         }
         if duplicate.get("path")
         else duplicate
@@ -305,7 +319,11 @@ def job_view(job):
     if source_url:
         result["request"]["source_url"] = source_url
     if job.get("stage") == "review":
-        result["review_summary"] = summarize(job, result["files"])
+        for raw, view in zip(files, result["files"]):
+            view["plan"] = review_plan({**raw, "possible_duplicates": view["possible_duplicates"]}, len(files))
+        result["review_summary"] = summarize(job, result["files"], per_track=False)
+        if any(view["plan"]["action"] == "ask" for view in result["files"]):
+            result["review_summary"].update(status="check", label="Check before approving")
     return result
 
 
@@ -634,6 +652,10 @@ def worker(stages=("queued", "process_queued", "publish_queued")):
                     detail="Check the audio and metadata before publishing",
                     progress=100,
                 )
+                try:
+                    auto_add(id)
+                except Exception:
+                    log.exception("Automatic adding failed for job %s; it stays in Review", id)
             else:
                 prepared = job["prepared"]
                 if job.get("selected_paths") is not None:
@@ -644,6 +666,8 @@ def worker(stages=("queued", "process_queued", "publish_queued")):
                     prepared, job.get("edits", {}), id, progress, cancelled
                 )
                 register_files(records, job, True)
+                if job.get("replace"):
+                    retire_versions(ingestor, job)
                 with store.db() as db:
                     db.execute(
                         "DELETE FROM files WHERE job_id=? AND published=0", (id,)
@@ -696,6 +720,23 @@ def worker(stages=("queued", "process_queued", "publish_queued")):
                 error=message,
                 detail="Files and progress retained",
             )
+
+
+def retire_versions(ingestor, job):
+    """Move library versions replaced by this job to trash, where Undo can restore them."""
+    trash = STATE / "trash" / job["id"]
+    replaced = list(job.get("replaced", []))
+    done = {entry["path"] for entry in replaced}
+    for path in dict.fromkeys(p for paths in job["replace"].values() for p in paths):
+        if path in done or not Path(path).is_file():
+            continue
+        with library_lock:
+            replaced.append(ingestor.retire(path, trash))
+            with store.db() as db:
+                db.execute("DELETE FROM files WHERE path=? AND published=1", (str(Path(path).resolve()),))
+        store.update_job(job["id"], replaced=replaced)
+    sharing.reconcile()
+    return replaced
 
 
 def advice_payload(job):
@@ -1312,23 +1353,172 @@ def approve(id: str, body: Approval, user=Depends(check_user)):
             }
             for r in records if r["id"] in selected
         }
+    replace = {}
+    for file_id, library_ids in (body.replace or {}).items():
+        if file_id not in selected:
+            raise HTTPException(400, "Only approved tracks can replace library versions")
+        versions = {hashlib.sha256(str(v["path"]).encode()).hexdigest()[:32]: v["path"]
+                    for v in allowed[file_id].get("possible_duplicates", []) if v.get("path")}
+        if set(library_ids) - set(versions) or not all(Path(versions[i]).resolve().is_relative_to(LIBRARY) for i in library_ids):
+            raise HTTPException(400, "Only library versions of that track can be replaced")
+        replace[allowed[file_id]["path"]] = [versions[i] for i in library_ids]
+    approved_by = f"agent:{user.get('name')}" if user.get("kind") == "agent" else user["username"]
+    later_id = publish_selection(job, records, selected, later, edits, approved_by, replace)
+    if later_id is False:
+        raise HTTPException(409, "Review was already handled")
+    return {"ok": True, "later_job_id": later_id}
+
+
+def publish_selection(job, records, selected, later, edits, approved_by, replace=None, detail="Approved; waiting for publication"):
+    """Queue the selected tracks for publication; later ones get their own review.
+
+    Returns the new review's id, None without one, or False when the review was already handled.
+    """
     # Move the later tracks first, so publication never deletes them as unselected.
-    later_id = split_review(job, [allowed[i] for i in later]) if later else None
+    later_id = split_review(job, [r for r in records if r["id"] in later]) if later else None
     if not store.transition_job(
-        id,
+        job["id"],
         {"review"},
         "publish_queued",
         edits=edits,
         selected_paths=[r["path"] for r in records if r["id"] in selected],
-        skipped_count=len(allowed) - len(selected) - len(later),
-        detail="Approved; waiting for publication",
-        approved_by=f"agent:{user.get('name')}" if user.get("kind") == "agent" else user["username"],
+        skipped_count=len(records) - len(selected) - len(later),
+        replace=replace or {},
+        detail=detail,
+        approved_by=approved_by,
         progress=0,
     ):
         if later_id:
-            undo_split(id, later_id)
+            undo_split(job["id"], later_id)
+        return False
+    return later_id
+
+
+@app.post("/api/jobs/{id}/skip")
+def skip_tracks(id: str, body: FileChoice, user=Depends(check_user)):
+    """Leave some tracks out for good; they stay privately in the retained download."""
+    require_manual(user)
+    job = owned_job(id, user)
+    if job["stage"] != "review":
+        raise HTTPException(409, "Job is not awaiting review")
+    records = store.list("files", "job_id=? AND published=0", (id,))
+    chosen = set(body.file_ids or [])
+    if not chosen or chosen - {r["id"] for r in records}:
+        raise HTTPException(400, "Choose tracks belonging to this review")
+    target = id if chosen == {r["id"] for r in records} else split_review(job, [r for r in records if r["id"] in chosen])
+    if not store.transition_job(target, {"review"}, "rejected", detail="Skipped in review; source files retained"):
         raise HTTPException(409, "Review was already handled")
-    return {"ok": True, "later_job_id": later_id}
+    return {"ok": True}
+
+
+@app.post("/api/jobs/{id}/undo")
+def undo(id: str, body: FileChoice, user=Depends(check_user)):
+    """Take added tracks back out of the library and return them to Review.
+
+    Files the job created go to trash; library versions it replaced come back.
+    Identical copies that were already in the library are left alone.
+    """
+    require_manual(user)
+    job = owned_job(id, user)
+    if job["stage"] != "published":
+        raise HTTPException(409, "Only added downloads can be undone")
+    published = store.list("files", "job_id=? AND published=1", (id,))
+    chosen = [r for r in published if body.file_ids is None or r["id"] in body.file_ids]
+    if not chosen:
+        raise HTTPException(400, "Choose tracks this download added")
+    ingestor = Ingestor(config)
+    prepared = {p.get("original_sha256"): p for p in job.get("prepared", [])}
+    back, trash = [], STATE / "trash" / f"undo-{uid()}"
+    with library_lock:
+        for record in chosen:
+            if not record.get("duplicate") and Path(record["path"]).is_file():
+                ingestor.retire(record["path"], trash)
+                with store.db() as db:
+                    db.execute("DELETE FROM files WHERE id=?", (record["id"],))
+            entry = prepared.get(record.get("original_sha256"))
+            if entry and Path(entry.get("prepared_path") or entry["path"]).is_file():
+                back.append(entry)
+    remaining = [r["id"] for r in published if r not in chosen]
+    restored = []
+    if not remaining:
+        for entry in job.get("replaced", []):
+            try:
+                restored.append(ingestor.restore(entry))
+            except (RuntimeError, ValueError, OSError) as error:
+                log.warning("Could not restore %s: %s", entry.get("path"), error)
+    review_id = None
+    if back:
+        review_id = uid()
+        data = {k: v for k, v in job.items() if k not in {
+            "id", "owner", "stage", "created_at", "edits", "selected_paths", "skipped_count", "approved_by",
+            "advice", "published_file_ids", "replace", "replaced", "auto_skipped"}}
+        data.update(prepared=back, detail="Taken back out of the library", undone_from=id)
+        store.put("jobs", review_id, data, owner=job["owner"], stage="review", created_at=job.get("created_at") or now())
+        register_files(back, store.get("jobs", review_id), False)
+    store.update_job(id, stage="published" if remaining else "undone", published_file_ids=remaining,
+                     replaced=[] if not remaining else job.get("replaced", []),
+                     detail=f"{len(chosen)} track(s) taken back to Review" + (f"; {len(restored)} replaced version(s) restored" if restored else ""))
+    sharing.reconcile()
+    request_scan("Undone")
+    return {"ok": True, "review_job_id": review_id, "restored": len(restored)}
+
+
+AUTO_ADD = STATE / "auto-add.json"
+
+
+def auto_add_settings(username):
+    try:
+        saved = json.loads(AUTO_ADD.read_text()).get(username, {})
+    except (OSError, ValueError):
+        saved = {}
+    return {"search": bool(saved.get("search")), "import": bool(saved.get("import"))}
+
+
+@app.get("/api/settings/auto-add")
+def get_auto_add(user=Depends(check_user)):
+    return auto_add_settings(user["username"])
+
+
+@app.post("/api/settings/auto-add")
+def set_auto_add(body: AutoAdd, user=Depends(check_user)):
+    # Turning this on is the owner's standing approval; agents can never change it.
+    require_manual(user)
+    try:
+        saved = json.loads(AUTO_ADD.read_text())
+    except (OSError, ValueError):
+        saved = {}
+    saved[user["username"]] = {"search": body.search, "import": body.imports}
+    temporary = AUTO_ADD.with_name(AUTO_ADD.name + ".tmp")
+    temporary.write_text(json.dumps(saved, indent=2))
+    os.replace(temporary, AUTO_ADD)
+    return auto_add_settings(user["username"])
+
+
+def auto_add(id):
+    """Publish the tracks of a fresh review that need no decision, if the owner turned that on.
+
+    Identical copies and equal or worse copies of library tracks are left out; clearly
+    better copies replace them; tracks with questions stay in Review.
+    """
+    job = store.get("jobs", id)
+    if not job or job["stage"] != "review":
+        return None
+    if not auto_add_settings(job["owner"])["import" if job.get("source") == "existing" else "search"]:
+        return None
+    records = store.list("files", "job_id=? AND published=0", (id,))
+    plans = {r["id"]: review_plan({**r, "possible_duplicates": [
+        {**v, "replaceable": Path(v["path"]).resolve().is_relative_to(LIBRARY)} if v.get("path") else v
+        for v in r.get("possible_duplicates", [])]}, len(records)) for r in records}
+    selected = {i for i, p in plans.items() if p["action"] in {"add", "replace"}}
+    later = {i for i, p in plans.items() if p["action"] == "ask"}
+    if not selected:
+        if not later:
+            store.transition_job(id, {"review"}, "rejected", detail="Nothing new: every track is already in your library", auto_skipped=True)
+        return None
+    replace = {r["path"]: [v["path"] for v in r.get("possible_duplicates", []) if v.get("path")]
+               for r in records if plans[r["id"]]["action"] == "replace"}
+    return publish_selection(job, records, selected, later, {}, "auto", replace,
+                             detail="Added automatically; nothing needed checking")
 
 
 def split_review(job, records):
@@ -1337,7 +1527,7 @@ def split_review(job, records):
     paths = {str(Path(r["path"]).resolve()) for r in records}
     data = {k: v for k, v in job.items() if k not in {
         "id", "owner", "stage", "created_at", "edits", "selected_paths", "skipped_count", "approved_by",
-        "advice", "skipped_files", "published_file_ids"}}
+        "advice", "skipped_files", "published_file_ids", "replace", "replaced", "auto_skipped"}}
     data.update(
         prepared=[p for p in job.get("prepared", []) if str(Path(p["path"]).resolve()) in paths],
         prepared_file_ids=[r["id"] for r in records],

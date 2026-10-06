@@ -33,18 +33,24 @@ SoundCloud, Bandcamp and Vimeo URLs are supported.
 2. Choose a source and queue it. Independent workers download, prepare private
    copies, and hold them for review. Remote Soulseek queues and failures explain
    what is happening. Retries retain completed downloads and partial files.
-3. In Queue, start with “Ready to approve” or the specific concerns shown first.
-   Album checks flag source-count differences, missing/repeated track numbers,
-   missing discs, inconsistent album tags and mixed recording-version labels.
-   Embedded totals can confirm numbering, but album editions remain unverified.
-   Listen and compare duplicates. Edit individual tags or apply artist,
-   album and genre to selected album tracks. Original tags stay available in a
-   collapsed panel. Exact duplicates reuse the existing library file and its tags.
-4. OpenRouter's Muse Spark 1.3 Contributor gives metadata-only advice and optional tag
-   suggestions. Use suggested tags fills the form; it does not publish anything.
-   Minor notes can be collapsed. Human approval is always required. Provider
-   errors leave manual review available.
-5. Add selected tracks to the library. Unchecked tracks remain private. Navidrome
+3. Preparation fills what it can: BPM, key, genre, year and mood, plus a missing
+   album and cover art from MusicBrainz and the Cover Art Archive. A strong
+   MusicBrainz match renames the track only when the recording length agrees
+   within 5 seconds, so unlisted remixes keep their own names. Identical copies
+   of library tracks are skipped. A copy of the same recording that is clearly
+   better (lossless over lossy, or at least 25% higher bitrate) replaces the
+   library version, which moves to a trash folder; an equal or worse copy is skipped.
+4. With automatic adding on (Queue, separately for searches/links and inbox
+   imports), tracks with nothing to decide go straight into the library.
+   **Needs you** then holds only questions, each with one-click answers:
+   - a missing artist or title
+   - a file that names a different song than the one searched for
+   - one recording over 20 minutes
+   - a library version that may be a different recording
+   **Recently added** lists the last week's additions. **Undo** takes tracks back
+   to Review and restores any version they replaced. Albums, mixed inbox batches,
+   filters, tag editing and OpenRouter advice still work as before.
+5. Added tracks are published. Tracks left out stay in Review; skipped ones remain private. Navidrome
    scans the accepted library, and the Soulseek share tree gets managed audio
    links. Everything accepted is shared by default; admins can exclude tracks or
    pause all sharing.

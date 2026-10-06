@@ -337,3 +337,33 @@ def test_library_analysis_skips_bpm_and_key_over_limit(tmp_path, monkeypatch):
     changes, sources, note = library_tags.analyze_file(source)
     assert note == 'long-recording'
     assert 'bpm' not in changes and 'key' not in changes
+
+
+def test_strong_catalog_match_names_the_track_only_at_the_same_length(tmp_path, monkeypatch):
+    for length, title in ((3.5, 'Song'), (240.0, 'Song (Club Remix)')):
+        source = audio(tmp_path, name=f'{length}.mp3')
+        pipeline = Ingestor({'state_root': str(tmp_path / f'state{length}'), 'library_root': str(tmp_path / f'library{length}'), 'catalog_matching': True})
+        monkeypatch.setattr('app.ingestion._catalog', lambda *_: ([{'title': 'Song', 'artist': 'Artist', 'recommendation': 'strong', 'length': length}], None))
+        prepared = pipeline.prepare([source], {}, f'named{length}')[0]
+        assert prepared['title'] == title and prepared['proposed_tags']['title'] == title
+        assert MediaFile(prepared['path']).title == title
+        assert MediaFile(str(source)).title == 'Song (Club Remix)'
+        if title == 'Song':
+            assert prepared['catalog_applied'] == {'title': 'Song (Club Remix)'}
+            assert prepared['analysis_source']['title'] == 'musicbrainz-match'
+
+
+def test_retire_and_restore_move_a_library_file_and_its_provenance(tmp_path):
+    pipeline = ingestor(tmp_path)
+    published = Path(pipeline.process([audio(tmp_path)], {}, 'job')[0]['path'])
+    sidecar = published.with_name(published.name + '.provenance.json')
+    entry = pipeline.retire(published, tmp_path / 'trash')
+    assert not published.exists() and not sidecar.exists() and not published.parent.exists()
+    assert Path(entry['trash']).is_file()
+    assert pipeline.restore(entry) == str(published)
+    assert published.is_file() and sidecar.is_file()
+    try:
+        pipeline.retire(tmp_path / 'outside.mp3', tmp_path / 'trash')
+        raise AssertionError('retire must refuse files outside the library')
+    except ValueError:
+        pass

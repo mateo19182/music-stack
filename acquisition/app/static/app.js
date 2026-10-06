@@ -89,7 +89,8 @@ function loginView() {
   state.searchFormat = "";
   state.searchQuality = "";
   state.jobs = [];
-  for (const id of ["results", "jobs", "reviews", "library"])
+  for (const key of Object.keys(answers)) delete answers[key];
+  for (const id of ["results", "jobs", "reviews", "recent", "library"])
     $(`#${id}`).innerHTML = "";
   $("#app").hidden = true;
   $("#login-view").hidden = false;
@@ -312,15 +313,51 @@ async function loadJobs() {
       ($("#show-history").checked ||
         !["published", "rejected", "cancelled"].includes(j.stage)),
   );
+  renderRecent();
   $("#jobs").innerHTML = visibleJobs.length
     ? visibleJobs
         .map(
           (j) =>
-            `<article class="card"><div class="card-head"><div><span class="badge ${esc(j.stage)}">${esc({ process_queued: "Waiting to process", publish_queued: "Waiting to publish", review: "Ready for review", published: "In library", queued: "Queued" }[j.stage] || j.stage.replaceAll("_", " "))}</span><h3>${esc(jobTitle(j))}</h3>${meta([sourceLabel(j.source), j.created_at ? new Date(j.created_at).toLocaleString() : ""])}</div></div>${["queued", "downloading", "process_queued", "processing", "publish_queued", "publishing"].includes(j.stage) ? `<progress ${Number.isFinite(Number(j.progress)) && j.progress != null ? `value="${Math.max(0, Math.min(100, Number(j.progress)))}" max="100"` : ""}></progress>` : ""}${j.detail ? `<p class="muted">${esc(typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail))}</p>` : ""}${j.error ? `<p class="error">${esc(j.error)}</p><p class="muted">${esc(j.resume_stage === "publishing" ? "Retry adding to the library. Your approved edits are saved." : j.failed_stage === "processing" || j.source === "existing" ? "The download is saved. Retry processing without downloading again." : "Retry this source to resume. If the uploader is unavailable, search for another copy.")}</p>` : ""}<div class="actions">${j.stage === "review" ? `<button data-tab="review">Review download</button>` : ["failed", "cancelled"].includes(j.stage) ? `<button data-retry="${esc(j.id)}" data-stage="${j.resume_stage === "publishing" ? "publishing" : j.failed_stage === "processing" || j.source === "existing" ? "processing" : "download"}">Retry ${j.resume_stage === "publishing" ? "publishing" : j.failed_stage === "processing" || j.source === "existing" ? "processing" : "download"}</button>` : ""}${["queued", "downloading", "process_queued", "processing"].includes(j.stage) ? `<button class="quiet" data-cancel="${esc(j.id)}">Cancel</button>` : ""}</div>${j.stage === "published" && j.skipped_count ? `<p class="muted">${j.skipped_count} unselected track${j.skipped_count === 1 ? "" : "s"} kept privately.</p>` : ""}${j.stage === "published" && (j.files || []).length ? `<details><summary>${j.files.length} published file${j.files.length === 1 ? "" : "s"}</summary>${j.files.map((f) => `<p class="muted">${esc(f.title || f.filename || "Track")}</p><div class="actions">${downloads(f)}</div>`).join("")}</details>` : ""}</article>`,
+            `<article class="card"><div class="card-head"><div><span class="badge ${esc(j.stage)}">${esc({ process_queued: "Waiting to process", publish_queued: "Waiting to publish", review: "Ready for review", published: "In library", queued: "Queued", undone: "Taken back" }[j.stage] || j.stage.replaceAll("_", " "))}</span><h3>${esc(jobTitle(j))}</h3>${meta([sourceLabel(j.source), j.created_at ? new Date(j.created_at).toLocaleString() : ""])}</div></div>${["queued", "downloading", "process_queued", "processing", "publish_queued", "publishing"].includes(j.stage) ? `<progress ${Number.isFinite(Number(j.progress)) && j.progress != null ? `value="${Math.max(0, Math.min(100, Number(j.progress)))}" max="100"` : ""}></progress>` : ""}${j.detail ? `<p class="muted">${esc(typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail))}</p>` : ""}${j.error ? `<p class="error">${esc(j.error)}</p><p class="muted">${esc(j.resume_stage === "publishing" ? "Retry adding to the library. Your approved edits are saved." : j.failed_stage === "processing" || j.source === "existing" ? "The download is saved. Retry processing without downloading again." : "Retry this source to resume. If the uploader is unavailable, search for another copy.")}</p>` : ""}<div class="actions">${j.stage === "review" ? `<button data-tab="review">Review download</button>` : ["failed", "cancelled"].includes(j.stage) ? `<button data-retry="${esc(j.id)}" data-stage="${j.resume_stage === "publishing" ? "publishing" : j.failed_stage === "processing" || j.source === "existing" ? "processing" : "download"}">Retry ${j.resume_stage === "publishing" ? "publishing" : j.failed_stage === "processing" || j.source === "existing" ? "processing" : "download"}</button>` : ""}${["queued", "downloading", "process_queued", "processing"].includes(j.stage) ? `<button class="quiet" data-cancel="${esc(j.id)}">Cancel</button>` : ""}</div>${j.stage === "published" && j.skipped_count ? `<p class="muted">${j.skipped_count} unselected track${j.skipped_count === 1 ? "" : "s"} kept privately.</p>` : ""}${j.stage === "published" && (j.files || []).length ? `<details><summary>${j.files.length} published file${j.files.length === 1 ? "" : "s"}</summary>${j.files.map((f) => `<p class="muted">${esc(f.title || f.filename || "Track")}</p><div class="actions">${downloads(f)}</div>`).join("")}</details>` : ""}</article>`,
         )
         .join("")
     : '<div class="empty">No downloads in progress.</div>';
 }
+const RECENT_DAYS = 7;
+function renderRecent() {
+  const since = Date.now() - RECENT_DAYS * 86400000;
+  const recent = state.jobs.filter(
+    (j) =>
+      (j.stage === "published" || (j.stage === "rejected" && j.auto_skipped)) &&
+      new Date(j.created_at).getTime() >= since,
+  );
+  $("#recent").innerHTML = recent.length
+    ? recent
+        .map((j) => {
+          const files = j.files || [];
+          const how = j.stage === "rejected" ? "Skipped: every track is already in your library" : j.approved_by === "auto" ? "Added automatically" : "Added by you";
+          const replaced = (j.replaced || []).length;
+          return `<article class="recent"><div class="recent-head"><div><strong>${esc(jobTitle(j))}</strong><span class="muted">${esc([how, j.stage === "published" ? `${files.length} track${files.length === 1 ? "" : "s"}` : "", replaced ? `replaced ${replaced} older cop${replaced === 1 ? "y" : "ies"}` : "", new Date(j.created_at).toLocaleDateString(undefined, { day: "numeric", month: "short" })].filter(Boolean).join(" · "))}</span></div>${j.stage === "published" ? `<button class="quiet" data-undo-job="${esc(j.id)}">Undo${files.length > 1 ? " all" : ""}</button>` : ""}</div>${files.length > 1 ? `<details><summary>Show tracks</summary>${files.map((f) => `<div class="recent-track"><span>${esc(f.title || f.filename || "Track")}<span class="muted"> · ${esc(f.artist || "")}</span></span>${playButton(f.id, f.title || "Track", f.artist)}<button class="quiet" data-undo-job="${esc(j.id)}" data-undo-file="${esc(f.id)}">Undo</button></div>`).join("")}</details>` : files.length ? `<div class="recent-track"><span>${esc(files[0].title || files[0].filename || "Track")}<span class="muted"> · ${esc(files[0].artist || "")}</span></span>${playButton(files[0].id, files[0].title || "Track", files[0].artist)}</div>` : ""}</article>`;
+        })
+        .join("")
+    : '<div class="empty">Nothing added in the last week.</div>';
+}
+async function loadAutoAdd() {
+  const settings = await api("/api/settings/auto-add");
+  document.querySelectorAll("[data-auto-add]").forEach((input) => (input.checked = !!settings[input.dataset.autoAdd]));
+}
+document.querySelectorAll("[data-auto-add]").forEach((input) =>
+  input.addEventListener("change", async () => {
+    const body = Object.fromEntries([...document.querySelectorAll("[data-auto-add]")].map((i) => [i.dataset.autoAdd, i.checked]));
+    try {
+      await api("/api/settings/auto-add", body);
+      toast(input.checked ? "New downloads that need nothing from you go straight into the library." : "New downloads wait for you in Needs you.");
+    } catch (error) {
+      input.checked = !input.checked;
+      toast(error.message, true);
+    }
+  }),
+);
 function filterOptions(name, values, invalidCount = 0) {
   const select = $(`#library-form [name="${name}"]`),
     selected = select.value;
@@ -619,6 +656,13 @@ document.addEventListener("click", (e) => {
       await loadReview();
       await loadJobs();
     });
+  else if (button.dataset.undoJob)
+    busy(button, async () => {
+      const result = await api(`/api/jobs/${path(button.dataset.undoJob)}/undo`, button.dataset.undoFile ? { file_ids: [button.dataset.undoFile] } : {});
+      toast(`Taken out of the library and back in Needs you.${result.restored ? " Your replaced version is back." : ""}`);
+      state.reviewSignature = "";
+      await Promise.all([loadJobs(), loadReview()]);
+    });
   else if (button.dataset.preview)
     playQueue([
       {
@@ -682,7 +726,7 @@ async function start() {
   $("#login-view").hidden = true;
   $("#app").hidden = false;
   showTab("search");
-  const results = await Promise.allSettled([loadJobs(), loadReview()]);
+  const results = await Promise.allSettled([loadJobs(), loadReview(), loadAutoAdd()]);
   for (const result of results)
     if (result.status === "rejected") toast(result.reason.message, true);
 }
@@ -729,7 +773,7 @@ async function loadReview() {
   state.reviewSignature = signature;
   $("#reviews").innerHTML = state.reviews.length
     ? state.reviews.map(renderReviewJob).join("")
-    : '<div class="empty">Nothing ready to add yet.</div>';
+    : '<div class="empty">Nothing needs you right now.</div>';
   for (const job of document.querySelectorAll("[data-review-job]")) {
     updateReviewSelection(job);
     applyReviewFilter(job);
@@ -743,7 +787,45 @@ const trackOpen = {};
 const albumOverrides = {};
 const reviewFilter = {};
 const ALBUM_FIELDS = ["artist", "album", "genre", "year"];
-const STATUS_LABELS = { ready: "Ready", check: "Check", duplicate: "In library" };
+const STATUS_LABELS = { ready: "Ready", check: "Needs you", duplicate: "In library" };
+const answers = {};
+function questionText(q, file) {
+  if (q.kind === "missing")
+    return `This file has no ${q.fields.join(" or ")}. Type ${q.fields.length > 1 ? "them" : "it"} below to add it.`;
+  if (q.kind === "mismatch")
+    return `You searched for “${q.requested}”, but the file says “${q.found}”.`;
+  if (q.kind === "long")
+    return `One ${Math.round(q.duration / 60)}-minute recording, probably a whole album or mix.`;
+  if (q.kind === "version") {
+    const mine = q.library.map((d) => [d.format, d.bitrate ? `${d.bitrate} kbps` : "", duration(d.duration)].filter(Boolean).join(" · ")).join("; ");
+    const theirs = [file.format, file.bitrate ? `${file.bitrate} kbps` : "", duration(file.duration)].filter(Boolean).join(" · ");
+    return `You already have a version of this (${mine}). This one is ${theirs}, so it may be a different recording.`;
+  }
+  return "";
+}
+function questionAnswers(q) {
+  if (q.kind === "missing") return [["add", "Add"]];
+  if (q.kind === "mismatch") return [["add", `Add as “${q.found}”`]];
+  if (q.kind === "long") return [["add", "Add as one track"]];
+  if (q.kind === "version")
+    return [
+      ...(q.library.every((d) => d.replaceable) ? [["replace", "Replace yours"]] : []),
+      ["add", "Keep both"],
+    ];
+  return [["add", "Add"]];
+}
+function renderQuestions(file, review) {
+  const picked = answers[file.id] || {};
+  const yours = review.questions.find((q) => q.kind === "version")?.library || [];
+  return `<div class="questions">${review.questions
+    .map(
+      (q) =>
+        `<div class="question" data-kind="${esc(q.kind)}"><p>${esc(questionText(q, file))}${q.kind === "version" ? yours.filter((d) => d.id).map((d) => ` ${playButton(d.id, [d.title, d.album].filter(Boolean).join(" · ") || "Your version", d.artist, "▶ Play yours")}`).join("") : ""}</p><div class="answers">${questionAnswers(q)
+          .map(([value, label]) => `<button type="button" class="${picked[q.kind] === value ? "" : "quiet"}" data-answer="${value}" data-kind="${esc(q.kind)}">${esc(label)}</button>`)
+          .join("")}<button type="button" class="quiet" data-answer="skip">Skip</button></div></div>`,
+    )
+    .join("")}</div>`;
+}
 function reviewValue(file, name) {
   const value = tagValue(
     state.reviewEdits[file.id]?.[name] ??
@@ -765,6 +847,18 @@ function catalogRecommendation(value) {
 function trackReview(file, advice) {
   const innocuous = new Set(advice?.innocuous_warnings || []);
   const warnings = file.warnings || [];
+  if (file.plan) {
+    // The server decides what is automatic; only its questions need a person.
+    const { action, questions = [], reason } = file.plan;
+    return {
+      status: action === "ask" ? "check" : action === "skip" ? "duplicate" : "ready",
+      questions,
+      skipReason: reason,
+      replaces: action === "replace",
+      reasons: [],
+      notes: warnings,
+    };
+  }
   const reasons = warnings.filter((warning) => !innocuous.has(warning));
   if (advice?.status === "check" && advice.reason) reasons.push(advice.reason);
   if (file.possible_duplicates?.length)
@@ -884,8 +978,9 @@ function renderReviewJob(job) {
   const summary = job.review_summary;
   const status = summary?.status === "check" || counts.check ? "check" : "ready";
   const open = reviewOpen[job.id] ?? state.reviews.length <= 3;
-  const filter = reviewFilter[job.id] || "all";
   const big = files.length > 8;
+  const mixedStatus = multi && counts.check && counts.ready;
+  const filter = reviewFilter[job.id] || (mixedStatus ? "check" : "all");
   const groups = reviewGroups(job, files);
   let index = 0;
   const groupHtml = groups
@@ -906,10 +1001,10 @@ function renderReviewJob(job) {
         .join("")}</div>`;
     })
     .join("");
-  const filters = big
+  const filters = big || mixedStatus
     ? `<div class="review-tools"><button type="button" class="quiet" data-play-all>▶ Play all</button><div class="segmented" role="group" aria-label="Show tracks">${[
         ["all", `All ${files.length}`],
-        ["check", `To check ${counts.check}`],
+        ["check", `Needs you ${counts.check}`],
         ["ready", `Ready ${counts.ready}`],
         ["duplicate", `In library ${counts.duplicate}`],
       ]
@@ -921,7 +1016,7 @@ function renderReviewJob(job) {
       : "";
   const [origin, ...details] = jobOrigin(job);
   const link = job.request?.source_url ? ` <a href="${safeLink(job.request.source_url)}" target="_blank" rel="noopener">Open source ↗</a>` : "";
-  return `<article class="card review-card" data-review-job="${esc(job.id)}"><details class="review-disclosure" ${open ? "open" : ""}><summary><span class="review-title"><strong>${esc(jobTitle(job))}</strong><span class="muted">${esc([origin, ...details, `${files.length} track${multi ? "s" : ""}`].join(" · "))}${link}</span></span>${adviceBadge(job)}<span class="status status-${status}">${status === "check" ? (counts.check ? `${counts.check} to check` : "Check") : "Ready"}</span></summary>${renderConcerns(job, summary)}${filters}<div class="track-list">${groupHtml}</div><div class="review-bar"><label class="checkbox" ${multi ? "" : "hidden"}><input type="checkbox" data-select-all>Include all</label><span class="muted" data-selected-count></span><details class="more-actions"><summary aria-label="More review actions">⋯</summary><div><button class="quiet" data-approve="${esc(job.id)}" data-keep="true">Add with original tags</button>${adviceAction(job)}</div></details><button class="quiet" data-reject="${esc(job.id)}" title="Nothing is added. The download is kept privately.">Reject</button>${multi && counts.check && counts.ready ? `<button class="quiet" data-add-ready>Add ready</button>` : ""}<button data-approve="${esc(job.id)}">Add</button></div></details></article>`;
+  return `<article class="card review-card" data-review-job="${esc(job.id)}" data-default-filter="${esc(filter)}"><details class="review-disclosure" ${open ? "open" : ""}><summary><span class="review-title"><strong>${esc(jobTitle(job))}</strong><span class="muted">${esc([origin, ...details, `${files.length} track${multi ? "s" : ""}`].join(" · "))}${link}</span></span>${adviceBadge(job)}<span class="status status-${status}">${status === "check" ? (counts.check ? `${counts.check} need${counts.check === 1 ? "s" : ""} you` : "Check") : "Ready"}</span></summary>${renderConcerns(job, summary)}${filters}<div class="track-list">${groupHtml}</div><div class="review-bar"><label class="checkbox" ${multi ? "" : "hidden"}><input type="checkbox" data-select-all>Include all</label><span class="muted" data-selected-count></span><details class="more-actions"><summary aria-label="More review actions">⋯</summary><div><button class="quiet" data-approve="${esc(job.id)}" data-keep="true">Add with original tags</button>${adviceAction(job)}</div></details><button class="quiet" data-reject="${esc(job.id)}" title="Nothing is added. The download is kept privately.">Reject</button>${multi && counts.check && counts.ready ? `<button class="quiet" data-add-ready>Add ready</button>` : ""}<button data-approve="${esc(job.id)}">Add</button></div></details></article>`;
 }
 function adviceBadge(job) {
   const advice = job.advice;
@@ -948,7 +1043,9 @@ function renderConcerns(job, summary) {
 }
 function renderReviewFile(file, index, advice, review, multi, big) {
   const selected = reviewSelections[file.id] ?? !(multi && review.status === "duplicate");
-  const open = trackOpen[file.id] ?? ((review.status === "check" && !big) || !multi);
+  const open = trackOpen[file.id] ?? (review.questions
+    ? review.questions.some((q) => q.kind === "missing")
+    : (review.status === "check" && !big) || !multi);
   const originals = file.existing || file.existing_tags || {};
   const title = reviewValue(file, "title") || file.filename || "Track";
   const artist = reviewValue(file, "artist");
@@ -958,7 +1055,7 @@ function renderReviewFile(file, index, advice, review, multi, big) {
   const duplicates = file.possible_duplicates || [];
   const fileDetails = [file.format, file.bitrate ? `${file.bitrate} kbps` : "", duration(file.duration)].filter(Boolean).join(" · ");
   const more = review.reasons.length > 1 ? `+${review.reasons.length - 1} more` : "";
-  return `<section class="review-file ${selected ? "" : "track-unselected"} ${open ? "open" : ""}" data-review-file="${esc(file.id)}" data-status="${review.status}"><div class="track-row"><input type="checkbox" data-select-file="${esc(file.id)}" ${selected ? "checked" : ""} ${multi ? "" : "hidden"} title="Include this track. Tracks left out stay in Review." aria-label="Include ${esc(title)}"><button type="button" class="track-toggle" data-toggle-track aria-expanded="${open}"><span class="track-number">${esc(number)}</span><span class="track-name"><strong data-track-title>${esc(title)}</strong><span class="muted">${esc([artist, fileDetails].filter(Boolean).join(" · "))}</span></span></button>${playButton(file.id, title, artist)}<span class="status status-${review.status}">${STATUS_LABELS[review.status]}</span></div>${review.status === "check" ? `<ul class="track-reasons" data-more="${esc(more)}">${review.reasons.map((reason) => `<li>${esc(reason)}</li>`).join("")}</ul>` : ""}${review.status === "duplicate" ? `<p class="track-note">Same audio as <strong>${esc(typeof file.duplicate_of === "string" ? file.duplicate_of : "a library track")}</strong>. Adding it reuses the existing file and tags.${file.duplicate_file_id ? ` ${playButton(file.duplicate_file_id, file.duplicate_of || "Library version", artist, "▶ Play yours")}` : ""}</p>` : ""}<div class="track-details"><div class="review-fields">${TAG_FIELDS.map((name) => reviewField(file, advice, name, originals)).join("")}</div>${duplicates.length ? `<div class="compare"><div><span class="muted">This download</span><span>${esc(fileDetails || "Unknown format")}</span>${playButton(file.id, title, artist)}</div>${duplicates.map((d) => `<div><span class="muted">In your library</span><span>${esc([d.title, d.album, d.format, d.bitrate ? `${d.bitrate} kbps` : "", duration(d.duration)].filter(Boolean).join(" · "))}</span>${d.id ? playButton(d.id, [d.title, d.album].filter(Boolean).join(" · ") || "Library version", d.artist, "▶ Play yours") : ""}</div>`).join("")}</div>` : ""}<p class="track-foot muted">${esc([file.filename, bytes(file.size), file.analysis_source ? `Analysis: ${analysisLabel(file.analysis_source)}` : "", advice?.status !== "check" ? advice?.reason : "", ...review.notes].filter(Boolean).join(" · "))} <a href="/api/files/${path(file.id)}/download">Download file</a></p></div></section>`;
+  return `<section class="review-file ${selected ? "" : "track-unselected"} ${open ? "open" : ""}" data-review-file="${esc(file.id)}" data-status="${review.status}"><div class="track-row"><input type="checkbox" data-select-file="${esc(file.id)}" ${selected ? "checked" : ""} ${multi ? "" : "hidden"} title="Include this track. Tracks left out stay in Review." aria-label="Include ${esc(title)}"><button type="button" class="track-toggle" data-toggle-track aria-expanded="${open}"><span class="track-number">${esc(number)}</span><span class="track-name"><strong data-track-title>${esc(title)}</strong><span class="muted">${esc([artist, fileDetails].filter(Boolean).join(" · "))}</span></span></button>${playButton(file.id, title, artist)}<span class="status status-${review.status}">${STATUS_LABELS[review.status]}</span></div>${review.questions?.length ? renderQuestions(file, review) : review.status === "check" ? `<ul class="track-reasons" data-more="${esc(more)}">${review.reasons.map((reason) => `<li>${esc(reason)}</li>`).join("")}</ul>` : ""}${review.replaces ? `<p class="track-note">Better quality than the copy in your library, which it replaces. Undo brings yours back.</p>` : ""}${review.skipReason === "not-better" ? `<p class="track-note">You already have this recording at the same or better quality.</p>` : ""}${review.status === "duplicate" && review.skipReason !== "not-better" ? `<p class="track-note">Same audio as <strong>${esc(typeof file.duplicate_of === "string" ? file.duplicate_of : "a library track")}</strong>. Adding it reuses the existing file and tags.${file.duplicate_file_id ? ` ${playButton(file.duplicate_file_id, file.duplicate_of || "Library version", artist, "▶ Play yours")}` : ""}</p>` : ""}<div class="track-details"><div class="review-fields">${TAG_FIELDS.map((name) => reviewField(file, advice, name, originals)).join("")}</div>${duplicates.length ? `<div class="compare"><div><span class="muted">This download</span><span>${esc(fileDetails || "Unknown format")}</span>${playButton(file.id, title, artist)}</div>${duplicates.map((d) => `<div><span class="muted">In your library</span><span>${esc([d.title, d.album, d.format, d.bitrate ? `${d.bitrate} kbps` : "", duration(d.duration)].filter(Boolean).join(" · "))}</span>${d.id ? playButton(d.id, [d.title, d.album].filter(Boolean).join(" · ") || "Library version", d.artist, "▶ Play yours") : ""}</div>`).join("")}</div>` : ""}<p class="track-foot muted">${esc([file.filename, bytes(file.size), file.analysis_source ? `Analysis: ${analysisLabel(file.analysis_source)}` : "", advice?.status !== "check" ? advice?.reason : "", ...review.notes].filter(Boolean).join(" · "))} <a href="/api/files/${path(file.id)}/download">Download file</a></p></div></section>`;
 }
 function updateReviewSelection(container) {
   const inputs = [...container.querySelectorAll("[data-select-file]")];
@@ -992,14 +1089,15 @@ function updateReviewSelection(container) {
   );
 }
 function applyReviewFilter(container) {
-  const filter = reviewFilter[container.dataset.reviewJob] || "all";
+  const filter = reviewFilter[container.dataset.reviewJob] || container.dataset.defaultFilter;
+  container.dataset.filterActive = filter;
   container.querySelectorAll("button[data-filter]").forEach((button) => button.setAttribute("aria-pressed", button.dataset.filter === filter));
   container.querySelectorAll("[data-review-file]").forEach((section) => (section.hidden = filter !== "all" && section.dataset.status !== filter));
   container.querySelectorAll("[data-group]").forEach((group) => (group.hidden = !group.querySelector("[data-review-file]:not([hidden])")));
 }
 // Adds the included tracks in scope (a group, the ready ones, or all). Other
 // tracks stay in Review, except identical library copies that were left out.
-async function approveReview(id, keep, scope) {
+async function approveReview(id, keep, scope, replace) {
   const container = [...document.querySelectorAll("[data-review-job]")].find(
     (el) => el.dataset.reviewJob === id,
   );
@@ -1028,6 +1126,7 @@ async function approveReview(id, keep, scope) {
       files,
       selected_file_ids: files.map((file) => file.id),
       later_file_ids: later,
+      replace,
       keep_existing: keep,
     });
   } catch (error) {
@@ -1068,6 +1167,40 @@ function clearReviewEdits(id, keep = new Set()) {
     id
   )
     document.activeElement.blur();
+}
+// An answer to the last open question adds the track; Skip leaves it out for good.
+function answerQuestion(job, button) {
+  const section = button.closest("[data-review-file]");
+  const id = section.dataset.reviewFile;
+  const jobId = job.dataset.reviewJob;
+  if (button.dataset.answer === "skip")
+    return busy(button, async () => {
+      await api(`/api/jobs/${path(jobId)}/skip`, { file_ids: [id] });
+      toast("Skipped. The file stays privately in the download.");
+      state.reviewSignature = "";
+      document.activeElement?.blur();
+      await loadReview();
+    });
+  const file = state.reviews.flatMap((j) => j.files || []).find((f) => f.id === id);
+  const questions = file?.plan?.questions || [];
+  if (questions.some((q) => q.kind === "missing")) {
+    const empty = ["artist", "title"]
+      .map((name) => section.querySelector(`[data-field="${name}"]`))
+      .find((input) => !input.value.trim());
+    if (empty) {
+      section.classList.add("open");
+      empty.classList.add("invalid");
+      empty.focus();
+      return toast(`Type the ${empty.dataset.field} first.`);
+    }
+  }
+  const picked = (answers[id] ??= {});
+  picked[button.dataset.kind] = button.dataset.answer;
+  button.parentElement.querySelectorAll("[data-answer]").forEach((b) => b.classList.toggle("quiet", b !== button));
+  if (questions.some((q) => !picked[q.kind])) return;
+  const version = questions.find((q) => q.kind === "version");
+  const replace = picked.version === "replace" ? { [id]: version.library.map((d) => d.id) } : undefined;
+  busy(button, () => approveReview(jobId, false, (el) => el === section, replace));
 }
 function syncReviewField(input) {
   const section = input.closest("[data-review-file]");
@@ -1142,6 +1275,7 @@ $("#reviews").addEventListener("click", (e) => {
     playQueue(tracks.map((t) => ({ id: t.preview, title: t.title, artist: t.artist })));
     return;
   }
+  if (button.dataset.answer) return answerQuestion(job, button);
   if (button.hasAttribute("data-add-ready"))
     return busy(button, () => approveReview(jobId, false, (el) => el.dataset.status === "ready"));
   if (button.hasAttribute("data-add-group")) {

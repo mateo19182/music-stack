@@ -390,7 +390,7 @@ def test_review_exposes_guidance_without_changing_decision(backend, monkeypatch)
     seed_review(main)
     job = client.get('/api/review').json()['jobs'][0]
     assert job['review_summary']['label'] == 'Check before approving'
-    assert any('Missing artist' in c for c in job['review_summary']['concerns'])
+    assert job['files'][0]['plan']['questions'][0] == {'kind': 'missing', 'fields': ['artist']}
     assert main.store.get('jobs', 'job')['stage'] == 'review'
     assert not main.store.get('files', 'file')['published']
 
@@ -673,3 +673,77 @@ def test_analysis_revisits_tags_indexed_under_old_spelling_rules(backend, monkey
     assert not MediaFile(str(junk)).genres
     main.analyze_library('schedule')
     assert main.analysis_status()['total'] == 0
+
+
+def tone(path, seconds=3):
+    import subprocess
+    path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i', f'sine=frequency=440:duration={seconds}',
+                    '-codec:a', 'libmp3lame', '-q:a', '2', str(path)], check=True)
+    from mediafile import MediaFile
+    tags = MediaFile(str(path))
+    tags.artist, tags.title, tags.album = 'Artist', path.stem, 'Album'
+    tags.save()
+    return path
+
+
+def test_auto_add_publishes_only_tracks_without_questions(backend, monkeypatch):
+    main, client = backend
+    signin(main, client, monkeypatch)
+    assert client.get("/api/settings/auto-add").json() == {"search": False, "import": False}
+    candidate = {"source": "soulseek", "requested_artist": "Artist"}
+    main.store.put("jobs", "auto", {"candidate": candidate, "source": "soulseek", "label": "Album", "prepared": []},
+                   owner="mateo", stage="review", created_at="2026-01-01")
+    for id, title in (("clean", "Song"), ("unnamed", "")):
+        path = main.STATE / f"{id}.mp3"
+        path.write_bytes(b"audio")
+        main.store.put("files", id, {"artist": "Artist", "title": title, "candidate": candidate},
+                       job_id="auto", owner="mateo", published=0, path=str(path))
+    assert main.auto_add("auto") is None  # Off by default.
+    assert client.post("/api/settings/auto-add", json={"search": True, "import": False}).json() == {"search": True, "import": False}
+    later = main.auto_add("auto")
+    job = main.store.get("jobs", "auto")
+    assert job["stage"] == "publish_queued" and job["approved_by"] == "auto"
+    assert job["selected_paths"] == [str(main.STATE / "clean.mp3")]
+    review = client.get("/api/review").json()["jobs"]
+    assert [j["id"] for j in review] == [later]
+    assert review[0]["files"][0]["plan"]["questions"] == [{"kind": "missing", "fields": ["title"]}]
+    assert client.post(f"/api/jobs/{later}/skip", json={"file_ids": ["unnamed"]}).json() == {"ok": True}
+    assert main.store.get("jobs", later)["stage"] == "rejected"
+
+
+def test_undo_returns_tracks_to_review_and_restores_replaced_versions(backend, monkeypatch):
+    main, client = backend
+    signin(main, client, monkeypatch)
+    ingestor = main.Ingestor(main.config)
+    prepared = tone(main.STATE / "prepared" / "job" / "New.mp3")
+    record = ingestor.process([prepared], {}, "publish")[0]
+    old = Path(ingestor.process([tone(main.STATE / "old" / "Old.mp3", 4)], {}, "old")[0]["path"])
+    replaced = ingestor.retire(old, main.STATE / "trash" / "done")
+    main.store.put("jobs", "done", {"candidate": {}, "source": "soulseek", "label": "New",
+                                    "prepared": [{"path": str(prepared), "original_sha256": record["original_sha256"],
+                                                  "title": "New", "artist": "Artist"}],
+                                    "replaced": [replaced]}, owner="mateo", stage="published", created_at="2026-01-01")
+    main.register_files([record], main.store.get("jobs", "done"), True)
+    response = client.post("/api/jobs/done/undo", json={})
+    assert response.status_code == 200 and response.json()["restored"] == 1
+    assert not Path(record["path"]).exists() and old.is_file()
+    assert main.store.get("jobs", "done")["stage"] == "undone"
+    review = client.get("/api/review").json()["jobs"]
+    assert [j["id"] for j in review] == [response.json()["review_job_id"]]
+    assert review[0]["files"][0]["title"] == "New"
+    assert client.post("/api/jobs/done/undo", json={}).status_code == 409
+
+
+def test_replaced_versions_go_to_trash_once(backend):
+    main, _ = backend
+    ingestor = main.Ingestor(main.config)
+    old = ingestor.process([tone(main.STATE / "old" / "Old.mp3")], {}, "old")[0]
+    main.store.put("jobs", "better", {"replace": {"/prepared/new.flac": [old["path"]]}}, owner="mateo",
+                   stage="publishing", created_at="2026-01-01")
+    main.register_files([old], {"id": "old-job", "owner": "mateo"}, True)
+    job = main.store.get("jobs", "better")
+    first = main.retire_versions(ingestor, job)
+    assert [e["path"] for e in first] == [old["path"]] and not Path(old["path"]).exists()
+    assert not main.store.list("files", "path=?", (old["path"],))
+    assert main.retire_versions(ingestor, main.store.get("jobs", "better")) == first
