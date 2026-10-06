@@ -208,6 +208,11 @@ def navidrome_link(path):
     return root + "/app/#/album/" + album + "/show" if album else root
 
 
+def format_name(value):
+    """Navidrome reports "MP3", ffprobe "mp3": show one spelling."""
+    return str(value).upper() if value else value
+
+
 def file_view(record):
     omit = {
         "path",
@@ -223,6 +228,7 @@ def file_view(record):
     result = {k: v for k, v in record.items() if k not in omit}
     result["shared"] = bool(record.get("published") and Path(record["path"]).resolve().is_relative_to(LIBRARY) and sharing.selected(record["path"]))
     result["bitrate"] = round((record.get("bitrate") or 0) / 1000)
+    result["format"] = format_name(record.get("format"))
     if isinstance(result.get("analysis_source"), dict):
         result["analysis_source"] = (
             ", ".join(f"{k}: estimated" for k in result["analysis_source"])
@@ -1001,7 +1007,8 @@ def _search_library_matches(candidate, published_files, identity_index=None):
             if not exact and not named and not requested:
                 continue
             matches.append({
-                **{key: record.get(key) for key in ("id", "artist", "title", "album", "format")},
+                **{key: record.get(key) for key in ("id", "artist", "title", "album")},
+                "format": format_name(record.get("format")),
                 "bitrate": round((record.get("bitrate") or 0) / 1000),
                 "confidence": "exact" if exact and not album_conflict else "possible",
             })

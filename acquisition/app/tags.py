@@ -33,13 +33,31 @@ _ATTRIBUTES = {'bpm': 'bpm_precise', 'key': 'initial_key', 'genre': 'genres'}
 _UPPER = {'edm': 'EDM', 'idm': 'IDM', 'uk': 'UK', 'us': 'US', 'dj': 'DJ', 'dnb': 'DnB', 'rnb': 'R&B', 'mpb': 'MPB'}
 
 
+# One name for genres that stores and catalogs spell differently.
+_ALIASES = {
+    'rap': 'Hip Hop', 'rap & hip hop': 'Hip Hop', 'hip hop & rap': 'Hip Hop', 'hip hop (houston)': 'Hip Hop',
+    'gangsta': 'Gangsta Rap', 'rap français': 'French Rap', 'rap francais': 'French Rap',
+    'synthpop': 'Synth-Pop', 'jazz-funk': 'Jazz Funk', 'neo-soul': 'Neo Soul', 'alternativo': 'Alternative',
+    'latin music': 'Latin', 'pop internationale': 'Pop', 'variété internationale': 'Pop',
+}
+# Store shelves, places and placeholders rather than genres.
+_NOT_GENRES = {'music', 'other', 'top 100', 'misc', 'unknown', 'genre', 'spain', 'japan', 'new york'}
+
+
+def _not_a_genre(text):
+    # Leading numbers ("15.) …", "2018/02"), site names ("Dancedj.Club") or no letters at all ("🔫").
+    return (re.match(r'\d', text) or re.search(r'\w\.\w', text) or not re.search(r'[^\W\d_]', text)
+            or text.casefold() in _NOT_GENRES)
+
+
 def genre_name(value):
-    """One spelling per genre: "hip-hop", "Hip-Hop" and "hip hop" all become "Hip Hop"."""
+    """One spelling per genre: "hip-hop", "Hip-Hop" and "hip hop" all become "Hip Hop"; "Rap" too."""
     text = re.sub(r'\s+', ' ', str(value or '')).strip()
-    if not text:
+    if not text or _not_a_genre(text):
         return None
-    text = re.sub(r'\bhip[\s-]?hop\b', 'hip hop', text, flags=re.I)
-    return re.sub(r"[^\W\d_]+", lambda word: _UPPER.get(word[0].casefold()) or word[0][:1].upper() + word[0][1:].lower(), text)
+    text = re.sub(r'\bhip\s*-?\s*hop\b', 'hip hop', text, flags=re.I)
+    text = re.sub(r"[^\W\d_]+", lambda word: _UPPER.get(word[0].casefold()) or word[0][:1].upper() + word[0][1:].lower(), text)
+    return _ALIASES.get(text.casefold(), text)
 
 
 def split_values(value):
@@ -58,7 +76,14 @@ def unique(values):
 
 
 def genres(values):
-    return unique(genre_name(value) for value in split_values(values))
+    """Split combined tags ("Hip Hop;Cloud Rap", "Rap/Hip Hop", "Pop / R&B") into single genres."""
+    names = []
+    for value in split_values(values):
+        if _not_a_genre(value):
+            continue
+        value = re.sub(r'\bhip\s*-?\s*hop\b', 'hip hop', value, flags=re.I)
+        names += [genre_name(part) for part in re.split(r'\s*(?:[;,/]|\s-\s)\s*', value)]
+    return unique(names)
 
 
 def read_tags(path):

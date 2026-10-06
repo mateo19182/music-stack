@@ -29,6 +29,17 @@ def test_keys_sort_around_the_wheel():
 
 def test_genre_spellings_are_unified():
     from app.tags import genre_name, genres
-    assert [genre_name(g) for g in ['Hip-Hop', 'hip hop', 'Experimental Hip-Hop', 'rnb', 'lo-fi', 'UK Garage', 'Funk / Soul']] == [
-        'Hip Hop', 'Hip Hop', 'Experimental Hip Hop', 'R&B', 'Lo-Fi', 'UK Garage', 'Funk / Soul']
-    assert genres('Hip-Hop; Rap, hip hop') == ['Hip Hop', 'Rap']
+    assert [genre_name(g) for g in ['Hip-Hop', 'hip hop', 'Experimental Hip-Hop', 'rnb', 'lo-fi', 'UK Garage', 'Rap', 'Hip - Hop']] == [
+        'Hip Hop', 'Hip Hop', 'Experimental Hip Hop', 'R&B', 'Lo-Fi', 'UK Garage', 'Hip Hop', 'Hip Hop']
+    assert genres('Hip-Hop; Rap, hip hop') == ['Hip Hop']
+
+
+def test_combined_genre_tags_are_split_and_junk_dropped():
+    from app.tags import genres
+    assert genres(['Hip Hop;Boom Bap;West Coast Hip Hop']) == ['Hip Hop', 'Boom Bap', 'West Coast Hip Hop']
+    assert genres(['Rap/Hip Hop / French Rap']) == ['Hip Hop', 'French Rap']
+    assert genres(['Hip Hop - Rap Français']) == ['Hip Hop', 'French Rap']
+    assert genres(['Pop / Pop Internationale / Variété Internationale / R&B']) == ['Pop', 'R&B']
+    assert genres(['Funk / Soul', 'Synthpop', 'Jazz-Funk']) == ['Funk', 'Soul', 'Synth-Pop', 'Jazz Funk']
+    assert genres(['Music', 'Other', '🔫', '2018/02', 'Dancedj.Club', '15.) Electronic W/O Vocals', 'Spain', 'Top 100']) == []
+    assert genres(['Electro', 'Milf House', 'Lo-Fi']) == ['Electro', 'Milf House', 'Lo-Fi']

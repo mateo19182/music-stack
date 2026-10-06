@@ -31,7 +31,7 @@ def test_musicbrainz_year_then_discogs_styles_when_it_has_no_genres(respond):
         {'score': 100, 'title': 'Song', 'first-release-date': '2001', 'artist-credit': [{'name': 'Someone Else'}]},
         {'score': 60, 'title': 'Song', 'first-release-date': '1990', 'artist-credit': [{'name': 'Artist'}]}]}
     found = lookup.Catalog({'discogs_token': 'token', 'lastfm_api_key': 'key'}).lookup('Artist', 'Song')
-    assert found == {'genre': ['Jazz-Funk', 'Soul'], 'year': 2013,
+    assert found == {'genre': ['Jazz Funk', 'Soul'], 'year': 2013,
                      'sources': {'genre': 'discogs', 'year': 'musicbrainz-first-release'}}
     assert all(r.url.host != 'ws.audioscrobbler.com' for r in seen)
     assert all(r.headers['user-agent'].startswith('music-stack') for r in seen)

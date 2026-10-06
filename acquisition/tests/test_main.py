@@ -626,3 +626,9 @@ def test_approval_can_leave_tracks_for_later(backend, monkeypatch):
     assert job["stage"] == "publish_queued" and job["skipped_count"] == 0
     review = client.get("/api/review").json()["jobs"]
     assert [[f["id"] for f in j["files"]] for j in review] == [["later"]]
+
+
+def test_file_formats_use_one_spelling(backend):
+    main, _ = backend
+    assert main.format_name("mp3") == main.format_name("MP3") == "MP3"
+    assert main.format_name(None) is None
