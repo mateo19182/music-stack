@@ -6,8 +6,8 @@
     <meta name="color-scheme" content="light" />
     <title>Acquire</title>
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v=20261005-2" />
-    <link rel="stylesheet" href="/static/style.css?v=20261005-4" />
-    <script defer src="/static/app.js?v=20261005-4"></script>
+    <link rel="stylesheet" href="/static/style.css?v=20261006-1" />
+    <script defer src="/static/app.js?v=20261006-1"></script>
   </head>
   <body>
     <div id="toast" role="status" aria-live="polite" hidden></div>
@@ -137,6 +137,10 @@
           <div class="section-title">
             <h2>Ready to add <span id="review-count"></span></h2>
           </div>
+          <p class="muted review-help">
+            Play anything you're unsure about, fix the tracks marked Check, then
+            press Add. Click a track to edit its tags.
+          </p>
           <div id="reviews"></div>
           <div class="section-title"><h2>Downloads</h2></div>
           <label class="checkbox history-toggle"
@@ -237,6 +241,27 @@
             >
             <p id="sharing-status" class="muted" role="status"></p>
             <p id="sharing-error" class="error" role="alert"></p>
+          </details>
+          <details id="library-analysis" class="utility-section" hidden>
+            <summary>Tag analysis</summary>
+            <p class="muted">
+              Fills tracks that have no BPM, key, genre, year or mood. Genre and
+              year come from MusicBrainz first, then Discogs and Last.fm; when they have
+              nothing, genre, mood, BPM and key are estimated from the audio.
+              Values already in a file are kept, except that keys are rewritten
+              as Camelot (Am becomes 8A) and genres in one spelling (Hip-Hop
+              becomes Hip Hop). Key tags that are not keys are listed under
+              Key → Not a key for you to fix. Files longer than 20 minutes are
+              not analyzed from audio.
+            </p>
+            <div class="actions">
+              <button type="button" id="start-analysis">
+                Analyze missing tags</button
+              ><button type="button" class="quiet" id="cancel-analysis" hidden>
+                Stop
+              </button>
+            </div>
+            <p id="analysis-status" class="muted" role="status"></p>
           </details>
           <div id="library"></div>
           <div id="pagination" class="pagination"></div>

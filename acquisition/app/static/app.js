@@ -17,6 +17,8 @@ const state = {
   searchQuality: "",
   searchStatus: "complete",
   libraryGeneration: 0,
+  libraryFiles: {},
+  analysisRunning: false,
   reviewSignature: "",
   reviewerConfigured: false,
   queuedCandidates: new Set(),
@@ -71,12 +73,14 @@ function loginView() {
   state.isAdmin = false;
   $("#import-existing").hidden = true;
   $("#sharing-settings").hidden = true;
+  $("#library-analysis").hidden = true;
   state.searchGeneration++;
   state.searchId = null;
   state.reviewDirty = false;
   state.reviewEdits = {};
   for (const key of Object.keys(reviewSelections)) delete reviewSelections[key];
-  for (const key of Object.keys(albumDrafts)) delete albumDrafts[key];
+  for (const store of [albumDrafts, reviewOpen, trackOpen, albumOverrides])
+    for (const key of Object.keys(store)) delete store[key];
   state.reviews = [];
   state.reviewSignature = "";
   state.reviewerConfigured = false;
@@ -151,7 +155,10 @@ function showTab(tab) {
     );
   if (tab === "library") {
     loadLibrary().catch((e) => toast(e.message, true));
-    if (state.isAdmin) loadSharing().catch(showSharingError);
+    if (state.isAdmin) {
+      loadSharing().catch(showSharingError);
+      loadAnalysis().catch(() => {});
+    }
   }
 }
 function meta(items) {
@@ -160,8 +167,8 @@ function meta(items) {
     .map((v) => `<span>${esc(v)}</span>`)
     .join("")}</div>`;
 }
-function downloads(file) {
-  return `<button class="quiet" data-preview="${esc(file.id)}" data-title="${esc(file.title || file.filename || "Track")}" data-artist="${esc(file.artist || "")}">Play</button><a href="/api/files/${path(file.id)}/download">Download</a><details class="more-actions"><summary aria-label="More actions for ${esc(file.title || "track")}">More</summary><div>${file.published && file.shared !== undefined ? (state.isAdmin ? `<label class="checkbox"><input type="checkbox" data-share-file="${esc(file.id)}" ${file.shared ? "checked" : ""}>Share on Soulseek</label><span class="error sharing-file-error" role="alert"></span>` : `<span class="muted">${file.shared ? "Selected for sharing" : "Private on Soulseek"}</span>`) : ""}${file.album_id ? `<a href="/api/albums/${path(file.album_id)}/download">Album ZIP</a>` : ""}${file.navidrome_url ? `<a href="${safeLink(file.navidrome_url)}" target="_blank" rel="noopener">Open in Navidrome ↗</a>` : ""}<span class="muted">${esc([file.format, file.bitrate ? `${file.bitrate} kbps` : "", duration(file.duration), bytes(file.size)].filter(Boolean).join(" · "))}</span></div></details>`;
+function downloads(file, editable = false) {
+  return `<button class="quiet" data-preview="${esc(file.id)}" data-title="${esc(file.title || file.filename || "Track")}" data-artist="${esc(file.artist || "")}">Play</button><a href="/api/files/${path(file.id)}/download">Download</a><details class="more-actions"><summary aria-label="More actions for ${esc(file.title || "track")}">More</summary><div>${file.published && file.shared !== undefined ? (state.isAdmin ? `<label class="checkbox"><input type="checkbox" data-share-file="${esc(file.id)}" ${file.shared ? "checked" : ""}>Share on Soulseek</label><span class="error sharing-file-error" role="alert"></span>` : `<span class="muted">${file.shared ? "Selected for sharing" : "Private on Soulseek"}</span>`) : ""}${editable && state.isAdmin ? `<button class="quiet" data-edit-tags="${esc(file.id)}">Edit tags</button>` : ""}${file.album_id ? `<a href="/api/albums/${path(file.album_id)}/download">Album ZIP</a>` : ""}${file.navidrome_url ? `<a href="${safeLink(file.navidrome_url)}" target="_blank" rel="noopener">Open in Navidrome ↗</a>` : ""}<span class="muted">${esc([file.format, file.bitrate ? `${file.bitrate} kbps` : "", duration(file.duration), bytes(file.size)].filter(Boolean).join(" · "))}</span></div></details>`;
 }
 function resultSourceLink(result) {
   if (!["youtube", "yt-dlp"].includes(result.source) || !result.url) return "";
@@ -309,15 +316,60 @@ async function loadJobs() {
         .join("")
     : '<div class="empty">No downloads in progress.</div>';
 }
-function filterOptions(name, values) {
+function filterOptions(name, values, invalidCount = 0) {
   const select = $(`#library-form [name="${name}"]`),
     selected = select.value;
   select.innerHTML =
     `<option value="">All ${name === "genre" ? "genres" : "keys"}</option>` +
     (values || [])
       .map((v) => `<option value="${esc(v)}">${esc(v)}</option>`)
-      .join("");
+      .join("") +
+    (invalidCount
+      ? `<option value="invalid">Not a key (${invalidCount})</option>`
+      : "");
   select.value = selected;
+}
+const TAG_FIELDS = [
+  "artist",
+  "title",
+  "album",
+  "genre",
+  "year",
+  "mood",
+  "bpm",
+  "key",
+];
+function tagLabel(name) {
+  return name === "bpm" ? "BPM" : name[0].toUpperCase() + name.slice(1);
+}
+function tagInputAttributes(name) {
+  return {
+    bpm: 'type="number" min="0" max="400" step="any"',
+    year: 'type="number" min="1000" max="2100" step="1"',
+    key: 'placeholder="8A or Am"',
+    genre: 'placeholder="Separate with ;"',
+    mood: 'placeholder="Separate with ;"',
+  }[name] || "";
+}
+function keyLabel(file) {
+  if (file.key_invalid) return `Key tag “${file.key_tag}” is not a key`;
+  return file.key || "";
+}
+function tagEditor(file) {
+  return `<form class="tag-editor" data-tag-form="${esc(file.id)}"><div class="review-fields">${TAG_FIELDS.map(
+    (name) => {
+      const value =
+        name === "key"
+          ? file.key || file.key_tag || ""
+          : name === "genre"
+            ? (file.genres || []).join("; ") || tagValue(file.genre)
+            : tagValue(file[name]);
+      return `<label>${tagLabel(name)}<input name="${name}" value="${esc(value)}" data-original="${esc(value)}" ${tagInputAttributes(name)}></label>`;
+    },
+  )
+    .join(
+      "",
+    )}</div><p class="muted">Writes the tags into the file; the audio is unchanged. Changing the album tag does not move the file, and Navidrome groups albums by folder.</p><p class="error" role="alert"></p><div class="actions"><button type="submit">Save tags</button><button type="button" class="quiet" data-close-tags>Cancel</button></div></form>`;
 }
 async function loadLibrary() {
   const generation = ++state.libraryGeneration;
@@ -336,14 +388,17 @@ async function loadLibrary() {
     ? "· active"
     : "";
   filterOptions("genre", data.genres);
-  filterOptions("key", data.keys);
+  filterOptions("key", data.keys, data.invalid_key_count);
+  state.libraryFiles = Object.fromEntries(
+    (data.files || []).map((f) => [f.id, f]),
+  );
   $("#library-count").textContent = `${data.total || 0} files`;
   $("#library").innerHTML = (data.files || []).length
-    ? `<div class="library-heading"><span>Track / artist</span><span>Album</span><span>Genre · BPM · key</span><span></span></div>` +
+    ? `<div class="library-heading"><span>Track / artist</span><span>Album</span><span>Genre · year · mood · BPM · key</span><span></span></div>` +
       data.files
         .map(
           (f) =>
-            `<article class="library-row"><div class="track-info"><h3>${esc(f.title || f.filename || "Untitled")}</h3><span class="muted">${esc(f.artist || "Unknown artist")}</span></div><span class="album-name muted">${esc(f.album || "")}</span><div class="music-tags">${meta([f.genre, f.bpm ? `${f.bpm} BPM` : "", f.key])}</div><div class="actions">${downloads(f)}</div></article>`,
+            `<article class="library-row"><div class="track-info"><h3>${esc(f.title || f.filename || "Untitled")}</h3><span class="muted">${esc(f.artist || "Unknown artist")}</span></div><span class="album-name muted">${esc(f.album || "")}</span><div class="music-tags${f.key_invalid ? " key-invalid" : ""}">${meta([(f.genres || []).join(", ") || f.genre, f.year, (f.mood || []).join(", "), f.bpm ? `${f.bpm} BPM` : "", keyLabel(f)])}</div><div class="actions">${downloads(f, true)}</div></article>`,
         )
         .join("")
     : '<div class="empty">No tracks match. Clear the filters to see your library.</div>';
@@ -514,11 +569,31 @@ document.addEventListener("click", (e) => {
       await api(`/api/jobs/${path(button.dataset.cancel)}/cancel`, {});
       await loadJobs();
     });
-  else if (button.dataset.suggestionFile)
-    useSuggestion(
-      button.dataset.suggestionFile,
-      Number(button.dataset.suggestionIndex),
+  else if (button.dataset.editTags) {
+    const row = button.closest(".library-row");
+    button.closest(".more-actions").open = false;
+    if (row.nextElementSibling?.dataset.tagForm) {
+      row.nextElementSibling.querySelector("input").focus();
+      return;
+    }
+    row.insertAdjacentHTML(
+      "afterend",
+      tagEditor(state.libraryFiles[button.dataset.editTags]),
     );
+    row.nextElementSibling.querySelector("input").focus();
+  } else if (button.dataset.closeTags !== undefined)
+    button.closest("form").remove();
+  else if (button.id === "start-analysis")
+    busy(button, async () => {
+      await api("/api/library/analysis", {});
+      toast("Analyzing library files with missing tags.");
+      await loadAnalysis();
+    });
+  else if (button.id === "cancel-analysis")
+    busy(button, async () => {
+      await api("/api/library/analysis/cancel", {});
+      await loadAnalysis();
+    });
   else if (button.dataset.requestAdvice)
     busy(button, async () => {
       await api(`/api/jobs/${path(button.dataset.requestAdvice)}/advice`, {});
@@ -527,7 +602,6 @@ document.addEventListener("click", (e) => {
       await loadReview();
       toast("Review advice requested. Final approval is yours.");
     });
-  else if (button.dataset.applyAdvice) applyAdvice(button.dataset.applyAdvice);
   else if (button.dataset.approve)
     busy(button, () =>
       approveReview(button.dataset.approve, button.dataset.keep === "true"),
@@ -576,6 +650,7 @@ async function start() {
   state.isAdmin = Boolean(user.is_admin ?? user.isAdmin);
   $("#import-existing").hidden = !state.isAdmin;
   $("#sharing-settings").hidden = !state.isAdmin;
+  $("#library-analysis").hidden = !state.isAdmin;
   if (user.navidromeUrl) $("#listen").href = safeLink(user.navidromeUrl);
   $("#username").textContent = user.username;
   $("#login-view").hidden = true;
@@ -594,6 +669,10 @@ setInterval(() => {
       !$("#sharing-enabled").disabled
     )
       loadSharing().catch(showSharingError);
+    if (state.tab === "library" && state.analysisRunning)
+      loadAnalysis()
+        .then(() => state.analysisRunning || loadLibrary())
+        .catch(() => {});
     loadReview().catch(() => {});
     loadJobs().catch((e) => {
       if (state.tab === "activity") toast(e.message, true);
@@ -621,23 +700,21 @@ async function loadReview() {
     signature === state.reviewSignature
   )
     return;
-  const expanded = new Set(
-    Array.from(
-      document.querySelectorAll(
-        "[data-review-job]:has(.review-disclosure[open])",
-      ),
-    ).map((el) => el.dataset.reviewJob),
-  );
   state.reviewSignature = signature;
-  state.expandedReviews = expanded;
   $("#reviews").innerHTML = state.reviews.length
     ? state.reviews.map(renderReviewJob).join("")
     : '<div class="empty">Nothing ready to add yet.</div>';
   for (const job of document.querySelectorAll("[data-review-job]"))
     updateReviewSelection(job);
 }
+// Review choices that survive the five-second refresh.
 const reviewSelections = {};
 const albumDrafts = {};
+const reviewOpen = {};
+const trackOpen = {};
+const albumOverrides = {};
+const ALBUM_FIELDS = ["artist", "album", "genre", "year"];
+const STATUS_LABELS = { ready: "Ready", check: "Check", duplicate: "In library" };
 function reviewValue(file, name) {
   return tagValue(
     state.reviewEdits[file.id]?.[name] ??
@@ -645,143 +722,135 @@ function reviewValue(file, name) {
       file[name],
   );
 }
-function adviceLabel(status) {
+function catalogRecommendation(value) {
   return (
     {
-      looks_fine: "Looks fine",
-      check: "Check before adding",
-      skip_duplicate: "Already in your library",
-    }[status] || "Review advice"
+      strong: "strong match",
+      medium: "possible match",
+      alternative: "alternative match",
+    }[String(value || "").toLowerCase()] || "weak match"
   );
 }
-function renderJobAdvice(job) {
-  const advice = job.advice;
-  if (advice?.status === "complete")
-    return `<details class="review-advice"><summary>AI advice · ${esc(adviceLabel(advice.result?.status))}</summary><p>${esc(advice.result?.summary)}</p><span class="muted">Based on metadata, not listening. You decide what to add.</span></details>`;
-  if (advice?.status === "queued" || advice?.status === "running")
-    return '<p class="muted" role="status">Checking the metadata with OpenRouter… You can still review and add tracks yourself.</p>';
-  if (advice?.status === "failed")
-    return `<div class="review-advice"><p class="muted">${esc(advice.error || "Advice is unavailable. Manual review still works.")}</p><button class="quiet" data-request-advice="${esc(job.id)}">Retry advice</button></div>`;
-  return state.reviewerConfigured
-    ? `<div class="actions"><button class="quiet" data-request-advice="${esc(job.id)}">Get review advice</button><span class="muted">Final approval stays manual.</span></div>`
-    : "";
-}
-function renderFileAdvice(file, advice) {
-  if (!advice) return "";
-  const tags = Object.entries(advice.suggested_tags || {}).filter(
-    ([name, value]) => value !== reviewValue(file, name),
-  );
-  return `<details class="file-advice" ${advice.status === "check" ? "open" : ""}><summary>${esc(adviceLabel(advice.status))}${tags.length ? " · Suggested edits" : ""}</summary><p>${esc(advice.reason)}</p>${tags.length ? `<details><summary>Suggested tags</summary><dl>${tags.map(([name, value]) => `<dt>${esc(name)}</dt><dd>${esc(value || "Empty")}</dd>`).join("")}</dl><button class="quiet" data-apply-advice="${esc(file.id)}">Use suggested tags</button><p class="muted">Fills the form for your review. Does not add the track.</p></details>` : ""}</details>`;
-}
-function renderReviewWarnings(file, advice) {
+function trackReview(file, advice) {
   const innocuous = new Set(advice?.innocuous_warnings || []);
   const warnings = file.warnings || [];
-  const small = warnings.filter((warning) => innocuous.has(warning));
-  return (
-    warnings
-      .filter((warning) => !innocuous.has(warning))
-      .map((warning) => `<p class="warning">${esc(warning)}</p>`)
-      .join("") +
-    (small.length
-      ? `<details class="original-tags"><summary>${small.length} minor metadata note${small.length === 1 ? "" : "s"}</summary>${small.map((warning) => `<p class="muted">${esc(warning)}</p>`).join("")}</details>`
-      : "")
-  );
+  const reasons = warnings.filter((warning) => !innocuous.has(warning));
+  if (advice?.status === "check" && advice.reason) reasons.push(advice.reason);
+  if (file.possible_duplicates?.length)
+    reasons.push("A different version is already in your library. Compare them below.");
+  for (const name of ["artist", "title"])
+    if (!reviewValue(file, name).trim()) reasons.push(`No ${name}.`);
+  const duplicate = Boolean(file.duplicate_file_id || file.duplicate_of);
+  return {
+    status: duplicate ? "duplicate" : reasons.length ? "check" : "ready",
+    reasons,
+    notes: warnings.filter((warning) => innocuous.has(warning)),
+  };
 }
-function applyAdvice(id) {
-  const entry = state.reviews
-    .flatMap((job) => job.advice?.result?.files || [])
-    .find((file) => file.id === id);
-  const section = [...document.querySelectorAll("[data-review-file]")].find(
-    (element) => element.dataset.reviewFile === id,
-  );
-  if (!entry || !section) return;
-  for (const [name, value] of Object.entries(entry.suggested_tags || {})) {
-    if (
-      !["artist", "title", "album", "genre"].includes(name) ||
-      typeof value !== "string"
+function fieldSuggestions(file, advice, name) {
+  const current = reviewValue(file, name);
+  const found = [];
+  const add = (value, source) => {
+    value = tagValue(value).trim();
+    if (value && value !== current && !found.some((s) => s.value === value))
+      found.push({ value, source });
+  };
+  if (["artist", "title", "album", "genre"].includes(name))
+    add(advice?.suggested_tags?.[name], "AI advice");
+  if (name === "artist" || name === "title")
+    for (const match of (file.catalog_matches || []).slice(0, 3))
+      add(match[name], `MusicBrainz, ${catalogRecommendation(match.recommendation)}`);
+  return found.slice(0, 2);
+}
+function playButton(id, title, artist, label = "▶ Play") {
+  return `<button type="button" class="quiet play" data-preview="${esc(id)}" data-title="${esc(title)}" data-artist="${esc(artist || "")}">${label}</button>`;
+}
+function reviewField(file, advice, name, originals) {
+  const old = tagValue(originals[name]);
+  const value = reviewValue(file, name);
+  return `<div class="review-field"><label>${tagLabel(name)}<span class="field-input"><input data-field="${name}" data-original="${esc(old)}" value="${esc(value)}" ${tagInputAttributes(name)} class="${old !== value ? "changed" : ""}" aria-label="${esc(tagLabel(name))} for ${esc(file.title || "track")}"><button type="button" class="reset-field" data-reset-field title="Restore the file's original value: ${esc(old || "empty")}" aria-label="Restore original ${esc(name)}" ${old === value ? "hidden" : ""}>↺</button></span></label>${fieldSuggestions(
+    file,
+    advice,
+    name,
+  )
+    .map(
+      (s) =>
+        `<span class="suggestion">Suggested: <strong>${esc(s.value)}</strong> <span class="muted">${esc(s.source)}</span> <button type="button" class="link" data-use-value="${esc(s.value)}">Use</button></span>`,
     )
-      continue;
-    const input = section.querySelector(`[data-field="${name}"]`);
-    input.value = value;
-    input.classList.add("changed");
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-  }
-  section.querySelector(".track-tag-editor").open = true;
-  toast("Suggested tags filled. Check them before adding the track.");
-}
-function renderDecision(job) {
-  const summary = job.review_summary;
-  if (!summary) return "";
-  return `<div class="review-decision ${summary.status === "check" ? "needs-check" : ""}"><strong>${esc(summary.label)}</strong>${summary.concerns.length ? `<ul>${summary.concerns.map((item) => `<li>${esc(item)}</li>`).join("")}</ul>` : '<p>No unresolved metadata or duplicate concerns found. Listen to confirm the recording.</p>'}${summary.completeness ? `<p>${esc(summary.completeness)}</p>` : ""}${summary.notes.length ? `<details><summary>Album details</summary><ul>${summary.notes.map((item) => `<li>${esc(item)}</li>`).join("")}</ul></details>` : ""}<p class="muted">Checks describe the prepared files. Tag edits stay in the form until you approve.</p></div>`;
+    .join("")}</div>`;
 }
 function renderReviewJob(job) {
   const files = [...(job.files || [])];
   if (files.length > 1 && files.every((file) => Number(file.track_number) > 0))
     files.sort((a, b) => (Number(a.disc_number) || 1) - (Number(b.disc_number) || 1) || Number(a.track_number) - Number(b.track_number));
-  const open = state.reviews.length === 1 || state.expandedReviews?.has(job.id);
-  const albumFields =
-    files.length > 1
-      ? `<div class="album-edit"><h4>Album tags</h4><div class="options">${[
-          "artist",
-          "album",
-          "genre",
-        ]
-          .map((name) => {
-            const values = [
-              ...new Set(files.map((file) => reviewValue(file, name))),
-            ];
-            const value =
-              albumDrafts[job.id]?.[name] ??
-              (values.length === 1 ? values[0] : "");
-            return `<label class="grow">${name[0].toUpperCase() + name.slice(1)}<input data-album-field="${name}" value="${esc(value)}" placeholder="${values.length > 1 ? "Mixed values" : ""}"></label>`;
-          })
-          .join(
-            "",
-          )}<button class="quiet" data-apply-album="${esc(job.id)}">Apply to selected tracks</button></div><p class="muted">Only filled album fields are applied. You can edit individual tracks below.</p></div>`
-      : "";
-  return `<article class="card review-card" data-review-job="${esc(job.id)}"><details class="review-disclosure" ${open ? "open" : ""}><summary><span><strong>${esc(job.label || "Download")}</strong><span class="muted">${esc(sourceLabel(job.source))} · ${files.length} track${files.length === 1 ? "" : "s"}${job.review_summary ? ` · ${esc(job.review_summary.label)}` : ""}</span></span><span class="review-summary-action">Check & add</span></summary><p class="muted">Listen, check the recording and edit its tags. Add the selected tracks when ready.</p>${renderDecision(job)}${renderJobAdvice(job)}${albumFields}<div class="review-selection-tools"><label class="checkbox"><input type="checkbox" data-select-all checked>Select all tracks</label><span class="muted" data-selected-count></span></div>${files
-    .map((file, index) =>
-      renderReviewFile(
-        file,
-        index,
-        job.advice?.result?.files?.find((entry) => entry.id === file.id),
-      ),
-    )
-    .join(
-      "",
-    )}<p class="muted">Unchecked tracks stay private in the retained download. They will not be added to the library.</p><div class="actions"><button data-approve="${esc(job.id)}">Add selected to library</button><button class="quiet" data-approve="${esc(job.id)}" data-keep="true">Add with original tags</button><button class="quiet" data-reject="${esc(job.id)}">Reject download</button></div></details></article>`;
+  const multi = files.length > 1;
+  const adviceFor = (file) =>
+    job.advice?.result?.files?.find((entry) => entry.id === file.id);
+  const reviews = files.map((file) => trackReview(file, adviceFor(file)));
+  const toCheck = reviews.filter((review) => review.status === "check").length;
+  const summary = job.review_summary;
+  const status = summary?.status === "check" || toCheck ? "check" : "ready";
+  const open = reviewOpen[job.id] ?? state.reviews.length <= 3;
+  const albumFields = multi
+    ? `<div class="album-fields">${ALBUM_FIELDS.map((name) => {
+        const values = [...new Set(files.map((file) => reviewValue(file, name)))];
+        const value = albumDrafts[job.id]?.[name] ?? (values.length === 1 ? values[0] : "");
+        return `<label>${tagLabel(name)}<input data-album-field="${name}" value="${esc(value)}" ${tagInputAttributes(name)} placeholder="${values.length > 1 ? "Mixed: typing sets every track" : ""}"></label>`;
+      }).join("")}</div>`
+    : "";
+  return `<article class="card review-card" data-review-job="${esc(job.id)}"><details class="review-disclosure" ${open ? "open" : ""}><summary><span class="review-title"><strong>${esc(job.label || "Download")}</strong><span class="muted">${esc([sourceLabel(job.source), `${files.length} track${multi ? "s" : ""}`].filter(Boolean).join(" · "))}</span></span>${adviceBadge(job)}<span class="status status-${status}">${status === "check" ? (toCheck ? `${toCheck} to check` : "Check") : "Ready"}</span></summary>${renderConcerns(job, summary)}${albumFields}<div class="track-list">${files
+    .map((file, index) => renderReviewFile(file, index, adviceFor(file), reviews[index], multi))
+    .join("")}</div><div class="review-bar"><label class="checkbox" ${multi ? "" : "hidden"}><input type="checkbox" data-select-all>Include all</label><span class="muted" data-selected-count></span><details class="more-actions"><summary aria-label="More review actions">⋯</summary><div><button class="quiet" data-approve="${esc(job.id)}" data-keep="true">Add with original tags</button>${adviceAction(job)}</div></details><button class="quiet" data-reject="${esc(job.id)}" title="Nothing is added. The download is kept privately.">Reject</button><button data-approve="${esc(job.id)}">Add</button></div></details></article>`;
 }
-function renderReviewFile(file, index, advice) {
-  const selected = reviewSelections[file.id] !== false;
+function adviceBadge(job) {
+  const advice = job.advice;
+  if (advice?.status === "complete")
+    return `<span class="ai-badge" title="${esc(advice.result?.summary || "")}">AI: ${esc({ looks_fine: "looks fine", check: "check", skip_duplicate: "already in library" }[advice.result?.status] || "done")}</span>`;
+  if (advice?.status === "queued" || advice?.status === "running")
+    return '<span class="ai-badge" role="status">AI checking…</span>';
+  if (advice?.status === "failed")
+    return `<span class="ai-badge" title="${esc(advice.error || "")}">AI unavailable</span>`;
+  return "";
+}
+function adviceAction(job) {
+  const status = job.advice?.status;
+  if (!state.reviewerConfigured || status === "queued" || status === "running")
+    return "";
+  return `<button class="quiet" data-request-advice="${esc(job.id)}">${status === "failed" ? "Retry AI advice" : status === "complete" ? "Ask AI again" : "Ask AI to check"}</button>`;
+}
+function renderConcerns(job, summary) {
+  const items = summary?.concerns || [];
+  const notes = [summary?.completeness, ...(summary?.notes || [])].filter(Boolean);
+  const advice = job.advice?.status === "complete" && job.advice.result?.status !== "check" ? job.advice.result?.summary : "";
+  if (!items.length && !notes.length && !advice) return "";
+  return `<div class="concerns">${items.length ? `<ul>${items.map((item) => `<li>${esc(item)}</li>`).join("")}</ul>` : ""}${advice ? `<p class="muted">AI: ${esc(advice)}</p>` : ""}${notes.map((note) => `<p class="muted">${esc(note)}</p>`).join("")}</div>`;
+}
+function renderReviewFile(file, index, advice, review, multi) {
+  const selected = reviewSelections[file.id] ?? !(multi && review.status === "duplicate");
+  const open = trackOpen[file.id] ?? (review.status === "check" || !multi);
   const originals = file.existing || file.existing_tags || {};
-  return `<section class="review-file ${selected ? "" : "track-unselected"}" data-review-file="${esc(file.id)}"><div class="review-track-head"><label class="checkbox"><input type="checkbox" data-select-file="${esc(file.id)}" ${selected ? "checked" : ""}><strong>${index + 1}. ${esc(file.title || file.filename || "Track")}</strong></label><button class="quiet" data-preview="${esc(file.id)}" data-title="${esc(file.title || "Track")}" data-artist="${esc(file.artist || "")}">Listen to download</button></div>${meta([file.track_number ? `Track ${file.track_number}${file.disc_number > 1 ? ` · Disc ${file.disc_number}` : ""}` : "", file.artist, file.album, file.format, file.bitrate ? `${file.bitrate} kbps` : "", duration(file.duration), bytes(file.size)])}${exactDuplicate(file)}${renderFileAdvice(file, advice)}${renderReviewWarnings(file, advice)}${reviewMatches(file)}<details class="track-tag-editor"><summary>Edit track tags</summary><div class="review-fields">${[
-    "artist",
-    "title",
-    "album",
-    "genre",
-    "bpm",
-    "key",
-  ]
-    .map((name) => {
-      const old = tagValue(originals[name]);
-      const value = reviewValue(file, name);
-      return `<label>${name === "bpm" ? "BPM" : name[0].toUpperCase() + name.slice(1)}<input data-field="${name}" value="${esc(value)}" ${name === "bpm" ? 'type="number" min="0" max="400" step="any"' : ""} class="${old !== value ? "changed" : ""}" aria-label="${esc(name)} for ${esc(file.title || "track")}"></label>`;
-    })
-    .join(
-      "",
-    )}</div></details><details class="original-tags"><summary>Original tags and file details</summary><dl>${["artist", "title", "album", "genre", "bpm", "key"].map((name) => `<dt>${esc(name)}</dt><dd>${esc(tagValue(originals[name]) || "Empty")}</dd>`).join("")}</dl>${file.analysis_source ? `<p class="muted">Analysis source: ${esc(analysisLabel(file.analysis_source))}</p>` : ""}<a href="/api/files/${path(file.id)}/download">Download file</a></details></section>`;
+  const title = reviewValue(file, "title") || file.filename || "Track";
+  const artist = reviewValue(file, "artist");
+  const number = file.track_number
+    ? `${file.disc_number > 1 ? `${file.disc_number}-` : ""}${file.track_number}`
+    : index + 1;
+  const duplicates = file.possible_duplicates || [];
+  const fileDetails = [file.format, file.bitrate ? `${file.bitrate} kbps` : "", duration(file.duration)].filter(Boolean).join(" · ");
+  return `<section class="review-file ${selected ? "" : "track-unselected"} ${open ? "open" : ""}" data-review-file="${esc(file.id)}"><div class="track-row"><input type="checkbox" data-select-file="${esc(file.id)}" ${selected ? "checked" : ""} ${multi ? "" : "hidden"} title="Include this track" aria-label="Include ${esc(title)}"><button type="button" class="track-toggle" data-toggle-track aria-expanded="${open}"><span class="track-number">${esc(number)}</span><span class="track-name"><strong data-track-title>${esc(title)}</strong><span class="muted">${esc([artist, fileDetails].filter(Boolean).join(" · "))}</span></span></button>${playButton(file.id, title, artist)}<span class="status status-${review.status}">${STATUS_LABELS[review.status]}</span></div>${review.status === "check" ? `<ul class="track-reasons">${review.reasons.map((reason) => `<li>${esc(reason)}</li>`).join("")}</ul>` : ""}${review.status === "duplicate" ? `<p class="track-note">Same audio as <strong>${esc(typeof file.duplicate_of === "string" ? file.duplicate_of : "a library track")}</strong>. Adding it reuses the existing file and tags.${file.duplicate_file_id ? ` ${playButton(file.duplicate_file_id, file.duplicate_of || "Library version", artist, "▶ Play yours")}` : ""}</p>` : ""}<div class="track-details"><div class="review-fields">${TAG_FIELDS.map((name) => reviewField(file, advice, name, originals)).join("")}</div>${duplicates.length ? `<div class="compare"><div><span class="muted">This download</span><span>${esc(fileDetails || "Unknown format")}</span>${playButton(file.id, title, artist)}</div>${duplicates.map((d) => `<div><span class="muted">In your library</span><span>${esc([d.title, d.album, d.format, d.bitrate ? `${d.bitrate} kbps` : "", duration(d.duration)].filter(Boolean).join(" · "))}</span>${d.id ? playButton(d.id, [d.title, d.album].filter(Boolean).join(" · ") || "Library version", d.artist, "▶ Play yours") : ""}</div>`).join("")}</div>` : ""}<p class="track-foot muted">${esc([file.filename, bytes(file.size), file.analysis_source ? `Analysis: ${analysisLabel(file.analysis_source)}` : "", advice?.status !== "check" ? advice?.reason : "", ...review.notes].filter(Boolean).join(" · "))} <a href="/api/files/${path(file.id)}/download">Download file</a></p></div></section>`;
 }
 function updateReviewSelection(container) {
   const inputs = [...container.querySelectorAll("[data-select-file]")];
   const count = inputs.filter((input) => input.checked).length;
-  container.querySelector("[data-selected-count]").textContent =
-    `${count} of ${inputs.length} selected`;
   const all = container.querySelector("[data-select-all]");
   all.checked = count === inputs.length;
   all.indeterminate = count > 0 && count < inputs.length;
+  container.querySelector("[data-selected-count]").textContent =
+    inputs.length > 1 ? `${count} of ${inputs.length} included` : "";
   container
     .querySelectorAll("[data-approve]")
     .forEach((button) => (button.disabled = count === 0));
+  container.querySelector("[data-approve]:not([data-keep])").textContent =
+    inputs.length === 1 ? "Add to library" : `Add ${count} track${count === 1 ? "" : "s"}`;
   inputs.forEach((input) =>
     input
       .closest("[data-review-file]")
@@ -795,13 +864,13 @@ async function approveReview(id, keep) {
   const selected = [...container.querySelectorAll("[data-review-file]")].filter(
     (el) => el.querySelector("[data-select-file]").checked,
   );
-  if (!selected.length) throw new Error("Select at least one track to add.");
+  if (!selected.length) throw new Error("Include at least one track.");
   const files = selected.map((el) => ({
     id: el.dataset.reviewFile,
     metadata: Object.fromEntries(
       [...el.querySelectorAll("[data-field]")].map((input) => [
         input.dataset.field,
-        input.dataset.field === "bpm"
+        ["bpm", "year"].includes(input.dataset.field)
           ? input.value === ""
             ? null
             : Number(input.value)
@@ -814,7 +883,7 @@ async function approveReview(id, keep) {
     selected_file_ids: files.map((file) => file.id),
     keep_existing: keep,
   });
-  toast("Selected tracks approved. Adding to the library.");
+  toast(`Adding ${files.length} track${files.length === 1 ? "" : "s"} to the library.`);
   clearReviewEdits(id);
   await loadReview();
   await loadJobs();
@@ -823,8 +892,11 @@ function clearReviewEdits(id) {
   for (const file of state.reviews.find((j) => j.id === id)?.files || []) {
     delete state.reviewEdits[file.id];
     delete reviewSelections[file.id];
+    delete trackOpen[file.id];
+    delete albumOverrides[file.id];
   }
   delete albumDrafts[id];
+  delete reviewOpen[id];
   state.reviewDirty = Object.keys(state.reviewEdits).length > 0;
   state.reviewSignature = "";
   if (
@@ -833,19 +905,36 @@ function clearReviewEdits(id) {
   )
     document.activeElement.blur();
 }
+function syncReviewField(input) {
+  const section = input.closest("[data-review-file]");
+  state.reviewDirty = true;
+  (state.reviewEdits[section.dataset.reviewFile] ??= {})[input.dataset.field] =
+    input.value;
+  const changed = input.value !== input.dataset.original;
+  input.classList.toggle("changed", changed);
+  input.parentElement.querySelector("[data-reset-field]").hidden = !changed;
+  if (input.dataset.field === "title")
+    section.querySelector("[data-track-title]").textContent =
+      input.value || "Track";
+}
 $("#reviews").addEventListener("input", (e) => {
   const job = e.target.closest("[data-review-job]");
-  if (e.target.dataset.albumField && job) {
-    albumDrafts[job.dataset.reviewJob] ??= {};
-    albumDrafts[job.dataset.reviewJob][e.target.dataset.albumField] =
-      e.target.value;
+  const field = e.target.dataset.albumField;
+  if (field && job) {
+    // Album values follow every track except fields edited on the track itself.
+    (albumDrafts[job.dataset.reviewJob] ??= {})[field] = e.target.value;
+    job.querySelectorAll("[data-review-file]").forEach((section) => {
+      if (albumOverrides[section.dataset.reviewFile]?.has(field)) return;
+      const input = section.querySelector(`[data-field="${field}"]`);
+      input.value = e.target.value;
+      syncReviewField(input);
+    });
+    return;
   }
   const file = e.target.closest("[data-review-file]");
   if (!file || !e.target.dataset.field) return;
-  state.reviewDirty = true;
-  state.reviewEdits[file.dataset.reviewFile] ??= {};
-  state.reviewEdits[file.dataset.reviewFile][e.target.dataset.field] =
-    e.target.value;
+  (albumOverrides[file.dataset.reviewFile] ??= new Set()).add(e.target.dataset.field);
+  syncReviewField(e.target);
 });
 $("#reviews").addEventListener("change", (e) => {
   const job = e.target.closest("[data-review-job]");
@@ -860,35 +949,39 @@ $("#reviews").addEventListener("change", (e) => {
   else return;
   updateReviewSelection(job);
 });
+$("#reviews").addEventListener(
+  "toggle",
+  (e) => {
+    if (e.target.classList.contains("review-disclosure"))
+      reviewOpen[e.target.closest("[data-review-job]").dataset.reviewJob] =
+        e.target.open;
+  },
+  true,
+);
 $("#reviews").addEventListener("click", (e) => {
-  const button = e.target.closest("[data-apply-album]");
-  if (!button) return;
-  const job = button.closest("[data-review-job]");
-  const filled = [...job.querySelectorAll("[data-album-field]")].filter(
-    (input) => input.value.trim(),
-  );
-  if (!filled.length) return toast("Fill an album field to apply it.");
-  let count = 0;
-  job.querySelectorAll("[data-review-file]").forEach((section) => {
-    if (!section.querySelector("[data-select-file]").checked) return;
-    count++;
-    for (const source of filled) {
-      const input = section.querySelector(
-        `[data-field="${source.dataset.albumField}"]`,
-      );
-      input.value = source.value.trim();
-      input.classList.add("changed");
-      input.dispatchEvent(new Event("input", { bubbles: true }));
-    }
-  });
-  job.querySelectorAll(".track-tag-editor").forEach((editor) => {
-    if (editor.closest("[data-review-file]").querySelector("[data-select-file]").checked) editor.open = true;
-  });
-  toast(
-    count
-      ? `Album tags applied to ${count} selected track${count === 1 ? "" : "s"}.`
-      : "Select tracks first.",
-  );
+  const button = e.target.closest("button");
+  const section = button?.closest("[data-review-file]");
+  if (!section) return;
+  const id = section.dataset.reviewFile;
+  if (button.hasAttribute("data-toggle-track")) {
+    const open = !section.classList.contains("open");
+    trackOpen[id] = open;
+    section.classList.toggle("open", open);
+    button.setAttribute("aria-expanded", open);
+    return;
+  }
+  const input = button.closest(".review-field")?.querySelector("[data-field]");
+  if (!input) return;
+  if (button.hasAttribute("data-reset-field")) {
+    input.value = input.dataset.original;
+    albumOverrides[id]?.delete(input.dataset.field);
+  } else if (button.dataset.useValue !== undefined) {
+    input.value = button.dataset.useValue;
+    (albumOverrides[id] ??= new Set()).add(input.dataset.field);
+    button.closest(".suggestion").remove();
+  } else return;
+  syncReviewField(input);
+  input.focus();
 });
 
 async function loadInbox() {
@@ -926,55 +1019,6 @@ $("#inbox-form").addEventListener("submit", (e) => {
     showTab("activity");
   });
 });
-
-function catalogRecommendation(value) {
-  const labels = {
-    none: "No confident match",
-    low: "Weak match",
-    medium: "Possible match",
-    strong: "Strong match",
-    alternative: "Alternative match",
-  };
-  return (
-    labels[String(value || "").toLowerCase()] ||
-    String(value || "Unrated match")
-  );
-}
-function reviewMatches(file) {
-  const duplicates = file.possible_duplicates || [];
-  const matches = file.catalog_matches || [];
-  return `${duplicates.length ? `<div class="match-panel"><h4>Compare library versions</h4><p class="muted">Same artist and title, different audio. Check the recording before adding another version.</p><div class="duplicate-comparison"><div><strong>This download</strong>${meta([file.album, file.format, file.bitrate ? `${file.bitrate} kbps` : "", duration(file.duration)])}<div class="actions"><button class="quiet" data-preview="${esc(file.id)}" data-title="${esc(file.title || "Track")}" data-artist="${esc(file.artist || "")}">Listen to download</button></div></div><div><strong>Already in library</strong>${duplicates.map((d) => `<p>${esc(d.artist || "Unknown artist")} · ${esc(d.title || "Untitled")}</p>${meta([d.album ? `Album: ${d.album}` : "", d.format, d.bitrate ? `${d.bitrate} kbps` : "", duration(d.duration)])}${d.id ? `<div class="actions"><button class="quiet" data-preview="${esc(d.id)}" data-title="${esc([d.title, d.album].filter(Boolean).join(" · ") || "Library version")}" data-artist="${esc(d.artist || "")}">Listen to library version</button></div>` : ""}`).join("")}</div></div></div>` : ""}${matches.length ? `<details class="match-panel"><summary>Catalog suggestions · ${matches.length}</summary><p class="muted">Check the recording and version before using a suggestion.</p>${matches.map((m, index) => `<div class="catalog-match"><div><strong>${esc(m.artist || "Unknown artist")} · ${esc(m.title || "Untitled")}</strong>${meta([catalogRecommendation(m.recommendation), duration(m.duration || m.length)])}</div><button class="quiet" data-suggestion-file="${esc(file.id)}" data-suggestion-index="${index}">Use suggestion</button></div>`).join("")}</details>` : ""}`;
-}
-function useSuggestion(id, index) {
-  const file = state.reviews
-    .flatMap((job) => job.files || [])
-    .find((file) => String(file.id) === id);
-  const match = file?.catalog_matches?.[index];
-  const section = Array.from(
-    document.querySelectorAll("[data-review-file]"),
-  ).find((section) => section.dataset.reviewFile === id);
-  if (!match || !section) return;
-  for (const name of ["artist", "title"]) {
-    if (!match[name]) continue;
-    const input = section.querySelector(`[data-field="${name}"]`);
-    input.value = match[name];
-    input.classList.add("changed");
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-  }
-  toast("Artist and title filled. Confirm the version before approving.");
-}
-
-function exactDuplicate(file) {
-  if (!file.duplicate_of && !file.duplicate_file_id) return "";
-  const original = file.duplicate_of;
-  const label =
-    typeof original === "object" && original
-      ? [original.artist, original.title, original.album]
-          .filter(Boolean)
-          .join(" · ")
-      : String(original || "Matching library track");
-  return `<p class="warning">Identical audio already in your library: ${esc(label)}. Adding it will reuse the existing file and tags.</p>${file.duplicate_file_id ? `<div class="actions"><button class="quiet" data-preview="${esc(file.duplicate_file_id)}" data-title="${esc(label)}" data-artist="${esc(file.artist || "")}">Listen to library version</button></div>` : ""}`;
-}
 
 function showSharingError(error) {
   $("#sharing-error").textContent = error.message;
@@ -1021,6 +1065,57 @@ document.addEventListener("change", async (e) => {
   } finally {
     input.disabled = false;
   }
+});
+document.addEventListener("submit", (e) => {
+  const form = e.target;
+  if (!form.dataset.tagForm) return;
+  e.preventDefault();
+  const changes = Object.fromEntries(
+    [...form.querySelectorAll("input")]
+      .filter((input) => input.value !== input.dataset.original)
+      .map((input) => [
+        input.name,
+        ["bpm", "year"].includes(input.name)
+          ? input.value === ""
+            ? null
+            : Number(input.value)
+          : input.value,
+      ]),
+  );
+  if (!Object.keys(changes).length) {
+    form.remove();
+    return;
+  }
+  busy(e.submitter, async () => {
+    form.querySelector(".error").textContent = "";
+    try {
+      const result = await api(
+        `/api/files/${path(form.dataset.tagForm)}/tags`,
+        changes,
+      );
+      toast(result.detail || "Tags saved.");
+      await loadLibrary();
+    } catch (error) {
+      form.querySelector(".error").textContent = error.message;
+    }
+  });
+});
+async function loadAnalysis() {
+  if (!state.isAdmin) return;
+  const data = await api("/api/library/analysis");
+  state.analysisRunning = data.status === "running";
+  $("#start-analysis").hidden = state.analysisRunning;
+  $("#cancel-analysis").hidden = !state.analysisRunning;
+  const counts = `Added ${data.bpm_added || 0} BPM, ${data.key_added || 0} keys, ${data.genre_added || 0} genres, ${data.year_added || 0} years and ${data.mood_added || 0} moods; rewrote ${data.key_normalized || 0} keys as Camelot and ${data.genre_normalized || 0} genre spellings${data.audio_models === false ? "; audio models not installed, so no moods" : ""}${data.long_recordings ? `, ${data.long_recordings} long recordings skipped` : ""}${data.no_estimate ? `, ${data.no_estimate} without a confident estimate` : ""}${data.failed ? `, ${data.failed} failed` : ""}.`;
+  $("#analysis-status").textContent =
+    data.status === "running"
+      ? `Checking ${data.checked || 0} of ${data.total || 0} tracks. ${counts}`
+      : data.status === "idle"
+        ? "Not run yet."
+        : `Last run ${data.status}${data.finished_at ? ` ${new Date(data.finished_at).toLocaleString()}` : ""}: ${data.checked || 0} of ${data.total || 0} tracks checked. ${counts} ${data.detail || ""}`;
+}
+$("#library-analysis").addEventListener("toggle", (e) => {
+  if (e.target.open) loadAnalysis().catch((error) => toast(error.message, true));
 });
 $("#import-existing").addEventListener("toggle", (e) => {
   if (e.target.open) loadInbox().catch((error) => toast(error.message, true));
