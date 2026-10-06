@@ -99,13 +99,13 @@ def test_review_approval_and_stale_action(backend, monkeypatch):
         ).status_code
         == 400
     )
-    assert (
-        client.post(
-            "/api/jobs/job/approve",
-            json={"files": [{"id": "file", "metadata": {"bpm": 500}}]},
-        ).status_code
-        == 400
+    response = client.post(
+        "/api/jobs/job/approve",
+        json={"files": [{"id": "file", "metadata": {"title": "Odd one", "bpm": 500}}]},
     )
+    assert response.status_code == 400
+    assert response.json()["detail"] == {
+        "message": "Odd one: BPM must be between 0 and 400", "file_id": "file", "field": "bpm"}
     assert (
         client.post(
             "/api/jobs/job/approve",
@@ -200,7 +200,7 @@ def test_import_label_is_not_requested_track_title(backend, monkeypatch, tmp_pat
     response = client.post("/api/import", json={"paths": ["track.mp3"]})
     assert response.status_code == 200
     job = main.store.get("jobs", response.json()["id"])
-    assert job["label"] == "Import 1 files"
+    assert job["label"] == "track"
     assert "title" not in job["candidate"]
     assert "requested_title" not in job["candidate"]
 
@@ -536,7 +536,7 @@ def test_library_analysis_fills_genre_year_and_mood_from_catalog_then_audio(back
     assert (status['genre_added'], status['genre_normalized'], status['year_added'], status['mood_added']) == (2, 1, 2, 2)
     library = client.get('/api/library?genre=Jazz').json()
     assert [f['title'] for f in library['files']] == ['spelled.mp3']
-    assert client.post(f'/api/files/{listed_id}/tags', json={'year': 'soon'}).status_code == 400
+    assert client.post(f'/api/files/{listed_id}/tags', json={'key': 'soon'}).status_code == 400
     assert client.post(f'/api/files/{listed_id}/tags', json={'year': 1995, 'mood': 'Dark, Happy', 'genre': 'hip-hop; Jazz'}).status_code == 200
     media = MediaFile(str(listed))
     assert media.year == 1995 and media.mood == ['Dark', 'Happy'] and media.genres == ['Hip Hop', 'Jazz']
@@ -584,3 +584,45 @@ def test_error_during_shutdown_requeues_instead_of_failing(backend, monkeypatch)
         assert "resumes after restart" in job["detail"]
     finally:
         main.stop.set()
+
+
+def test_year_edits_are_lenient(backend):
+    main, _ = backend
+    clean = main.clean_metadata
+    assert clean({"year": "2024-05-01"})["year"] == 2024
+    assert clean({"year": 1994.0})["year"] == 1994
+    assert clean({"year": 0})["year"] == 0
+    assert clean({"year": 20240501})["year"] == 0
+    assert clean({"year": "unknown"})["year"] == 0
+
+
+def test_import_label_names_the_folder(backend, tmp_path):
+    main, _ = backend
+    root = tmp_path / "downloads"
+    paths = [str(root / "DIRECTOS" / artist / "a.mp3") for artist in ("Jul", "Migos")]
+    assert main.import_label(paths, root) == "DIRECTOS · 2 files"
+    assert main.import_label([str(root / "a.mp3"), str(root / "b.mp3")], root) == "Inbox import · 2 files"
+
+
+def test_approval_can_leave_tracks_for_later(backend, monkeypatch):
+    main, client = backend
+    signin(main, client, monkeypatch)
+    seed_review(main)
+    later = main.STATE / "later.mp3"
+    later.write_bytes(b"audio")
+    main.store.update_job("job", prepared=[{"path": str(main.STATE / "prepared.mp3")}, {"path": str(later)}])
+    main.store.put("files", "later", {"title": "Later"}, job_id="job", owner="mateo", published=0, path=str(later))
+    assert client.post("/api/jobs/job/approve", json={
+        "selected_file_ids": ["file"], "later_file_ids": ["file"]}).status_code == 400
+    response = client.post("/api/jobs/job/approve", json={
+        "files": [{"id": "file", "metadata": {"title": "Now"}}],
+        "selected_file_ids": ["file"], "later_file_ids": ["later"]})
+    assert response.status_code == 200
+    rest = main.store.get("jobs", response.json()["later_job_id"])
+    assert rest["stage"] == "review" and rest["split_from"] == "job" and rest["label"] == "Test"
+    assert [p["path"] for p in rest["prepared"]] == [str(later)]
+    assert main.store.get("files", "later")["job_id"] == rest["id"]
+    job = main.store.get("jobs", "job")
+    assert job["stage"] == "publish_queued" and job["skipped_count"] == 0
+    review = client.get("/api/review").json()["jobs"]
+    assert [[f["id"] for f in j["files"]] for j in review] == [["later"]]

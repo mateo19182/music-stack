@@ -21,7 +21,12 @@ def summarize(job, files):
         more = f' and {len(skipped) - 5} more' if len(skipped) > 5 else ''
         concerns.append(f'{len(skipped)} source file(s) did not decode cleanly and were left out: {names}{more}. Repair or replace them and import again.')
     candidate = job.get('candidate') or {}
-    album = candidate.get('kind') == 'album' or len(files) > 1
+    # Imported folders often hold many releases; only treat them as one album when the tags agree.
+    releases = {(str(f.get('album_artist') or f.get('artist') or '').strip().casefold(),
+                 str(f.get('album') or '').strip().casefold()) for f in files}
+    mixed = job.get('source') == 'existing' and candidate.get('kind') != 'album' and len(files) > 1 and (
+        len(releases) > 1 or not next(iter(releases))[1])
+    album = candidate.get('kind') == 'album' or (len(files) > 1 and not mixed)
     advice = job.get('advice') or {}
     result = advice.get('result') if advice.get('status') == 'complete' else {}
     result = result or {}
@@ -99,4 +104,4 @@ def summarize(job, files):
             notes.extend(label + ': ' + ', '.join(titles[:6]) + ('…' if len(titles) > 6 else '') for label, titles in versions.items())
     return {'status': 'check' if concerns else 'ready', 'label': 'Check before approving' if concerns else 'Ready to approve',
             'concerns': list(dict.fromkeys(concerns)), 'notes': notes, 'completeness': completeness,
-            'track_count': len(files), 'album': album}
+            'track_count': len(files), 'album': album, 'mixed': mixed}

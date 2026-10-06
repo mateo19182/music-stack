@@ -1,7 +1,7 @@
 """Authenticated acquisition with durable download/ingestion workers and review."""
 
 from __future__ import annotations
-import contextlib, hashlib, json, logging, os, secrets, sqlite3, threading, time, zipfile
+import contextlib, hashlib, json, logging, os, re, secrets, sqlite3, threading, time, zipfile
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -81,6 +81,8 @@ class Approval(BaseModel):
     files: list[dict] = Field(default_factory=list, max_length=500)
     keep_existing: bool = False
     selected_file_ids: list[str] | None = Field(default=None, max_length=500)
+    # Tracks to leave in Review as a separate download instead of keeping them privately.
+    later_file_ids: list[str] | None = Field(default=None, max_length=500)
 
 
 class SharingConfig(BaseModel):
@@ -286,6 +288,10 @@ def job_view(job):
             "source_metadata",
             "source_files",
             "provider",
+            "kind",
+            "username",
+            "filename",
+            "uploader",
         ]
         if candidate.get(k)
     }
@@ -1202,6 +1208,24 @@ def reject(id: str, user=Depends(check_user)):
     return {"ok": True}
 
 
+class MetadataError(HTTPException):
+    def __init__(self, field, message):
+        super().__init__(400, message)
+        self.field = field
+
+
+def year_value(value):
+    """A year from a number or a date such as 2024-05-01. Anything unusable means no year, not an error."""
+    if isinstance(value, str):
+        match = re.search(r"\d{4}", value)
+        value = match.group() if match else value.strip()
+    try:
+        year = int(float(value))
+    except (TypeError, ValueError):
+        return 0
+    return year if 1000 <= year <= 2100 else 0
+
+
 def clean_metadata(changes):
     """Validate tag edits. Empty BPM or year is 0 and empty text clears the tag; keys become Camelot."""
     if not isinstance(changes, dict) or set(changes) - {
@@ -1220,28 +1244,21 @@ def clean_metadata(changes):
         if isinstance(v, list) and k in {"genre", "mood"} and all(isinstance(i, str) for i in v):
             v = "; ".join(v)
         if k == "year":
-            if v in (None, ""):
-                v = 0
-            try:
-                v = int(v)
-            except (TypeError, ValueError):
-                raise HTTPException(400, "Year must be a whole number")
-            if v and not 1000 <= v <= 2100:
-                raise HTTPException(400, "Year must be between 1000 and 2100")
+            v = year_value(v)
         elif k == "bpm":
             if v in (None, ""):
                 v = 0
             try:
                 v = float(v)
             except (TypeError, ValueError):
-                raise HTTPException(400, "BPM must be numeric")
+                raise MetadataError("bpm", "BPM must be a number")
             if not 0 <= v <= 400:
-                raise HTTPException(400, "BPM must be between 0 and 400")
+                raise MetadataError("bpm", "BPM must be between 0 and 400")
         elif not isinstance(v, (str, type(None))) or (v and len(v) > 500):
-            raise HTTPException(400, "Metadata text is too long")
+            raise MetadataError(k, f"{k.capitalize()} is too long")
         elif k == "key" and v and v.strip():
             if not camelot(v):
-                raise HTTPException(400, f'"{v}" is not a key. Use Camelot (8A) or musical notation (Am)')
+                raise MetadataError("key", f'"{v}" is not a key. Use Camelot (8A) or musical notation (Am), or leave it empty')
             v = camelot(v)
         else:
             v = (v or "").strip() if k == "key" else v or ""
@@ -1262,11 +1279,20 @@ def approve(id: str, body: Approval, user=Depends(check_user)):
     selected = set(body.selected_file_ids) if body.selected_file_ids is not None else set(allowed)
     if not selected or selected - set(allowed):
         raise HTTPException(400, "Select at least one track belonging to this review")
+    later = set(body.later_file_ids or [])
+    if later & selected or later - set(allowed):
+        raise HTTPException(400, "Tracks left for later must belong to this review and not be approved")
     edits = {}
     for entry in body.files:
         if entry.get("id") not in allowed:
             raise HTTPException(400, "File does not belong to this review")
-        edits[allowed[entry["id"]]["path"]] = clean_metadata(entry.get("metadata", {}))
+        try:
+            edits[allowed[entry["id"]]["path"]] = clean_metadata(entry.get("metadata", {}))
+        except MetadataError as error:
+            # Name the track and field so a large batch shows where to look.
+            metadata = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
+            name = metadata.get("title") or allowed[entry["id"]].get("title") or Path(allowed[entry["id"]]["path"]).name
+            raise HTTPException(400, {"message": f"{name}: {error.detail}", "file_id": entry["id"], "field": error.field})
     if body.keep_existing:
         edits = {
             r["path"]: {
@@ -1275,19 +1301,48 @@ def approve(id: str, body: Approval, user=Depends(check_user)):
             }
             for r in records if r["id"] in selected
         }
+    # Move the later tracks first, so publication never deletes them as unselected.
+    later_id = split_review(job, [allowed[i] for i in later]) if later else None
     if not store.transition_job(
         id,
         {"review"},
         "publish_queued",
         edits=edits,
         selected_paths=[r["path"] for r in records if r["id"] in selected],
-        skipped_count=len(allowed) - len(selected),
+        skipped_count=len(allowed) - len(selected) - len(later),
         detail="Approved; waiting for publication",
         approved_by=f"agent:{user.get('name')}" if user.get("kind") == "agent" else user["username"],
         progress=0,
     ):
+        if later_id:
+            undo_split(id, later_id)
         raise HTTPException(409, "Review was already handled")
-    return {"ok": True}
+    return {"ok": True, "later_job_id": later_id}
+
+
+def split_review(job, records):
+    """Give some prepared tracks their own review so they can be decided later."""
+    later_id = uid()
+    paths = {str(Path(r["path"]).resolve()) for r in records}
+    data = {k: v for k, v in job.items() if k not in {
+        "id", "owner", "stage", "created_at", "edits", "selected_paths", "skipped_count", "approved_by",
+        "advice", "skipped_files", "published_file_ids"}}
+    data.update(
+        prepared=[p for p in job.get("prepared", []) if str(Path(p["path"]).resolve()) in paths],
+        prepared_file_ids=[r["id"] for r in records],
+        detail="Left in Review when the other tracks were added",
+        split_from=job["id"],
+    )
+    store.put("jobs", later_id, data, owner=job["owner"], stage="review", created_at=job.get("created_at") or now())
+    with store.db() as db:
+        db.executemany("UPDATE files SET job_id=? WHERE id=?", [(later_id, r["id"]) for r in records])
+    return later_id
+
+
+def undo_split(id, later_id):
+    with store.db() as db:
+        db.execute("UPDATE files SET job_id=? WHERE job_id=?", (id, later_id))
+        db.execute("DELETE FROM jobs WHERE id=?", (later_id,))
 
 
 @app.get("/api/library")
@@ -1531,6 +1586,15 @@ def inbox(user=Depends(check_user)):
     return {"files": files[:1000], "total": len(files)}
 
 
+def import_label(paths, root):
+    """Name an inbox import after its file or shared folder rather than its size."""
+    if len(paths) == 1:
+        return Path(paths[0]).stem
+    folder = Path(os.path.commonpath(paths))
+    count = f"{len(paths)} files"
+    return f"{folder.name} · {count}" if folder != root and folder.name else f"Inbox import · {count}"
+
+
 @app.post("/api/import")
 def import_files(body: Import, user=Depends(check_user)):
     if not user["isAdmin"]:
@@ -1544,7 +1608,7 @@ def import_files(body: Import, user=Depends(check_user)):
         paths.append(str(p))
     id = uid()
     candidate = {"source": "existing"}
-    label = "Import " + str(len(paths)) + " files"
+    label = import_label(paths, root)
     store.put(
         "jobs",
         id,

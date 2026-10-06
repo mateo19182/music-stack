@@ -73,3 +73,14 @@ def test_album_request_with_one_middle_track_is_partial():
     summary = album([track(3, track_total=10)])
     assert summary['status'] == 'check'
     assert any('missing track numbers' in c for c in summary['concerns'])
+
+
+def test_mixed_import_is_not_an_album():
+    files = [dict(id='1', artist='Jul', title='A', album='La machine'),
+             dict(id='2', artist='Young Dolph', title='B', album='')]
+    summary = summarize({'source': 'existing', 'candidate': {'source': 'existing'}}, files)
+    assert summary['mixed'] and not summary['album']
+    assert summary['status'] == 'ready' and summary['completeness'] is None
+    same = [dict(id=str(n), artist='Jul', title=f'T{n}', album='La machine', track_number=n) for n in (1, 2)]
+    summary = summarize({'source': 'existing', 'candidate': {'source': 'existing'}}, same)
+    assert summary['album'] and not summary['mixed']

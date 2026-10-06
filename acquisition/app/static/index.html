@@ -6,8 +6,8 @@
     <meta name="color-scheme" content="light" />
     <title>Acquire</title>
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v=20261005-2" />
-    <link rel="stylesheet" href="/static/style.css?v=20261006-1" />
-    <script defer src="/static/app.js?v=20261006-1"></script>
+    <link rel="stylesheet" href="/static/style.css?v=20261006-2" />
+    <script defer src="/static/app.js?v=20261006-2"></script>
   </head>
   <body>
     <div id="toast" role="status" aria-live="polite" hidden></div>
@@ -272,7 +272,9 @@
             <strong id="player-title">Preview</strong
             ><span id="player-subtitle" class="muted"></span>
           </div>
-          <audio id="player" controls></audio
+          <button id="player-previous" class="quiet" aria-label="Previous track" hidden>⏮</button
+          ><audio id="player" controls></audio
+          ><button id="player-next" class="quiet" aria-label="Next track" hidden>⏭</button
           ><button
             id="close-player"
             class="quiet"
