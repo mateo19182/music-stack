@@ -90,6 +90,7 @@ class Import(BaseModel):
 
 class AgentCredential(BaseModel):
     name: str = Field(min_length=1, max_length=80)
+    can_approve: bool = False
 
 
 def scan_shares():
@@ -141,6 +142,12 @@ def check_user(request: Request, bearer_credentials=Depends(HTTPBearer(auto_erro
 
 def require_manual(user):
     if user.get("kind") == "agent":
+        raise HTTPException(403, "This action requires manual approval in the web app")
+
+
+def require_approver(user):
+    """Humans may always approve; an agent only with a token minted with can_approve."""
+    if user.get("kind") == "agent" and not user.get("can_approve"):
         raise HTTPException(403, "This action requires manual approval in the web app")
 
 
@@ -274,6 +281,9 @@ def job_view(job):
         ]
         if candidate.get(k)
     }
+    source_url = candidate.get("url") or (candidate.get("source_metadata") or {}).get("webpage_url")
+    if source_url:
+        result["request"]["source_url"] = source_url
     if job.get("stage") == "review":
         result["review_summary"] = summarize(job, result["files"])
     return result
@@ -737,9 +747,10 @@ def create_agent(body: AgentCredential, user=Depends(check_user)):
     id = hashlib.sha256(token.encode()).hexdigest()
     expires = time.time() + 90 * 86400
     store.put("sessions", id, {"username": user["username"], "isAdmin": True,
-              "kind": "agent", "name": body.name, "created_at": now()}, expires=expires)
+              "kind": "agent", "name": body.name, "created_at": now(),
+              "can_approve": body.can_approve}, expires=expires)
     return {"id": id, "name": body.name, "token": token, "expires": expires,
-            "manual_approval_required": True}
+            "can_approve": body.can_approve, "manual_approval_required": not body.can_approve}
 
 
 @app.get("/api/agents")
@@ -747,7 +758,7 @@ def list_agents(user=Depends(check_user)):
     require_manual(user)
     if not user["isAdmin"]:
         raise HTTPException(403, "Administrator access required")
-    return {"agents": [{key: agent.get(key) for key in ("id", "name", "username", "expires", "created_at")}
+    return {"agents": [{key: agent.get(key) for key in ("id", "name", "username", "expires", "created_at", "can_approve")}
                        for agent in store.list("sessions", "expires>?", (time.time(),)) if agent.get("kind") == "agent"]}
 
 
@@ -1064,7 +1075,9 @@ def reject(id: str, user=Depends(check_user)):
 
 @app.post("/api/jobs/{id}/approve")
 def approve(id: str, body: Approval, user=Depends(check_user)):
-    require_manual(user)
+    require_approver(user)
+    if user.get("kind") == "agent" and body.files:
+        raise HTTPException(403, "Agents cannot edit metadata; approve in the web app to change tags")
     job = owned_job(id, user)
     if job["stage"] != "review":
         raise HTTPException(409, "Job is not awaiting review")
@@ -1120,6 +1133,7 @@ def approve(id: str, body: Approval, user=Depends(check_user)):
         selected_paths=[r["path"] for r in records if r["id"] in selected],
         skipped_count=len(allowed) - len(selected),
         detail="Approved; waiting for publication",
+        approved_by=f"agent:{user.get('name')}" if user.get("kind") == "agent" else user["username"],
         progress=0,
     ):
         raise HTTPException(409, "Review was already handled")

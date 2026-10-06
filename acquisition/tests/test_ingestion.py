@@ -219,3 +219,25 @@ def test_fractional_bpm_raw_id3_text_retained_without_edits(tmp_path):
     published = pipeline.publish(prepared, {}, 'raw-fraction')[0]
     assert published['bpm'] == pytest.approx(117.79)
     assert str(ID3(published['path'])['TBPM']) == '117.79'
+
+
+def test_youtube_single_keeps_title_and_gets_album_fallback(tmp_path):
+    source = audio(tmp_path, title='Artist - Live at the Studio')
+    tags = MediaFile(str(source))
+    tags.album = None
+    tags.save()
+    prepared = ingestor(tmp_path).prepare([source], {'source': 'youtube'}, 'yt')[0]
+    assert prepared['title'] == 'Artist - Live at the Studio'
+    assert prepared['album'] == 'Artist - Live at the Studio'
+    assert 'No embedded cover art. Navidrome will show no cover.' in prepared['warnings']
+    assert not any('Unknown Album' in w for w in prepared['warnings'])
+
+
+def test_soulseek_tags_are_not_rewritten(tmp_path):
+    source = audio(tmp_path, title='Artist - Kept')
+    tags = MediaFile(str(source))
+    tags.album = None
+    tags.save()
+    prepared = ingestor(tmp_path).prepare([source], {'source': 'soulseek'}, 'slsk')[0]
+    assert prepared['title'] == 'Artist - Kept' and not prepared['album']
+    assert 'No album tag. Navidrome will list this under Unknown Album.' in prepared['warnings']

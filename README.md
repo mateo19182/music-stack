@@ -143,16 +143,16 @@ local targets; tunnel credentials and account configuration are not in this repo
 
 ## Agent access
 
-See [acquisition/AGENTS.md](acquisition/AGENTS.md) for the 13 stdio MCP tools and
+See [acquisition/AGENTS.md](acquisition/AGENTS.md) for the 14 stdio MCP tools and
 [acquisition/mcp-config.example.json](acquisition/mcp-config.example.json) for
 client configuration. The same authenticated REST API is described by
 `/openapi.json` with Bearer authentication.
 
 A signed-in admin creates a dedicated token with `POST /api/agents` and a JSON
-`name`. Tokens expire after 90 days and can be revoked with `DELETE /api/agents/{id}`.
+`name`, optionally `"can_approve": true`. Tokens expire after 90 days and can be revoked with `DELETE /api/agents/{id}`.
 Store the token in a mode-`0600` credentials file. Agents may search, enqueue,
 import completed files, request advice, inspect reviews, cancel and retry jobs.
-They cannot approve publication, reject reviews, change sharing, or mint tokens.
+They cannot reject reviews, edit tags, change sharing, or mint tokens. They can approve publication (without editing tags) only if the token was minted with `can_approve`; the approval is recorded as `approved_by: agent:<name>`.
 A publication retry only resumes an existing human approval.
 
 ## Development and verification

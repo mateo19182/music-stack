@@ -242,6 +242,10 @@ class Ingestor:
                     media.title = source.stem
                 if not media.artist and len(paths) == 1 and not _preserve_tags:
                     media.artist = candidate.get('artist') or candidate.get('requested_artist') or ''
+                if candidate.get('source') == 'youtube' and len(paths) == 1 and not media.album and not _preserve_tags:
+                    # Uploads rarely declare an album; without one Navidrome lists the file
+                    # under Unknown Album, so treat it as a single named after its title.
+                    media.album = media.title
                 bpm, key = (None, None) if _preserve_tags else _analyze(work, not media.bpm_precise, not media.initial_key, cancelled)
                 estimates = {}
                 if bpm and not media.bpm_precise:
@@ -304,6 +308,10 @@ class Ingestor:
                     embedded = record['existing_tags'].get(field)
                     if requested and embedded and requested.casefold().strip() != embedded.casefold().strip():
                         record['warnings'].append(f'Requested {field} differs from embedded metadata: {requested} / {embedded}. Existing metadata retained.')
+            if not record.get('album'):
+                record['warnings'].append('No album tag. Navidrome will list this under Unknown Album.')
+            if not MediaFile(record['path']).art:
+                record['warnings'].append('No embedded cover art. Navidrome will show no cover.')
             record['catalog_matches'] = []
             if catalog_enabled and record.get('artist') and record.get('title'):
                 progress('Checking catalog metadata')

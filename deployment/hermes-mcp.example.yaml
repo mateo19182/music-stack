@@ -19,6 +19,7 @@ mcp_servers:
         - get_job
         - list_reviews
         - request_review_advice
+        - approve_review
         - library
         - enqueue
         - enqueue_url

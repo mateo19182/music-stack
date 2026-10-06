@@ -4,8 +4,8 @@ from types import SimpleNamespace
 from test_main import backend, signin, seed_review
 
 
-def agent_token(client):
-    response = client.post('/api/agents', json={'name': 'test-agent'})
+def agent_token(client, **extra):
+    response = client.post('/api/agents', json={'name': 'test-agent', **extra})
     assert response.status_code == 200
     data = response.json()
     return data, {'Authorization': 'Bearer ' + data['token']}
@@ -124,3 +124,32 @@ def test_model_switch_invalidates_advice_cache(backend, monkeypatch):
     assert new['fingerprint'] != old['fingerprint']
     assert client.post('/api/jobs/job/advice', json={}).json()['advice'] == new
     assert main.store.get('jobs', 'job')['stage'] == 'review'
+
+
+def test_approving_agent_publishes_without_editing_and_cannot_reject(backend, monkeypatch):
+    main, client = backend
+    signin(main, client, monkeypatch)
+    seed_review(main)
+    data, headers = agent_token(client, can_approve=True)
+    assert data['can_approve'] is True
+    assert client.get('/api/agents').json()['agents'][0]['can_approve'] is True
+    assert client.post('/api/jobs/job/reject', json={}, headers=headers).status_code == 403
+    assert client.post('/api/sharing', json={'enabled': False}, headers=headers).status_code == 403
+    assert client.post('/api/agents', json={'name': 'x'}, headers=headers).status_code == 403
+    edit = {'files': [{'id': 'file', 'metadata': {'title': 'Changed'}}]}
+    assert client.post('/api/jobs/job/approve', json=edit, headers=headers).status_code == 403
+    assert main.store.get('jobs', 'job')['stage'] == 'review'
+    assert client.post('/api/jobs/job/approve', json={}, headers=headers).status_code == 200
+    job = main.store.get('jobs', 'job')
+    assert job['stage'] == 'publish_queued' and job['approved_by'] == 'agent:test-agent'
+    assert client.post('/api/jobs/job/approve', json={}, headers=headers).status_code == 409
+
+
+def test_job_view_exposes_source_url(backend, monkeypatch):
+    main, client = backend
+    signin(main, client, monkeypatch)
+    seed_review(main)
+    job = main.store.get('jobs', 'job')
+    job['candidate'] = {'source': 'youtube', 'url': 'https://www.youtube.com/watch?v=abc'}
+    main.store.put('jobs', 'job', job, owner='mateo', stage='review', created_at='2026-01-01')
+    assert client.get('/api/jobs/job').json()['request']['source_url'] == 'https://www.youtube.com/watch?v=abc'

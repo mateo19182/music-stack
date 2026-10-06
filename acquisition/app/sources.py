@@ -335,9 +335,12 @@ class Sources:
                    "ignoreerrors": False,
                    "outtmpl": str(destination / "%(id)s.%(ext)s"), "restrictfilenames": True,
                    "continuedl": True, "overwrites": False, "progress_hooks": [hook],
-                   "postprocessor_hooks": [hook], "postprocessors": [
+                   # The video thumbnail becomes embedded cover art; Navidrome otherwise shows none.
+                   "writethumbnail": True, "postprocessor_hooks": [hook], "postprocessors": [
+                       {"key": "FFmpegThumbnailsConvertor", "format": "jpg", "when": "before_dl"},
                        {"key": "FFmpegExtractAudio", "preferredcodec": "best"},
-                       {"key": "FFmpegMetadata", "add_metadata": True}], "keepvideo": False}
+                       {"key": "FFmpegMetadata", "add_metadata": True},
+                       {"key": "EmbedThumbnail", "already_have_thumbnail": False}], "keepvideo": False}
         try:
             with yt_dlp.YoutubeDL(options) as downloader:
                 downloaded_info = downloader.extract_info(url, download=True)

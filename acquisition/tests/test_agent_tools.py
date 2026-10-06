@@ -66,7 +66,7 @@ def test_tools_use_exact_api_contract(bridge, name, args, method, path, payload)
     ("retry_job", {"id": "x", "stage": "publish"}), ("search_music", {"source": "unsupported"}),
     ("library", {"page": True}), ("library", {"bpm_min": float("inf")}), ("library", {"page": 0}),
     ("import_files", {"paths": []}), ("import_files", {"paths": [1]}), ("import_files", {"paths": ["x"] * 101}),
-    ("health", []), ("approve", {"id": "job"}),
+    ("health", []), ("approve", {"id": "job"}), ("approve_review", {"id": "j", "keep_existing": "yes"}), ("approve_review", {"id": "j", "files": []}), ("approve_review", {"id": "j", "selected_file_ids": []}),
 ])
 def test_invalid_inputs_never_reach_http(bridge, name, args):
     instance, received = bridge
@@ -122,8 +122,9 @@ def test_handshake_registry_notifications_and_invalid_requests(bridge):
     initialize(instance)
     assert instance.handle({"jsonrpc": "2.0", "id": 2, "method": "ping"})["result"] == {}
     registry = instance.handle({"jsonrpc": "2.0", "id": 3, "method": "tools/list"})["result"]["tools"]
-    assert len(registry) == 13
-    assert not any(any(word in item["name"] for word in ["approve", "reject", "publish", "delete", "sharing"]) for item in registry)
+    assert len(registry) == 14
+    assert [item["name"] for item in registry if "approve" in item["name"]] == ["approve_review"]
+    assert not any(any(word in item["name"] for word in ["reject", "publish", "delete", "sharing"]) for item in registry)
     for item in registry:
         assert "endpoint" not in item and "method" not in item
         assert item["inputSchema"]["additionalProperties"] is False

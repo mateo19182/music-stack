@@ -134,9 +134,12 @@ class SourceTests(unittest.TestCase):
             downloader.extract_info.side_effect = extract
             context = MagicMock()
             context.__enter__.return_value = downloader
-            with patch('app.sources.yt_dlp.YoutubeDL', return_value=context):
+            with patch('app.sources.yt_dlp.YoutubeDL', return_value=context) as ytdl:
                 events = []
                 files = sources.download(candidate, destination, events.append, lambda: False)
+            download_options = ytdl.call_args_list[-1].args[0]
+            self.assertTrue(download_options['writethumbnail'])
+            self.assertEqual([p['key'] for p in download_options['postprocessors']][-1], 'EmbedThumbnail')
             self.assertEqual(files[0].name, 'abc.opus')
             self.assertEqual(candidate['source_title'], 'Real song')
             self.assertEqual(candidate['requested_title'], 'Requested song')
