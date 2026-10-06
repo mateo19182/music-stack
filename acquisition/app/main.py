@@ -832,7 +832,8 @@ app = FastAPI(
 )
 login_attempts = {}
 login_lock = threading.Lock()
-search_slots = threading.BoundedSemaphore(3)
+# Soulseek searches queue one at a time in sources.soulseek_searches; this only bounds waiting threads.
+search_slots = threading.BoundedSemaphore(8)
 
 
 @app.middleware("http")

@@ -300,3 +300,87 @@ class SourceTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class SoulseekSearchTests(unittest.TestCase):
+    def test_queries_keep_only_words_peers_can_match(self):
+        from app.sources import soulseek_query
+        self.assertEqual(soulseek_query('Khadija Al Hanafi ¡OK!'), 'khadija al hanafi ok')
+        self.assertEqual(soulseek_query("Normal Pleasure MELBOURNE'S DEAD"), 'normal pleasure melbourne dead')
+        self.assertEqual(soulseek_query("I Lay Down My Life For You (DIrector's Cut)"), 'lay down my life for you')
+        self.assertEqual(soulseek_query('Danny Ocean Me Rehúso feat. Someone'), 'danny ocean me rehúso')
+        self.assertEqual(soulseek_query('clipping. - Dead Channel Sky [2025]'), 'clipping dead channel sky')
+        self.assertEqual(soulseek_query('Jawnino 40'), 'jawnino 40')
+        # A name the server drops searches for is left out; "-word" would be an exclusion.
+        self.assertEqual(soulseek_query('JPEGMAFIA - Scaring the Hoes'), 'scaring the hoes')
+
+    def test_limiter_spaces_searches_and_keeps_the_window_rate(self):
+        from app.sources import SearchLimiter
+        now = [0.0]
+        waits = []
+
+        def sleep(seconds):
+            waits.append(round(seconds, 2))
+            now[0] += seconds
+
+        limiter = SearchLimiter(per_window=3, window=100, spacing=5, clock=lambda: now[0], sleep=sleep)
+        for _ in range(4):
+            with limiter:
+                now[0] += 1   # the search itself
+        # 5 s between starts; the 4th waits for the first to leave the 100 s window.
+        self.assertEqual(waits, [4.0, 4.0, 89.0])
+
+    def test_responses_are_read_after_the_search_ends_and_then_deleted(self):
+        from app import sources as module
+        calls, states = [], iter([{}, {}, {'endedAt': '2026-10-06T20:00:00Z'}])
+
+        def api(method, path, **kwargs):
+            calls.append((method, path.split('/')[-1] if path.endswith('responses') else method))
+            if method == 'GET' and path.endswith('/responses'):
+                return [{'username': 'peer', 'files': [{'filename': 'Music\\Album\\01 a.flac', 'size': 1}]}]
+            if method == 'GET':
+                return next(states)
+            return None
+
+        source = Sources({'slskd_search_seconds': 1})
+        with patch.object(source, '_slskd', side_effect=api), patch.object(module.time, 'sleep'), \
+             patch.object(module, 'soulseek_searches', module.SearchLimiter(sleep=lambda s: None)):
+            results = source._search_soulseek('Album', 'album')
+        self.assertEqual(len(results), 1)
+        self.assertEqual([c[0] for c in calls], ['POST', 'GET', 'GET', 'GET', 'GET', 'DELETE'])
+        self.assertEqual(calls[-2][1], 'responses')
+
+    def test_unfinished_search_is_cancelled_before_reading(self):
+        from app import sources as module
+        calls = []
+        clock = [0.0]
+
+        def api(method, path, **kwargs):
+            calls.append(method)
+            if method == 'PUT':
+                return None
+            if method == 'GET' and path.endswith('/responses'):
+                return []
+            return {'endedAt': '2026'} if 'PUT' in calls else {}
+
+        def sleep(seconds):
+            clock[0] += 30
+
+        source = Sources({'slskd_search_seconds': 1})
+        with patch.object(source, '_slskd', side_effect=api), patch.object(module.time, 'sleep', sleep), \
+             patch.object(module.time, 'monotonic', lambda: clock[0]), \
+             patch.object(module, 'soulseek_searches', module.SearchLimiter(sleep=lambda s: None, clock=lambda: clock[0])):
+            source._search_soulseek('Album', 'album')
+        self.assertIn('PUT', calls)
+        self.assertLess(calls.index('PUT'), calls.index('DELETE'))
+
+    def test_disc_folders_merge_into_one_album(self):
+        data = [{'username': 'peer', 'files': [
+            {'filename': 'Music\\Artist - Album\\CD1\\01 a.flac', 'size': 1},
+            {'filename': 'Music\\Artist - Album\\Disc 2\\01 b.mp3', 'size': 1}]}]
+        albums = normalize_soulseek(data, 'album')
+        self.assertEqual(len(albums), 1)
+        self.assertEqual(albums[0]['leaf_folder'], 'Artist - Album')
+        self.assertEqual(albums[0]['file_count'], 2)
+        self.assertEqual(albums[0]['formats'], {'flac': 1, 'mp3': 1})
+        self.assertTrue(albums[0]['mixed_formats'])

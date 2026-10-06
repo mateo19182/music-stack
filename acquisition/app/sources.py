@@ -5,14 +5,78 @@ from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha256
 from pathlib import Path, PureWindowsPath
 from urllib.parse import quote, unquote, urlsplit
+import collections
+import re
 import shutil
+import threading
 import time
+import unicodedata
 import uuid
 
 import httpx
 import yt_dlp
 
 AUDIO_EXTENSIONS = {"mp3", "flac", "m4a", "aac", "ogg", "opus", "wav", "aiff", "alac", "wma"}
+# Names the Soulseek server drops whole searches for (an empty answer, not an error).
+# A "*name" wildcard does not get through either, so the word is left out of the query.
+FILTERED_TERMS = {"jpegmafia"}
+# Same set Nicotine+ turns into spaces, plus Spanish/typographic marks.
+_PUNCTUATION = re.compile(r"[!\"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~¡¿’‘“”–—·•]")
+_DISC_FOLDER = re.compile(r"^(?:dis[ck]|cd)\s*\d{1,2}$", re.I)
+
+
+def soulseek_query(text):
+    """Words a Soulseek peer can match: "¡OK!" → "ok", "MELBOURNE'S DEAD" → "melbourne dead".
+
+    Peers match every query word against path words, so punctuation-bearing words, featured
+    artists and bracketed qualifiers ("(Director's Cut)") only make a search miss.
+    """
+    text = unicodedata.normalize("NFKC", str(text or "")).casefold()
+    text = re.sub(r"[(\[{].*?[)\]}]", " ", text)
+    text = re.sub(r"\s(?:feat|ft|featuring)\b.*$", " ", text)
+    words = _PUNCTUATION.sub(" ", text).split()
+    words = [w for w in words if (len(w) > 1 or w.isdigit()) and w not in FILTERED_TERMS]
+    return " ".join(words)
+
+
+def without_accents(text):
+    return unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
+
+
+class SearchLimiter:
+    """One Soulseek search at a time, spaced out, within the server's rate.
+
+    The server bans an account for 30 minutes when it searches too fast (sldl allows 34
+    searches per 220 s); overlapping searches also come back empty. Callers wait their turn.
+    """
+
+    def __init__(self, per_window=30, window=220.0, spacing=5.0, clock=time.monotonic, sleep=time.sleep):
+        self.per_window, self.window, self.spacing = per_window, window, spacing
+        self.clock, self.sleep = clock, sleep
+        self.lock = threading.Lock()
+        self.started = collections.deque()
+
+    def __enter__(self):
+        self.lock.acquire()
+        now = self.clock()
+        while self.started and now - self.started[0] >= self.window:
+            self.started.popleft()
+        wait = 0.0
+        if self.started:
+            wait = max(wait, self.started[-1] + self.spacing - now)
+        if len(self.started) >= self.per_window:
+            wait = max(wait, self.started[0] + self.window - now)
+        if wait > 0:
+            self.sleep(wait)
+        self.started.append(self.clock())
+        return self
+
+    def __exit__(self, *exc):
+        self.lock.release()
+
+
+soulseek_searches = SearchLimiter()
+
 YOUTUBE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be", "www.youtu.be"}
 
 
@@ -133,17 +197,24 @@ def normalize_soulseek(data, kind="track"):
                          "free_slots": _get(response, "hasFreeUploadSlot", False), "url": None,
                          "files": [normalized], "file_count": 1}
             if kind == "album":
-                folder = str(path.parent)
+                parent = path.parent
+                if _DISC_FOLDER.match(parent.name) and parent.parent.name:
+                    parent = parent.parent   # "Album\\CD1", "Album\\Disc 2" are one release
+                folder = str(parent)
                 groups.setdefault(folder, {**candidate, "id": _identity("soulseek", user, folder),
-                                           "kind": "album", "title": path.parent.name, "album": path.parent.name,
-                                           "directory": folder, "files": [], "folder_complete": False})["files"].append(normalized)
+                                           "kind": "album", "title": parent.name, "album": parent.name,
+                                           "directory": folder, "leaf_folder": parent.name, "files": [],
+                                           "folder_complete": False})["files"].append(normalized)
             else:
                 result.append(candidate)
         for candidate in groups.values():
             candidate["file_count"] = len(candidate["files"])
             candidate["size"] = sum(f["size"] or 0 for f in candidate["files"])
+            candidate["formats"] = dict(collections.Counter(f["format"] for f in candidate["files"]))
+            candidate["mixed_formats"] = len(candidate["formats"]) > 1
             result.append(candidate)
-    return sorted(result, key=lambda c: (not c["free_slots"], c["queue_length"] or 0, -(c["bitrate"] or 0)))[:150]
+    # Generous cap: callers rank by identity first, so a busy peer's right album must survive.
+    return sorted(result, key=lambda c: (not c["free_slots"], c["queue_length"] or 0, -(c["bitrate"] or 0)))[:500]
 
 
 class _QuietLogger:
@@ -220,28 +291,46 @@ class Sources:
         return results
 
     def _search_soulseek(self, query, kind):
+        cleaned = soulseek_query(query)
+        if not cleaned:
+            raise SourceError("Nothing searchable on Soulseek in that query; add an album or track name.")
+        results = self._soulseek_once(cleaned, kind)
+        plain = without_accents(cleaned)
+        if plain != cleaned:
+            # Shares are often named without accents ("Rehuso" for "Rehúso").
+            known = {c["id"] for c in results}
+            results += [c for c in self._soulseek_once(plain, kind) if c["id"] not in known]
+        return results
+
+    def _soulseek_once(self, query, kind):
         search_id = str(uuid.uuid4())
         seconds = float(self.config.get("slskd_search_seconds", 20))
-        self._slskd("POST", "/searches", json={"id": search_id, "searchText": query,
-                     "searchTimeout": int(seconds * 1000), "fileLimit": 1000, "responseLimit": 150,
-                     "filterResponses": True, "maximumPeerQueueLength": 150,
-                     "minimumPeerUploadSpeed": 0, "minimumResponseFileCount": 1})
-        deadline = time.monotonic() + seconds
-        data = {}
-        try:
-            while time.monotonic() < deadline:
-                data = self._slskd("GET", f"/searches/{search_id}", params={"includeResponses": "true"})
-                if _get(data, "isComplete", False) or "Completed" in str(_get(data, "state", "")):
-                    break
-                time.sleep(min(1, max(0, deadline - time.monotonic())))
-            if not _get(data, "responses"):
-                data = self._slskd("GET", f"/searches/{search_id}/responses")
-            return normalize_soulseek(data, kind)
-        finally:
+        with soulseek_searches:
+            self._slskd("POST", "/searches", json={"id": search_id, "searchText": query,
+                         "searchTimeout": int(seconds * 1000), "fileLimit": 1000, "responseLimit": 150,
+                         "filterResponses": True, "maximumPeerQueueLength": 150,
+                         "minimumPeerUploadSpeed": 0, "minimumResponseFileCount": 1})
             try:
-                self._slskd("DELETE", f"/searches/{search_id}")
-            except SourceError:
-                pass
+                # searchTimeout restarts on every response, and slskd stores responses only when the
+                # search ends: read them after endedAt, never on a fixed clock.
+                deadline = time.monotonic() + seconds + 45
+                cancelled = False
+                while True:
+                    data = self._slskd("GET", f"/searches/{search_id}") or {}
+                    if _get(data, "endedAt"):
+                        break
+                    if time.monotonic() >= deadline:
+                        if cancelled:
+                            break
+                        self._slskd("PUT", f"/searches/{search_id}")   # stop it; slskd then stores what arrived
+                        cancelled, deadline = True, time.monotonic() + 10
+                    time.sleep(1)
+                return normalize_soulseek(self._slskd("GET", f"/searches/{search_id}/responses") or [], kind)
+            finally:
+                try:
+                    self._slskd("DELETE", f"/searches/{search_id}")
+                except SourceError:
+                    pass
 
     def _search_youtube(self, query, kind):
         direct = bool(urlsplit(query).scheme)
