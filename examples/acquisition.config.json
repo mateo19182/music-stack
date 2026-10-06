@@ -7,6 +7,7 @@
   "slskd_download_root": "/downloads/slskd",
   "slskd_search_seconds": 15,
   "download_timeout_seconds": 3600,
+  "ingestion_workers": 1,
   "navidrome_url": "http://navidrome:4533",
   "navidrome_db": "/navidrome/navidrome.db",
   "navidrome_public_url": "https://navidrome.example.com",
@@ -16,5 +17,7 @@
   "share_root": "/music-storage/shared",
   "sharing_source_root": "/music-storage/library",
   "openrouter_api_key": "",
-  "openrouter_model": "meta/muse-spark-1.3-contributor"
+  "openrouter_model": "meta/muse-spark-1.3-contributor",
+  "discogs_token": "",
+  "lastfm_api_key": ""
 }

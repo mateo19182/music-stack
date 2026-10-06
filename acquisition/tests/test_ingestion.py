@@ -32,7 +32,7 @@ def test_publish_preserves_sources_tags_and_retry(tmp_path):
     assert _audio_hash(source) == _audio_hash(published)
     assert result['original_sha256'] == hashlib.sha256(original).hexdigest()
     assert result['title'] == 'Song (Club Remix)'
-    assert result['bpm'] == 123 and result['key'] == 'Am'
+    assert result['bpm'] == 123 and result['key'] == '8A'
     assert result['analysis_source'] == {}
     assert result['format'] == 'mp3' and result['duration'] > 2
     assert published.with_name(published.name + '.provenance.json').is_file()
@@ -241,3 +241,70 @@ def test_soulseek_tags_are_not_rewritten(tmp_path):
     prepared = ingestor(tmp_path).prepare([source], {'source': 'soulseek'}, 'slsk')[0]
     assert prepared['title'] == 'Artist - Kept' and not prepared['album']
     assert 'No album tag. Navidrome will list this under Unknown Album.' in prepared['warnings']
+
+
+def test_existing_keys_become_camelot_and_non_keys_are_estimated(tmp_path):
+    valid = audio(tmp_path, key='Ebm')
+    junk = audio(tmp_path, name='junk.mp3', title='Other', key='EBM')
+    pipeline = ingestor(tmp_path)
+    normalized = pipeline.prepare([valid], {}, 'valid')[0]
+    assert normalized['key'] == '2A' and 'key' not in normalized['analysis_source']
+    assert MediaFile(normalized['path']).initial_key == '2A'
+    estimated = pipeline.prepare([junk], {}, 'junk')[0]
+    assert estimated['existing_tags']['key'] == 'EBM'
+    assert estimated['key'] != 'EBM' and estimated['analysis_source'].get('key')
+    assert any('"EBM" is not a musical key' in warning for warning in estimated['warnings'])
+    assert MediaFile(str(junk)).initial_key == 'EBM'
+
+
+def test_long_recordings_are_not_analyzed(tmp_path, monkeypatch):
+    monkeypatch.setattr('app.ingestion.MAX_ANALYSIS_SECONDS', 1)
+    monkeypatch.setattr('app.ingestion._analyze', lambda *_: pytest.fail('long recordings must not be analyzed'))
+    source = audio(tmp_path, bpm=None, key=None)
+    prepared = ingestor(tmp_path).prepare([source], {}, 'album-in-one-file')[0]
+    assert prepared['bpm'] is None and prepared['key'] is None
+    assert prepared['analysis_skipped'] == 'long-recording'
+    assert any('Longer than 20 minutes' in warning for warning in prepared['warnings'])
+
+
+def test_json_writes_from_parallel_workers_do_not_collide(tmp_path):
+    import json
+    import threading
+    from app.ingestion import _json
+    target = tmp_path / 'audio-index.json'
+    errors = []
+
+    def write(n):
+        try:
+            for i in range(50):
+                _json(target, {'worker': n, 'i': i})
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=write, args=(n,)) for n in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors
+    assert json.loads(target.read_text())['i'] == 49
+    assert [p.name for p in tmp_path.iterdir()] == ['audio-index.json']
+
+
+def test_prepare_skips_undecodable_file_and_keeps_the_rest(tmp_path):
+    good = audio(tmp_path)
+    bad = tmp_path / 'broken.mp3'
+    bad.write_text('not audio')
+    skipped = []
+    prepared = ingestor(tmp_path).prepare([bad, good], {}, 'mixed', skipped=skipped)
+    assert [Path(r['source_path']).name for r in prepared] == [good.name]
+    assert [entry['name'] for entry in skipped] == ['broken.mp3']
+    assert skipped[0]['reason']
+    assert not list((tmp_path / 'library').rglob('*.mp3'))
+
+
+def test_skipping_never_swallows_cancellation(tmp_path):
+    bad = tmp_path / 'broken.mp3'
+    bad.write_text('not audio')
+    with pytest.raises(IngestionCancelled):
+        ingestor(tmp_path).prepare([bad], {}, 'cancel', cancelled=lambda: True, skipped=[])

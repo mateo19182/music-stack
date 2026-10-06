@@ -49,7 +49,19 @@ SoundCloud, Bandcamp and Vimeo URLs are supported.
    links. Everything accepted is shared by default; admins can exclude tracks or
    pause all sharing.
 6. Library supports playback, genre/key/BPM filters, original file downloads,
-   album ZIP exports and Navidrome links.
+   album ZIP exports and Navidrome links. Keys use Camelot notation (8A = A
+   minor) and genres one spelling each (Hip-Hop becomes Hip Hop). Admins can
+   edit a track's tags from More → Edit tags. Tag edits made with other tools
+   are picked up within five minutes.
+
+Missing BPM, key, genre, year and mood are filled during ingestion and, for
+existing music, by Library → Tag analysis. MusicBrainz is authoritative: its
+first release year and genres are used first, then Discogs (year, styles), then
+Last.fm artist tags for genre. When the catalogs have nothing, genre comes from Essentia's Discogs-EffNet model.
+Mood (happy, sad, aggressive, relaxed, party, danceable), BPM and key always
+come from the audio. Values already in a file are kept, every filled value
+records its source, and files over 20 minutes are not analyzed from audio. Key
+tags that are not keys are listed under Key → Not a key for manual correction.
 
 An album/playlist URL imports its available audio files. A single full-concert
 video remains one file; YouTube chapters are not split into separate tracks.
@@ -109,7 +121,8 @@ media root with ownership that permits that user to write:
 Run `./scripts/init-config.sh`, then edit the private files under `config/`:
 
 - `acquisition/config.json`: slskd API key, optional OpenRouter key, model and
-  site URLs. Its slskd key must match the key in `slskd/slskd.yml`.
+  site URLs, optional `discogs_token` and `lastfm_api_key` for genre and year
+  lookups. Its slskd key must match the key in `slskd/slskd.yml`.
 - `slskd/slskd.yml`: Soulseek account, admin credentials and API key. Share only
   `/data/shared`; pending or rejected downloads must stay private.
 - `airvpn/airvpn.env`: WireGuard private/preshared keys, addresses and selected
@@ -138,6 +151,11 @@ acquisition config request an immediate scan; otherwise the scheduled scan runs
 every five minutes. The OpenRouter key enables automatic metadata advice;
 without a key the app still supports manual review.
 
+Genre and mood estimates need Essentia's models (about 23 MB, CC BY-NC-ND 4.0)
+in the acquisition state directory. Run `./scripts/fetch-models.sh`; it uses
+`ACQUISITION_STATE_DIR` from `.env`, verifies checksums and can be rerun.
+Without the models, catalog lookups and BPM/key analysis still work.
+
 Cloudflared runs separately on the host. The ingress example documents the
 local targets; tunnel credentials and account configuration are not in this repo.
 
@@ -157,7 +175,8 @@ A publication retry only resumes an existing human approval.
 
 ## Development and verification
 
-Python 3.11 supports the pinned Essentia wheel. FFmpeg, ffprobe and Chromaprint
+Python 3.11 supports the pinned Essentia TensorFlow wheel. Set
+`ESSENTIA_MODELS` to a fetched model directory to include the real-model test. FFmpeg, ffprobe and Chromaprint
 must be installed for ingestion tests. The Docker image also includes Node 24 for
 yt-dlp's YouTube JavaScript support.
 

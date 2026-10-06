@@ -15,6 +15,11 @@ def summarize(job, files):
     concerns, notes = [], []
     if not files:
         concerns.append('No prepared tracks are available.')
+    skipped = job.get('skipped_files') or []
+    if skipped:
+        names = ', '.join(entry.get('name') or 'a file' for entry in skipped[:5])
+        more = f' and {len(skipped) - 5} more' if len(skipped) > 5 else ''
+        concerns.append(f'{len(skipped)} source file(s) did not decode cleanly and were left out: {names}{more}. Repair or replace them and import again.')
     candidate = job.get('candidate') or {}
     album = candidate.get('kind') == 'album' or len(files) > 1
     advice = job.get('advice') or {}

@@ -2,35 +2,35 @@
 from __future__ import annotations
 
 import fcntl
-import copy
 import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 import sys
 from pathlib import Path
 
 import numpy as np
 from beets.library import Item, Library
-from mediafile import MediaFile, MediaField, MP4StorageStyle
+from mediafile import MediaFile
 
-
-# ID3/Vorbis/RIFF BPM is textual and can retain fractions. MP4's native
-# tmpo is integer-only, so preserve exact BPM in the common freeform tag too.
-if not hasattr(MediaFile, 'bpm_precise'):
-    bpm_styles = copy.deepcopy(MediaFile.__dict__['bpm']._styles)
-    for bpm_style in bpm_styles:
-        bpm_style.float_places = 8
-    MediaFile.add_field('bpm_precise', MediaField(
-        MP4StorageStyle('----:com.apple.iTunes:BPM', as_type=str, float_places=8),
-        *bpm_styles, out_type=float))
+from .keys import camelot, key_fields
+from .audio_models import SAMPLE_RATE, models_at
+from .descriptors import fill_descriptors
+from .lookup import Catalog
+from .tags import set_tag, split_values
 
 
 class IngestionCancelled(RuntimeError):
     pass
+
+
+# A full album, live set or mix in one file has no single tempo or key.
+MAX_ANALYSIS_SECONDS = 20 * 60
+_audio_index_lock = threading.Lock()
 
 
 def _hash(path):
@@ -42,7 +42,8 @@ def _hash(path):
 
 
 def _json(path, data):
-    temporary = path.with_suffix(path.suffix + '.tmp')
+    # Unique per thread: parallel processing workers share the audio index.
+    temporary = path.with_name(f'.{path.name}.{os.getpid()}.{threading.get_ident()}.tmp')
     temporary.write_text(json.dumps(data, indent=2))
     os.replace(temporary, path)
 
@@ -51,6 +52,16 @@ def _audio_hash(path, cancelled=lambda: False):
     result = _run(['ffmpeg', '-v', 'error', '-i', str(path), '-map', '0:a:0',
                    '-c:a', 'copy', '-f', 'hash', '-hash', 'sha256', '-'], 300, cancelled)
     return result.stdout.decode().strip().split('=', 1)[1]
+
+
+def _failure_reason(exc):
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return 'Decoding timed out'
+    if isinstance(exc, subprocess.CalledProcessError):
+        error = exc.stderr.decode(errors='replace') if isinstance(exc.stderr, bytes) else str(exc.stderr or '')
+        lines = [line.split('] ', 1)[-1].strip() for line in error.splitlines() if line.strip()]
+        return ('Audio does not decode cleanly: ' + lines[-1])[:200] if lines else 'Audio does not decode cleanly'
+    return str(exc)[:200] or 'Unreadable audio file'
 
 
 def _component(value):
@@ -88,6 +99,23 @@ def _essentia():
         return None
 
 
+def _decode(path, rate, cancelled=lambda: False):
+    """Mono float32 audio from at most the first three minutes."""
+    raw = _run(['ffmpeg', '-v', 'error', '-i', str(path), '-t', '180',
+                '-ac', '1', '-ar', str(rate), '-f', 'f32le', '-'], 240, cancelled).stdout
+    return np.frombuffer(raw, dtype='<f4').copy()
+
+
+def _genre_text(media):
+    return '; '.join(media.genres or []) or None
+
+
+def estimate_source(field):
+    if _essentia():
+        return {'bpm': 'essentia-rhythm-multifeature-estimate', 'key': 'essentia-edma-key-estimate'}[field]
+    return {'bpm': 'spectral-flux-autocorrelation-v1', 'key': 'chroma-profile-correlation-v1'}[field]
+
+
 def _analyze(path, need_bpm, need_key, cancelled=lambda: False):
     """Estimate from at most three minutes. Existing tags always take precedence."""
     if not need_bpm and not need_key:
@@ -107,7 +135,7 @@ def _analyze(path, need_bpm, need_key, cancelled=lambda: False):
         if need_key:
             pitch, scale, strength = engine.KeyExtractor(sampleRate=44100, profileType='edma')(audio)
             if strength >= 0.4:
-                key = pitch + ('m' if scale == 'minor' else '')
+                key = camelot(pitch + ('m' if scale == 'minor' else ''))
         return bpm, key
     raw = _run(['ffmpeg', '-v', 'error', '-i', str(path), '-t', '180',
                 '-ac', '1', '-ar', '11025', '-f', 'f32le', '-'], 240, cancelled).stdout
@@ -139,7 +167,7 @@ def _analyze(path, need_bpm, need_key, cancelled=lambda: False):
         scores = [(float(np.corrcoef(chroma, np.roll(profile, root))[0, 1]), root, mode)
                   for mode, profile in [('major', major), ('minor', minor)] for root in range(12)]
         _, root, mode = max(scores)
-        key = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'][root] + ('m' if mode == 'minor' else '')
+        key = camelot(['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'][root] + ('m' if mode == 'minor' else ''))
     return bpm, key
 
 
@@ -183,8 +211,10 @@ class Ingestor:
         self.beets_path.parent.mkdir(parents=True, exist_ok=True)
         # Fail startup immediately if the runtime cannot initialize beets.
         Library(str(self.beets_path), directory=str(self.library))
+        self.catalog = Catalog(self.config)
+        self.models = models_at(self.config.get('models_root') or str(Path(self.config.get('state_root', '/state')) / 'models'))
 
-    def process(self, paths, candidate, job_id, progress=lambda *args: None, cancelled=lambda: False, _preserve_tags=False):
+    def process(self, paths, candidate, job_id, progress=lambda *args: None, cancelled=lambda: False, _preserve_tags=False, skipped=None):
         def check():
             if cancelled():
                 raise IngestionCancelled('Ingestion cancelled; source downloads retained')
@@ -219,13 +249,20 @@ class Ingestor:
                     manifest[original] = record
                     _json(manifest_path, manifest)
                     continue
-                probe = json.loads(_run(['ffprobe', '-v', 'error', '-show_streams', '-show_format', '-of', 'json', str(source)], cancelled=cancelled).stdout)
-                streams = [s for s in probe['streams'] if s.get('codec_type') == 'audio']
-                if len(streams) != 1:
-                    raise ValueError('Expected exactly one audio stream')
-                stream = streams[0]
-                # Decode the entire source before admitting it to the library.
-                _run(['ffmpeg', '-v', 'error', '-xerror', '-i', str(source), '-map', '0:a:0', '-f', 'null', '-'], 1800, cancelled)
+                try:
+                    probe = json.loads(_run(['ffprobe', '-v', 'error', '-show_streams', '-show_format', '-of', 'json', str(source)], cancelled=cancelled).stdout)
+                    streams = [s for s in probe['streams'] if s.get('codec_type') == 'audio']
+                    if len(streams) != 1:
+                        raise ValueError('Expected exactly one audio stream')
+                    stream = streams[0]
+                    # Decode the entire source before admitting it to the library.
+                    _run(['ffmpeg', '-v', 'error', '-xerror', '-i', str(source), '-map', '0:a:0', '-f', 'null', '-'], 1800, cancelled)
+                except (subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError, KeyError) as exc:
+                    # With a skipped list, one unreadable file must not fail the rest of the job.
+                    if skipped is None:
+                        raise
+                    skipped.append({'path': str(source), 'name': source.name, 'reason': _failure_reason(exc)})
+                    continue
                 check()
                 codec = stream.get('codec_name')
                 container = probe['format'].get('format_name', '').split(',')
@@ -246,14 +283,31 @@ class Ingestor:
                     # Uploads rarely declare an album; without one Navidrome lists the file
                     # under Unknown Album, so treat it as a single named after its title.
                     media.album = media.title
-                bpm, key = (None, None) if _preserve_tags else _analyze(work, not media.bpm_precise, not media.initial_key, cancelled)
+                duration = float(stream.get('duration') or probe['format'].get('duration') or 0)
+                skipped = None
+                if not _preserve_tags:
+                    # Valid keys are rewritten in Camelot; anything else is not a key and gets estimated.
+                    media.initial_key = camelot(media.initial_key)
+                if _preserve_tags:
+                    bpm = key = None
+                elif duration > MAX_ANALYSIS_SECONDS and (not media.bpm_precise or not media.initial_key):
+                    bpm = key = None
+                    skipped = 'long-recording'
+                else:
+                    bpm, key = _analyze(work, not media.bpm_precise, not media.initial_key, cancelled)
                 estimates = {}
                 if bpm and not media.bpm_precise:
                     media.bpm_precise = bpm
-                    estimates['bpm'] = 'essentia-rhythm-multifeature-estimate' if _essentia() else 'spectral-flux-autocorrelation-v1'
+                    estimates['bpm'] = estimate_source('bpm')
                 if key and not media.initial_key:
                     media.initial_key = key
-                    estimates['key'] = 'essentia-edma-key-estimate' if _essentia() else 'chroma-profile-correlation-v1'
+                    estimates['key'] = estimate_source('key')
+                if not _preserve_tags:
+                    progress(f'Looking up genre, year and mood {number + 1}/{len(paths)}')
+                    _, found = fill_descriptors(media, self.catalog, self.models,
+                                                lambda: _decode(work, SAMPLE_RATE, cancelled),
+                                                analyze_audio=duration <= MAX_ANALYSIS_SECONDS)
+                    estimates.update(found)
                 media.save()
                 check()
                 item = Item.from_path(str(work))
@@ -274,9 +328,10 @@ class Ingestor:
                               track_total=media.tracktotal, disc_number=media.disc, disc_total=media.disctotal,
                               format=stream.get('codec_name'), bitrate=int(stream.get('bit_rate') or probe['format'].get('bit_rate') or 0),
                               bit_depth=int(stream.get('bits_per_raw_sample') or stream.get('bits_per_sample') or 0),
-                              duration=float(stream.get('duration') or probe['format'].get('duration') or 0),
-                              bpm=media.bpm_precise or None, key=media.initial_key or None, genre=media.genre,
-                              analysis_source=estimates, size=temporary.stat().st_size, duplicate=False,
+                              duration=duration,
+                              bpm=media.bpm_precise or None, key=media.initial_key or None, genre=_genre_text(media),
+                              year=media.year or None, mood=split_values(media.mood or []) or None,
+                              analysis_source=estimates, analysis_skipped=skipped, size=temporary.stat().st_size, duplicate=False,
                               candidate=candidate, job_id=job_id)
                 sidecar = destination.with_name(destination.name + '.provenance.json')
                 # Provenance first allows a retry to recover after atomic audio publication.
@@ -289,16 +344,20 @@ class Ingestor:
                 results.append(record)
             return results
 
-    def prepare(self, paths, candidate, job_id, progress=lambda *args: None, cancelled=lambda: False):
+    def prepare(self, paths, candidate, job_id, progress=lambda *args: None, cancelled=lambda: False, skipped=None):
         """Prepare tagged copies privately; publication requires publish()."""
         private = self.state / 'prepared' / hashlib.sha256(str(job_id).encode()).hexdigest()
-        worker = Ingestor({**self.config, 'state_root': str(private / 'state'), 'library_root': str(private / 'files')})
-        records = worker.process(paths, candidate, job_id, progress, cancelled)
-        fields = ('artist', 'title', 'album', 'genre', 'bpm', 'key')
+        worker = Ingestor({**self.config, 'state_root': str(private / 'state'), 'library_root': str(private / 'files'),
+                           'models_root': str(self.models.root)})
+        records = worker.process(paths, candidate, job_id, progress, cancelled, skipped=skipped)
+        fields = ('artist', 'title', 'album', 'genre', 'year', 'mood', 'bpm', 'key')
         catalog_enabled = self.config.get('catalog_matching', True) and len(paths) == 1
         for record in records:
             source = MediaFile(record['source_path'])
-            record['existing_tags'] = {field: getattr(source, 'initial_key' if field == 'key' else 'bpm_precise' if field == 'bpm' else field) for field in fields}
+            record['existing_tags'] = {
+                **{field: getattr(source, field) for field in ('artist', 'title', 'album')},
+                'genre': _genre_text(source), 'year': source.year or None, 'mood': split_values(source.mood or []) or None,
+                'bpm': source.bpm_precise, 'key': source.initial_key}
             record.update(track_total=source.tracktotal, disc_number=source.disc, disc_total=source.disctotal)
             record['proposed_tags'] = {field: record.get(field) for field in fields}
             record['warnings'] = []
@@ -308,6 +367,11 @@ class Ingestor:
                     embedded = record['existing_tags'].get(field)
                     if requested and embedded and requested.casefold().strip() != embedded.casefold().strip():
                         record['warnings'].append(f'Requested {field} differs from embedded metadata: {requested} / {embedded}. Existing metadata retained.')
+            if record.get('analysis_skipped') == 'long-recording':
+                record['warnings'].append('Longer than 20 minutes, likely a full album or set: BPM and key were not estimated.')
+            embedded_key = record['existing_tags'].get('key')
+            if embedded_key and not camelot(embedded_key):
+                record['warnings'].append(f'Embedded key "{embedded_key}" is not a musical key and was not kept.')
             if not record.get('album'):
                 record['warnings'].append('No album tag. Navidrome will list this under Unknown Album.')
             if not MediaFile(record['path']).art:
@@ -353,20 +417,20 @@ class Ingestor:
             if not path.is_relative_to((self.state / 'prepared').resolve()):
                 raise ValueError('Approval must reference a privately prepared file')
             changes = edits.get(str(path), {}) if isinstance(edits, dict) else {}
-            allowed = {'artist', 'title', 'album', 'genre', 'bpm', 'key'}
+            allowed = {'artist', 'title', 'album', 'genre', 'year', 'mood', 'bpm', 'key'}
             if set(changes) - allowed:
                 raise ValueError('Unsupported metadata edit')
             if changes:
                 media = MediaFile(str(path))
                 for field, value in changes.items():
-                    setattr(media, 'initial_key' if field == 'key' else 'bpm_precise' if field == 'bpm' else field, value)
+                    set_tag(media, field, value)
                 media.save()
             legacy = self._find_existing_audio(record.get('audio_sha256') or _audio_hash(path, cancelled), cancelled, progress)
             if legacy:
                 media = MediaFile(str(legacy))
                 existing_record = dict(record, path=str(legacy), duplicate=True, size=legacy.stat().st_size, sha256=_hash(legacy),
-                                       title=media.title, artist=media.artist, album=media.album, genre=media.genre,
-                                       bpm=media.bpm_precise or None, key=media.initial_key or None, analysis_source={})
+                                       title=media.title, artist=media.artist, album=media.album, genre=_genre_text(media),
+                                       year=media.year or None, mood=split_values(media.mood or []) or None, bpm=media.bpm_precise or None, **key_fields(media.initial_key), analysis_source={})
                 if legacy.resolve().is_relative_to(self.library):
                     self._register(Library(str(self.beets_path), directory=str(self.library)), legacy)
                     sidecar = legacy.with_name(legacy.name + '.provenance.json')
@@ -407,6 +471,11 @@ class Ingestor:
         return results
 
     def _find_existing_audio(self, digest, cancelled, progress=lambda *args: None):
+        # Workers share one index file; serialize so their cache updates are not lost.
+        with _audio_index_lock:
+            return self._scan_existing_audio(digest, cancelled, progress)
+
+    def _scan_existing_audio(self, digest, cancelled, progress):
         progress('Checking existing library for duplicates')
         checked = 0
         reported = time.monotonic()

@@ -17,6 +17,10 @@ from mediafile import MediaFile
 from .store import Store, uid, now
 from .sources import Sources, SourceError, DownloadCancelled, youtube_url
 from .ingestion import Ingestor, IngestionCancelled
+from .keys import camelot, key_fields, sort_key
+from .library_tags import analyze_file, needs_analysis, read_tags, update_sidecar, write_tags
+from .lookup import Catalog
+from .audio_models import models_at
 from .sharing import Sharing
 from .llm_review import Reviewer, ReviewError
 from .review_summary import summarize
@@ -35,6 +39,9 @@ stop = threading.Event()
 worker_threads = []
 reviewer = Reviewer(config)
 advice_lock = threading.Lock()
+# Serializes read-modify-write of library file records between the indexer,
+# tag edits and the BPM/key backfill.
+library_lock = threading.RLock()
 
 
 class Login(BaseModel):
@@ -240,6 +247,7 @@ def file_view(record):
                 + (existing_file.get("album") or "Unknown album")
             )
             result["duplicate_file_id"] = duplicate_id
+    result["key_invalid"] = bool(record.get("key_tag") and not record.get("key"))
     result["existing"] = record.get("existing_tags", {})
     result["proposed"] = record.get("proposed_tags", {})
     result["navidrome_url"] = (
@@ -313,8 +321,33 @@ def register_files(records, job, published):
     )
 
 
+def refresh_file_tags(path, previous):
+    """Re-read tags written outside the app; estimates no longer describe changed values."""
+    tags = read_tags(path)
+    for field in ("artist", "title", "album"):
+        tags[field] = tags[field] or previous.get(field)
+    analysis = previous.get("analysis_source")
+    analysis = dict(analysis) if isinstance(analysis, dict) else {}
+    for field in ("bpm", "key", "genre", "year", "mood"):
+        if field in analysis and tags.get(field) != previous.get(field):
+            analysis.pop(field)
+    return {**tags, "analysis_source": analysis}
+
+
+def save_file_record(record):
+    store.put(
+        "files",
+        record["id"],
+        {k: v for k, v in record.items() if k not in {"id", "path", "job_id", "owner", "published"}},
+        path=record["path"],
+        job_id=record.get("job_id"),
+        owner=record.get("owner"),
+        published=record["published"],
+    )
+
+
 def index_library():
-    """Use Navidrome's measured tags for existing music; never rewrite audio."""
+    """Index Navidrome's library and pick up tag changes made to files since the last pass."""
     database = Path(config.get("navidrome_db", "/navidrome/navidrome.db"))
     if not database.exists():
         return
@@ -325,71 +358,147 @@ def index_library():
             "SELECT * FROM media_file WHERE missing=0 AND library_id=1"
         ).fetchall()
         db.close()
-        for row in rows:
-            row = dict(row)
-            path = (LIBRARY / row["path"]).resolve()
-            if not path.is_relative_to(LIBRARY) or not path.is_file():
-                continue
-            id = hashlib.sha256(str(path).encode()).hexdigest()[:32]
-            existing = store.get("files", id)
-            if existing:
-                precise_bpm = MediaFile(str(path)).bpm_precise or None
-                if precise_bpm != existing.get("bpm"):
-                    data = {
-                        k: v
-                        for k, v in existing.items()
-                        if k not in {"id", "path", "job_id", "owner", "published"}
-                    }
-                    data["bpm"] = precise_bpm
-                    store.put(
-                        "files",
-                        id,
-                        data,
-                        path=str(path),
-                        job_id=existing.get("job_id"),
-                        owner=existing.get("owner"),
-                        published=existing["published"],
-                    )
-                continue
-            tags = json.loads(row.get("tags") or "{}")
-            keys = tags.get("key", [])
-            record = {
-                "id": id,
-                "title": row["title"],
-                "artist": row["artist"],
-                "album": row["album"],
-                "genre": row["genre"],
-                "bpm": MediaFile(str(path)).bpm_precise or None,
-                "key": keys[0]["value"] if keys else None,
-                "format": row.get("codec") or row["suffix"],
-                "bitrate": row["bit_rate"] * 1000,
-                "duration": row["duration"],
-                "size": row["size"],
-                "filename": path.name,
-                "album_id": album_id(path),
-                "analysis_source": {},
-                "navidrome_url": navidrome_public_url()
-                + "/app/#/album/"
-                + row["album_id"]
-                + "/show",
-            }
-            store.put(
-                "files",
-                id,
-                record,
-                path=str(path),
-                job_id=None,
-                owner=None,
-                published=1,
-            )
     except sqlite3.Error:
         log.exception("Could not index Navidrome library")
+        return
+    for row in rows:
+        row = dict(row)
+        path = (LIBRARY / row["path"]).resolve()
+        if not path.is_relative_to(LIBRARY) or not path.is_file():
+            continue
+        id = hashlib.sha256(str(path).encode()).hexdigest()[:32]
+        try:
+            with library_lock:
+                existing = store.get("files", id)
+                if existing:
+                    if existing.get("mtime_ns") != path.stat().st_mtime_ns:
+                        save_file_record({**existing, **refresh_file_tags(path, existing)})
+                    continue
+                tags = json.loads(row.get("tags") or "{}").get("key", [])
+                navidrome = {
+                    "title": row["title"],
+                    "artist": row["artist"],
+                    "album": row["album"],
+                    "genre": row["genre"],
+                    **key_fields(tags[0]["value"] if tags else None),
+                }
+                save_file_record({
+                    **navidrome,
+                    **refresh_file_tags(path, navidrome),
+                    "id": id,
+                    "path": str(path),
+                    "published": 1,
+                    "format": row.get("codec") or row["suffix"],
+                    "bitrate": row["bit_rate"] * 1000,
+                    "duration": row["duration"],
+                    "size": row["size"],
+                    "filename": path.name,
+                    "album_id": album_id(path),
+                    "navidrome_url": navidrome_public_url()
+                    + "/app/#/album/"
+                    + row["album_id"]
+                    + "/show",
+                })
+        except Exception:
+            log.exception("Could not index library file %s", row.get("path"))
 
 
-def request_scan():
+def library_index_worker():
+    while not stop.wait(300):
+        index_library()
+
+
+ANALYSIS_STATE = STATE / "library-analysis.json"
+analysis_state_lock = threading.Lock()
+analysis_start_lock = threading.Lock()
+
+
+def analysis_status():
+    try:
+        status = json.loads(ANALYSIS_STATE.read_text())
+    except (OSError, ValueError):
+        status = {"status": "idle"}
+    # A run updates its status after every track; silence means its process stopped.
+    if status.get("status") == "running" and time.time() - status.get("heartbeat", 0) > 300:
+        status["status"] = "interrupted"
+    return status
+
+
+def save_analysis_status(**updates):
+    with analysis_state_lock:
+        status = {**analysis_status(), **updates, "heartbeat": time.time()}
+        temporary = ANALYSIS_STATE.with_suffix(".tmp")
+        temporary.write_text(json.dumps(status))
+        os.replace(temporary, ANALYSIS_STATE)
+        return status
+
+
+def analyze_library(username):
+    """Fill missing BPM, key, genre, year and mood; rewrite key and genre spellings."""
+    catalog = Catalog(config)
+    models = models_at(config.get("models_root") or str(STATE / "models"))
+    counts = {"checked": 0, "updated": 0, "bpm_added": 0, "key_added": 0, "key_normalized": 0,
+              "genre_added": 0, "genre_normalized": 0, "year_added": 0, "mood_added": 0,
+              "long_recordings": 0, "no_estimate": 0, "failed": 0}
+    candidates = []
+    for record in store.list("files", "published=1"):
+        path = Path(record["path"])
+        if (path.is_relative_to(LIBRARY) and path.is_file() and not path.is_symlink()
+                and needs_analysis(record, moods=models.available)
+                and record.get("analysis_attempted_mtime") != path.stat().st_mtime_ns):
+            candidates.append(record["id"])
+    save_analysis_status(status="running", started_by=username, started_at=now(), finished_at=None,
+                         total=len(candidates), cancel_requested=False, detail=None,
+                         audio_models=models.available, **counts)
+
+    def cancelled():
+        return stop.is_set() or bool(analysis_status().get("cancel_requested"))
+
+    for id in candidates:
+        if cancelled():
+            break
+        try:
+            record = store.get("files", id)
+            path = Path(record["path"]).resolve(strict=True)
+            if not path.is_relative_to(LIBRARY):
+                continue
+            changes, sources, note = analyze_file(path, catalog, models, cancelled)
+            with library_lock:
+                record = store.get("files", id)
+                tags = refresh_file_tags(path, record)
+                tags["analysis_source"].update(sources)
+                tags["analysis_attempted_mtime"] = tags["mtime_ns"]
+                save_file_record({**record, **tags})
+                if changes:
+                    update_sidecar(path, tags, tags["analysis_source"])
+            counts["updated"] += bool(changes)
+            counts["bpm_added"] += "bpm" in changes
+            counts["key_added"] += "key" in sources
+            counts["key_normalized"] += "key" in changes and "key" not in sources
+            counts["genre_added"] += "genre" in sources
+            counts["genre_normalized"] += "genre" in changes and "genre" not in sources
+            counts["year_added"] += "year" in sources
+            counts["mood_added"] += "mood" in sources
+            counts["long_recordings"] += note == "long-recording"
+            counts["no_estimate"] += note == "no-confident-estimate"
+        except IngestionCancelled:
+            break
+        except Exception:
+            log.exception("Could not analyze library file %s", id)
+            counts["failed"] += 1
+        counts["checked"] += 1
+        save_analysis_status(**counts)
+    save_analysis_status(
+        status="cancelled" if cancelled() else "complete", finished_at=now(),
+        detail=request_scan(f"{counts['updated']} tracks updated") if counts["updated"] else "No tags changed",
+        **counts,
+    )
+
+
+def request_scan(done="Published"):
     creds = config.get("navidrome_scan", {})
     if not creds:
-        return "Published; Navidrome will pick up changes on its scheduled scan"
+        return f"{done}; Navidrome will pick up changes on its scheduled scan"
     salt = secrets.token_hex(8)
     params = {
         "u": creds["username"],
@@ -409,9 +518,9 @@ def request_scan():
         r.raise_for_status()
         if r.json()["subsonic-response"]["status"] != "ok":
             raise ValueError("Scan rejected")
-        return "Published; Navidrome scan requested"
+        return f"{done}; Navidrome scan requested"
     except (httpx.HTTPError, ValueError, KeyError):
-        return "Published; scan request failed, scheduled scan will retry"
+        return f"{done}; scan request failed, scheduled scan will retry"
 
 
 def do_search(id, user, body):
@@ -493,16 +602,20 @@ def worker(stages=("queued", "process_queued", "publish_queued")):
                     progress=100,
                 )
             elif job["stage"] == "processing":
+                skipped = []
                 prepared = ingestor.prepare(
-                    job["paths"], job["candidate"], id, progress, cancelled
+                    job["paths"], job["candidate"], id, progress, cancelled, skipped=skipped
                 )
                 if cancelled():
                     raise IngestionCancelled("Cancelled before review")
+                if skipped and not prepared:
+                    raise ValueError("No source file decodes cleanly: " + skipped[0]["reason"])
                 register_files(prepared, job, False)
                 store.update_job(
                     id,
                     stage="review",
                     prepared=prepared,
+                    skipped_files=skipped,
                     error=None,
                     detail="Check the audio and metadata before publishing",
                     progress=100,
@@ -610,6 +723,14 @@ def advice_worker():
                 store.update_job(job["id"], advice=advice)
 
 
+def ingestion_lanes(count):
+    """One worker publishes; extra workers only prepare, so library writes stay serial."""
+    count = max(1, min(int(count or 1), 8))
+    lanes = [("ingestion-worker", ("process_queued", "publish_queued"))]
+    lanes += [(f"processing-worker-{n}", ("process_queued",)) for n in range(2, count + 1)]
+    return lanes
+
+
 @contextlib.asynccontextmanager
 async def lifespan(app):
     global worker_threads
@@ -624,15 +745,14 @@ async def lifespan(app):
         threading.Thread(
             target=worker, args=(("queued",),), name="download-worker", daemon=True
         ),
-        threading.Thread(
-            target=worker,
-            args=(("process_queued", "publish_queued"),),
-            name="ingestion-worker",
-            daemon=True,
-        ),
+    ]
+    worker_threads += [
+        threading.Thread(target=worker, args=(stages,), name=name, daemon=True)
+        for name, stages in ingestion_lanes(config.get("ingestion_workers", 1))
     ]
     worker_threads.append(threading.Thread(target=sharing_worker, name="sharing-worker", daemon=True))
     worker_threads.append(threading.Thread(target=advice_worker, name="advice-worker", daemon=True))
+    worker_threads.append(threading.Thread(target=library_index_worker, name="library-index", daemon=True))
     for thread in worker_threads:
         thread.start()
     yield
@@ -1073,6 +1193,53 @@ def reject(id: str, user=Depends(check_user)):
     return {"ok": True}
 
 
+def clean_metadata(changes):
+    """Validate tag edits. Empty BPM or year is 0 and empty text clears the tag; keys become Camelot."""
+    if not isinstance(changes, dict) or set(changes) - {
+        "artist",
+        "title",
+        "album",
+        "genre",
+        "year",
+        "mood",
+        "bpm",
+        "key",
+    }:
+        raise HTTPException(400, "Invalid metadata fields")
+    clean = {}
+    for k, v in changes.items():
+        if isinstance(v, list) and k in {"genre", "mood"} and all(isinstance(i, str) for i in v):
+            v = "; ".join(v)
+        if k == "year":
+            if v in (None, ""):
+                v = 0
+            try:
+                v = int(v)
+            except (TypeError, ValueError):
+                raise HTTPException(400, "Year must be a whole number")
+            if v and not 1000 <= v <= 2100:
+                raise HTTPException(400, "Year must be between 1000 and 2100")
+        elif k == "bpm":
+            if v in (None, ""):
+                v = 0
+            try:
+                v = float(v)
+            except (TypeError, ValueError):
+                raise HTTPException(400, "BPM must be numeric")
+            if not 0 <= v <= 400:
+                raise HTTPException(400, "BPM must be between 0 and 400")
+        elif not isinstance(v, (str, type(None))) or (v and len(v) > 500):
+            raise HTTPException(400, "Metadata text is too long")
+        elif k == "key" and v and v.strip():
+            if not camelot(v):
+                raise HTTPException(400, f'"{v}" is not a key. Use Camelot (8A) or musical notation (Am)')
+            v = camelot(v)
+        else:
+            v = (v or "").strip() if k == "key" else v or ""
+        clean[k] = v
+    return clean
+
+
 @app.post("/api/jobs/{id}/approve")
 def approve(id: str, body: Approval, user=Depends(check_user)):
     require_approver(user)
@@ -1090,38 +1257,12 @@ def approve(id: str, body: Approval, user=Depends(check_user)):
     for entry in body.files:
         if entry.get("id") not in allowed:
             raise HTTPException(400, "File does not belong to this review")
-        changes = entry.get("metadata", {})
-        if not isinstance(changes, dict) or set(changes) - {
-            "artist",
-            "title",
-            "album",
-            "genre",
-            "bpm",
-            "key",
-        }:
-            raise HTTPException(400, "Invalid metadata fields")
-        clean = {}
-        for k, v in changes.items():
-            if k == "bpm":
-                if v in (None, ""):
-                    v = 0
-                try:
-                    v = float(v)
-                except (TypeError, ValueError):
-                    raise HTTPException(400, "BPM must be numeric")
-                if not 0 <= v <= 400:
-                    raise HTTPException(400, "BPM must be between 0 and 400")
-            elif not isinstance(v, (str, type(None))) or (v and len(v) > 500):
-                raise HTTPException(400, "Metadata text is too long")
-            else:
-                v = v or ""
-            clean[k] = v
-        edits[allowed[entry["id"]]["path"]] = clean
+        edits[allowed[entry["id"]]["path"]] = clean_metadata(entry.get("metadata", {}))
     if body.keep_existing:
         edits = {
             r["path"]: {
-                k: (r.get("existing_tags", {}).get(k) or (0 if k == "bpm" else ""))
-                for k in ["artist", "title", "album", "genre", "bpm", "key"]
+                k: (r.get("existing_tags", {}).get(k) or (0 if k in {"bpm", "year"} else ""))
+                for k in ["artist", "title", "album", "genre", "year", "mood", "bpm", "key"]
             }
             for r in records if r["id"] in selected
         }
@@ -1152,8 +1293,10 @@ def library(
     user=Depends(check_user),
 ):
     records = store.list("files", "published=1")
-    genres = sorted({r["genre"] for r in records if r.get("genre")})
-    keys = sorted({r["key"] for r in records if r.get("key")})
+    genres = sorted({g for r in records for g in (r.get("genres") or [r.get("genre")]) if g}, key=str.casefold)
+    keys = sorted({r["key"] for r in records if r.get("key")}, key=sort_key)
+    invalid_keys = sum(bool(r.get("key_tag") and not r.get("key")) for r in records)
+    wanted_key = key if key == "invalid" else camelot(key) or key
     try:
         lo = float(bpm_min) if bpm_min else None
         hi = float(bpm_max) if bpm_max else None
@@ -1169,9 +1312,12 @@ def library(
             ).casefold()
         ):
             continue
-        if genre and r.get("genre") != genre:
+        if genre and genre not in (r.get("genres") or [r.get("genre")]):
             continue
-        if key and r.get("key") != key:
+        if key == "invalid":
+            if not r.get("key_tag") or r.get("key"):
+                continue
+        elif key and r.get("key") != wanted_key:
             continue
         bpm = r.get("bpm")
         if lo is not None and (bpm is None or bpm < lo):
@@ -1187,6 +1333,8 @@ def library(
             (
                 float(r.get(sort) or 0)
                 if sort == "bpm"
+                else sort_key(r.get(sort))
+                if sort == "key"
                 else str(r.get(sort) or "").casefold()
             ),
         )
@@ -1199,7 +1347,67 @@ def library(
         "page_size": size,
         "genres": genres,
         "keys": keys,
+        "invalid_key_count": invalid_keys,
     }
+
+
+@app.post("/api/files/{id}/tags")
+def edit_file_tags(id: str, body: dict, user=Depends(check_user)):
+    """Rewrite tags of a published library file. Audio is not changed."""
+    require_manual(user)
+    if not user["isAdmin"]:
+        raise HTTPException(403, "Administrator access required")
+    changes = clean_metadata(body)
+    if not changes:
+        raise HTTPException(400, "No tag changes")
+    with library_lock:
+        record = store.get("files", id)
+        if not record or not record["published"]:
+            raise HTTPException(404, "Library file not found")
+        path = Path(record["path"]).resolve()
+        if not path.is_relative_to(LIBRARY) or not path.is_file() or Path(record["path"]).is_symlink():
+            raise HTTPException(404, "Library file not found")
+        try:
+            write_tags(path, changes)
+        except Exception:
+            log.exception("Could not write tags to %s", path)
+            raise HTTPException(500, "Could not write tags to this file") from None
+        tags = refresh_file_tags(path, record)
+        for field in changes:
+            tags["analysis_source"].pop(field, None)
+        save_file_record({**record, **tags})
+        update_sidecar(path, tags, tags["analysis_source"])
+    return {"file": file_view(store.get("files", id)), "detail": request_scan("Tags saved")}
+
+
+@app.get("/api/library/analysis")
+def library_analysis(user=Depends(check_user)):
+    return analysis_status()
+
+
+@app.post("/api/library/analysis")
+def start_library_analysis(user=Depends(check_user)):
+    require_manual(user)
+    if not user["isAdmin"]:
+        raise HTTPException(403, "Administrator access required")
+    with analysis_start_lock:
+        if analysis_status().get("status") == "running":
+            raise HTTPException(409, "Library analysis is already running")
+        save_analysis_status(status="running", started_by=user["username"], cancel_requested=False)
+        threading.Thread(target=analyze_library, args=(user["username"],),
+                         name="library-analysis", daemon=True).start()
+    return {"ok": True}
+
+
+@app.post("/api/library/analysis/cancel")
+def cancel_library_analysis(user=Depends(check_user)):
+    require_manual(user)
+    if not user["isAdmin"]:
+        raise HTTPException(403, "Administrator access required")
+    if analysis_status().get("status") != "running":
+        raise HTTPException(409, "Library analysis is not running")
+    save_analysis_status(cancel_requested=True)
+    return {"ok": True}
 
 
 def authorized_file(id, user):
