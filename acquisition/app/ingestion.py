@@ -289,7 +289,7 @@ class Ingestor:
                     # under Unknown Album, so treat it as a single named after its title.
                     media.album = media.title
                 duration = float(stream.get('duration') or probe['format'].get('duration') or 0)
-                skipped = None
+                analysis_note = None
                 if not _preserve_tags:
                     # Valid keys are rewritten in Camelot; anything else is not a key and gets estimated.
                     media.initial_key = camelot(media.initial_key)
@@ -297,7 +297,7 @@ class Ingestor:
                     bpm = key = None
                 elif duration > BPM_KEY_MAX_SECONDS and (not media.bpm_precise or not media.initial_key):
                     bpm = key = None
-                    skipped = 'long-recording'
+                    analysis_note = 'long-recording'
                 else:
                     bpm, key = _analyze(work, not media.bpm_precise, not media.initial_key, cancelled)
                 estimates = {}
@@ -336,7 +336,7 @@ class Ingestor:
                               duration=duration,
                               bpm=media.bpm_precise or None, key=media.initial_key or None, genre=_genre_text(media),
                               year=media.year or None, mood=split_values(media.mood or []) or None,
-                              analysis_source=estimates, analysis_skipped=skipped, size=temporary.stat().st_size, duplicate=False,
+                              analysis_source=estimates, analysis_skipped=analysis_note, size=temporary.stat().st_size, duplicate=False,
                               candidate=candidate, job_id=job_id)
                 sidecar = destination.with_name(destination.name + '.provenance.json')
                 # Provenance first allows a retry to recover after atomic audio publication.

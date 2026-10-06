@@ -292,12 +292,14 @@ def test_json_writes_from_parallel_workers_do_not_collide(tmp_path):
 
 
 def test_prepare_skips_undecodable_file_and_keeps_the_rest(tmp_path):
-    good = audio(tmp_path)
+    first = audio(tmp_path, name='first.mp3', title='First')
+    last = audio(tmp_path, name='last.mp3', title='Last')
     bad = tmp_path / 'broken.mp3'
     bad.write_text('not audio')
     skipped = []
-    prepared = ingestor(tmp_path).prepare([bad, good], {}, 'mixed', skipped=skipped)
-    assert [Path(r['source_path']).name for r in prepared] == [good.name]
+    # A bad file after a good one must still be skipped, not fail the job.
+    prepared = ingestor(tmp_path).prepare([first, bad, last], {}, 'mixed', skipped=skipped)
+    assert [Path(r['source_path']).name for r in prepared] == ['first.mp3', 'last.mp3']
     assert [entry['name'] for entry in skipped] == ['broken.mp3']
     assert skipped[0]['reason']
     assert not list((tmp_path / 'library').rglob('*.mp3'))
