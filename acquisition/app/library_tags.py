@@ -8,7 +8,7 @@ from mediafile import MediaFile
 
 from .audio_models import SAMPLE_RATE
 from .descriptors import fill_descriptors
-from .ingestion import MAX_ANALYSIS_SECONDS, _analyze, _decode, _hash, _json, estimate_source
+from .ingestion import BPM_KEY_MAX_SECONDS, MAX_ANALYSIS_SECONDS, _analyze, _decode, _hash, _json, estimate_source
 from .keys import camelot
 from .tags import FIELDS, read_tags, write_tags  # noqa: F401  re-exported for the API
 
@@ -46,7 +46,7 @@ def analyze_file(path, catalog=None, models=None, cancelled=lambda: False):
     need_bpm, need_key = not media.bpm_precise, not raw
     long_recording = (media.length or 0) > MAX_ANALYSIS_SECONDS
     note = None
-    if (need_bpm or need_key) and long_recording:
+    if (need_bpm or need_key) and (media.length or 0) > BPM_KEY_MAX_SECONDS:
         note = 'long-recording'
     elif need_bpm or need_key:
         bpm, key = _analyze(path, need_bpm, need_key, cancelled)

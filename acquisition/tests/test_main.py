@@ -560,3 +560,27 @@ def test_review_summary_lists_skipped_files():
     job = {'candidate': {}, 'skipped_files': [{'name': 'a.mp3', 'reason': 'Header missing'}]}
     summary = summarize(job, [{'title': 'x', 'artist': 'y'}])
     assert any('a.mp3' in concern and 'left out' in concern for concern in summary['concerns'])
+
+
+def test_error_during_shutdown_requeues_instead_of_failing(backend, monkeypatch):
+    main, _ = backend
+    main.store.put("jobs", "shutdown-test", {"candidate": {}, "paths": ["saved-source"], "source": "existing"},
+                   owner="mateo", stage="process_queued", created_at="now")
+
+    class DyingIngestor:
+        def __init__(self, config):
+            pass
+
+        def prepare(self, *args, **kwargs):
+            main.stop.set()
+            raise OSError("ffmpeg killed during shutdown")
+
+    monkeypatch.setattr(main, "Ingestor", DyingIngestor)
+    main.stop.clear()
+    try:
+        main.worker(("process_queued",))
+        job = main.store.get("jobs", "shutdown-test")
+        assert job["stage"] == "process_queued"
+        assert "resumes after restart" in job["detail"]
+    finally:
+        main.stop.set()

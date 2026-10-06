@@ -30,6 +30,8 @@ class IngestionCancelled(RuntimeError):
 
 # A full album, live set or mix in one file has no single tempo or key.
 MAX_ANALYSIS_SECONDS = 20 * 60
+# DJ mixes and live sets have no single tempo or key worth tagging.
+BPM_KEY_MAX_SECONDS = 10 * 60
 _audio_index_lock = threading.Lock()
 
 
@@ -259,7 +261,10 @@ class Ingestor:
                     _run(['ffmpeg', '-v', 'error', '-xerror', '-i', str(source), '-map', '0:a:0', '-f', 'null', '-'], 1800, cancelled)
                 except (subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError, KeyError) as exc:
                     # With a skipped list, one unreadable file must not fail the rest of the job.
-                    if skipped is None:
+                    # A decoder killed by a signal or a shutdown is an interruption, not a bad file.
+                    check()
+                    killed = isinstance(exc, subprocess.CalledProcessError) and exc.returncode < 0
+                    if skipped is None or killed:
                         raise
                     skipped.append({'path': str(source), 'name': source.name, 'reason': _failure_reason(exc)})
                     continue
@@ -290,7 +295,7 @@ class Ingestor:
                     media.initial_key = camelot(media.initial_key)
                 if _preserve_tags:
                     bpm = key = None
-                elif duration > MAX_ANALYSIS_SECONDS and (not media.bpm_precise or not media.initial_key):
+                elif duration > BPM_KEY_MAX_SECONDS and (not media.bpm_precise or not media.initial_key):
                     bpm = key = None
                     skipped = 'long-recording'
                 else:
@@ -368,7 +373,7 @@ class Ingestor:
                     if requested and embedded and requested.casefold().strip() != embedded.casefold().strip():
                         record['warnings'].append(f'Requested {field} differs from embedded metadata: {requested} / {embedded}. Existing metadata retained.')
             if record.get('analysis_skipped') == 'long-recording':
-                record['warnings'].append('Longer than 20 minutes, likely a full album or set: BPM and key were not estimated.')
+                record['warnings'].append('Longer than 10 minutes, likely a mix, set or full album: BPM and key were not estimated.')
             embedded_key = record['existing_tags'].get('key')
             if embedded_key and not camelot(embedded_key):
                 record['warnings'].append(f'Embedded key "{embedded_key}" is not a musical key and was not kept.')

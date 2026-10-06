@@ -258,13 +258,13 @@ def test_existing_keys_become_camelot_and_non_keys_are_estimated(tmp_path):
 
 
 def test_long_recordings_are_not_analyzed(tmp_path, monkeypatch):
-    monkeypatch.setattr('app.ingestion.MAX_ANALYSIS_SECONDS', 1)
+    monkeypatch.setattr('app.ingestion.BPM_KEY_MAX_SECONDS', 1)
     monkeypatch.setattr('app.ingestion._analyze', lambda *_: pytest.fail('long recordings must not be analyzed'))
     source = audio(tmp_path, bpm=None, key=None)
     prepared = ingestor(tmp_path).prepare([source], {}, 'album-in-one-file')[0]
     assert prepared['bpm'] is None and prepared['key'] is None
     assert prepared['analysis_skipped'] == 'long-recording'
-    assert any('Longer than 20 minutes' in warning for warning in prepared['warnings'])
+    assert any('Longer than 10 minutes' in warning for warning in prepared['warnings'])
 
 
 def test_json_writes_from_parallel_workers_do_not_collide(tmp_path):
@@ -308,3 +308,30 @@ def test_skipping_never_swallows_cancellation(tmp_path):
     bad.write_text('not audio')
     with pytest.raises(IngestionCancelled):
         ingestor(tmp_path).prepare([bad], {}, 'cancel', cancelled=lambda: True, skipped=[])
+
+
+def test_killed_decoder_is_not_skipped_as_bad_file(tmp_path, monkeypatch):
+    import app.ingestion as ingestion
+    source = audio(tmp_path)
+    real_run = ingestion._run
+
+    def run(args, *rest, **kwargs):
+        if '-xerror' in args:
+            raise subprocess.CalledProcessError(-15, args, b'', b'')
+        return real_run(args, *rest, **kwargs)
+
+    monkeypatch.setattr(ingestion, '_run', run)
+    skipped = []
+    with pytest.raises(subprocess.CalledProcessError):
+        ingestor(tmp_path).prepare([source], {}, 'killed', skipped=skipped)
+    assert skipped == []
+
+
+def test_library_analysis_skips_bpm_and_key_over_limit(tmp_path, monkeypatch):
+    import app.library_tags as library_tags
+    monkeypatch.setattr(library_tags, 'BPM_KEY_MAX_SECONDS', 1)
+    monkeypatch.setattr(library_tags, '_analyze', lambda *_: pytest.fail('BPM/key must not be estimated'))
+    source = audio(tmp_path, bpm=None, key=None)
+    changes, sources, note = library_tags.analyze_file(source)
+    assert note == 'long-recording'
+    assert 'bpm' not in changes and 'key' not in changes

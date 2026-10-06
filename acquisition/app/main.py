@@ -659,6 +659,15 @@ def worker(stages=("queued", "process_queued", "publish_queued")):
                     detail="Cancelled; downloaded originals retained",
                 )
         except Exception as exc:
+            if stop.is_set():
+                # Shutdown can break a running step in any way; resume it after restart.
+                log.warning("Job %s interrupted at %s by shutdown: %s", id, failed_stage, exc)
+                store.update_job(
+                    id,
+                    stage={"downloading": "queued", "processing": "process_queued", "publishing": "publish_queued"}[job["stage"]],
+                    detail="Interrupted; resumes after restart",
+                )
+                continue
             log.exception("Job %s failed at %s", id, failed_stage)
             message = (
                 str(exc)[:600]
