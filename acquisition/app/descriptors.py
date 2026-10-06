@@ -15,7 +15,8 @@ def fill_descriptors(media, catalog, models, decode, analyze_audio=True):
     changes, sources = {}, {}
     raw = [g for g in (media.genres or []) if g]
     current = genres(raw)
-    if current and current != raw:
+    if raw and current != raw:
+        # Empty when every value was junk ("Music", "Other"): remove it so a lookup can replace it.
         changes['genre'] = current
     need_genre, need_year = not current, not media.year
     need_mood = not unique(split_values(media.mood or []))

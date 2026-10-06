@@ -18,7 +18,7 @@ from .store import Store, uid, now
 from .sources import Sources, SourceError, DownloadCancelled, youtube_url
 from .ingestion import Ingestor, IngestionCancelled
 from .keys import camelot, key_fields, sort_key
-from .library_tags import analyze_file, needs_analysis, read_tags, update_sidecar, write_tags
+from .library_tags import analyze_file, needs_analysis, read_tags, spelling_outdated, update_sidecar, write_tags
 from .lookup import Catalog
 from .audio_models import models_at
 from .sharing import Sharing
@@ -455,9 +455,11 @@ def analyze_library(username):
     candidates = []
     for record in store.list("files", "published=1"):
         path = Path(record["path"])
+        # A file already tried is retried only after it changes, or when spelling rules changed since.
         if (path.is_relative_to(LIBRARY) and path.is_file() and not path.is_symlink()
-                and needs_analysis(record, moods=models.available)
-                and record.get("analysis_attempted_mtime") != path.stat().st_mtime_ns):
+                and ((needs_analysis(record, moods=models.available)
+                      and record.get("analysis_attempted_mtime") != path.stat().st_mtime_ns)
+                     or spelling_outdated(record))):
             candidates.append(record["id"])
     save_analysis_status(status="running", started_by=username, started_at=now(), finished_at=None,
                          total=len(candidates), cancel_requested=False, detail=None,
@@ -774,6 +776,8 @@ async def lifespan(app):
     worker_threads.append(threading.Thread(target=sharing_worker, name="sharing-worker", daemon=True))
     worker_threads.append(threading.Thread(target=advice_worker, name="advice-worker", daemon=True))
     worker_threads.append(threading.Thread(target=library_index_worker, name="library-index", daemon=True))
+    if config.get("analysis_hour", 4) is not None:
+        worker_threads.append(threading.Thread(target=analysis_scheduler, name="analysis-scheduler", daemon=True))
     for thread in worker_threads:
         thread.start()
     yield
@@ -1456,17 +1460,38 @@ def library_analysis(user=Depends(check_user)):
     return analysis_status()
 
 
+def start_analysis(started_by, **status):
+    """Start a library analysis run unless one is running. Returns whether it started."""
+    with analysis_start_lock:
+        if analysis_status().get("status") == "running":
+            return False
+        save_analysis_status(status="running", started_by=started_by, cancel_requested=False, **status)
+        threading.Thread(target=analyze_library, args=(started_by,),
+                         name="library-analysis", daemon=True).start()
+    return True
+
+
+def scheduled_analysis_due(now_local, status, hour):
+    """Once per day, in the configured local hour."""
+    return (hour is not None and now_local.tm_hour == int(hour)
+            and status.get("scheduled_on") != time.strftime("%Y-%m-%d", now_local))
+
+
+def analysis_scheduler():
+    """Daily run for tracks with missing or misspelled tags (analysis_hour, local time)."""
+    while not stop.wait(600):
+        now_local = time.localtime()
+        if scheduled_analysis_due(now_local, analysis_status(), config.get("analysis_hour", 4)):
+            start_analysis("schedule", scheduled_on=time.strftime("%Y-%m-%d", now_local))
+
+
 @app.post("/api/library/analysis")
 def start_library_analysis(user=Depends(check_user)):
     require_manual(user)
     if not user["isAdmin"]:
         raise HTTPException(403, "Administrator access required")
-    with analysis_start_lock:
-        if analysis_status().get("status") == "running":
-            raise HTTPException(409, "Library analysis is already running")
-        save_analysis_status(status="running", started_by=user["username"], cancel_requested=False)
-        threading.Thread(target=analyze_library, args=(user["username"],),
-                         name="library-analysis", daemon=True).start()
+    if not start_analysis(user["username"]):
+        raise HTTPException(409, "Library analysis is already running")
     return {"ok": True}
 
 

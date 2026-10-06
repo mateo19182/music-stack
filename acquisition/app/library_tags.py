@@ -10,7 +10,7 @@ from .audio_models import SAMPLE_RATE
 from .descriptors import fill_descriptors
 from .ingestion import BPM_KEY_MAX_SECONDS, MAX_ANALYSIS_SECONDS, _analyze, _decode, _hash, _json, estimate_source
 from .keys import camelot
-from .tags import FIELDS, read_tags, write_tags  # noqa: F401  re-exported for the API
+from .tags import FIELDS, genres, read_tags, write_tags  # noqa: F401  re-exported for the API
 
 
 def update_sidecar(path, tags, analysis_source):
@@ -30,6 +30,13 @@ def needs_analysis(record, moods=True):
     return (not record.get('bpm') or not (record.get('key') or tag) or bool(tag and camelot(tag))
             or not record.get('genres') or bool(record.get('genre_tag')) or not record.get('year')
             or (moods and not record.get('mood')))
+
+
+def spelling_outdated(record):
+    """Tags indexed under older spelling rules that the current rules would rewrite."""
+    raw = record.get('genre_tag') or record.get('genres') or []
+    tag = record.get('key_tag')
+    return (bool(raw) and genres(raw) != raw) or bool(tag and camelot(tag) and camelot(tag) != tag)
 
 
 def analyze_file(path, catalog=None, models=None, cancelled=lambda: False):

@@ -632,3 +632,44 @@ def test_file_formats_use_one_spelling(backend):
     main, _ = backend
     assert main.format_name("mp3") == main.format_name("MP3") == "MP3"
     assert main.format_name(None) is None
+
+
+def test_scheduled_analysis_runs_once_a_day_in_its_hour(backend):
+    import time as clock
+    main, _ = backend
+    four = clock.strptime('2026-10-07 04:10', '%Y-%m-%d %H:%M')
+    noon = clock.strptime('2026-10-07 12:00', '%Y-%m-%d %H:%M')
+    assert main.scheduled_analysis_due(four, {}, 4)
+    assert not main.scheduled_analysis_due(noon, {}, 4)
+    assert not main.scheduled_analysis_due(four, {'scheduled_on': '2026-10-07'}, 4)
+    assert main.scheduled_analysis_due(four, {'scheduled_on': '2026-10-06'}, 4)
+    assert not main.scheduled_analysis_due(four, {}, None)
+
+
+def test_analysis_revisits_tags_indexed_under_old_spelling_rules(backend, monkeypatch):
+    from mediafile import MediaFile
+
+    class NoCatalog:
+        def lookup(self, *args, **kwargs):
+            return {'sources': {}}
+
+    class NoModels:
+        available = False
+
+    main, _ = backend
+    monkeypatch.setattr(main, 'Catalog', lambda config: NoCatalog())
+    monkeypatch.setattr(main, 'models_at', lambda root: NoModels())
+    done = dict(key='5A', bpm=120, year=2001)
+    merged, merged_id = library_track(main, 'merged.mp3', genre=['Rap/Hip Hop'], **done)
+    junk, junk_id = library_track(main, 'junk-genre.mp3', genre=['Music'], **done)
+    main.index_library()
+    for id, path, raw in [(merged_id, merged, ['Rap/Hip Hop']), (junk_id, junk, ['Music'])]:
+        # As indexed before the current rules: no rewrite flagged, already attempted.
+        record = main.store.get('files', id)
+        main.save_file_record({**record, 'genres': raw, 'genre': raw[0], 'genre_tag': None,
+                               'analysis_attempted_mtime': path.stat().st_mtime_ns})
+    main.analyze_library('schedule')
+    assert MediaFile(str(merged)).genres == ['Hip Hop']
+    assert not MediaFile(str(junk)).genres
+    main.analyze_library('schedule')
+    assert main.analysis_status()['total'] == 0
