@@ -88,14 +88,22 @@ class Store:
                 (stage, json.dumps(data), id),
             )
 
-    def claim(self, stages=("queued", "process_queued", "publish_queued")):
+    def claim(self, stages=("queued", "process_queued", "publish_queued"), serial_sources=()):
+        """Take the oldest job in these stages. A download from a serial source waits while
+        another download from that source runs; jobs behind it from other sources go ahead."""
+        serial = "".join(
+            " AND NOT (stage='queued' AND json_extract(data, '$.candidate.source')=? AND EXISTS ("
+            "SELECT 1 FROM jobs AS running WHERE running.stage='downloading' "
+            "AND json_extract(running.data, '$.candidate.source')=?))"
+            for _ in serial_sources)
+        params = list(stages) + [source for source in serial_sources for _ in range(2)]
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute(
                 "SELECT * FROM jobs WHERE stage IN ("
                 + ",".join("?" for _ in stages)
-                + ") ORDER BY created_at LIMIT 1",
-                stages,
+                + ")" + serial + " ORDER BY created_at LIMIT 1",
+                params,
             ).fetchone()
             if not row:
                 return None

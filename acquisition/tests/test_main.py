@@ -755,3 +755,20 @@ def test_download_lanes_run_in_parallel_within_bounds(backend):
     assert [name for name, _ in main.download_lanes(4)] == ["download-worker", "download-worker-2", "download-worker-3", "download-worker-4"]
     assert all(stages == ("queued",) for _, stages in main.download_lanes(4))
     assert len(main.download_lanes(50)) == 8
+
+
+def test_one_soulseek_download_at_a_time_while_other_sources_proceed(backend):
+    main, _ = backend
+    for id, source in [("slsk-1", "soulseek"), ("slsk-2", "soulseek"), ("yt-1", "youtube")]:
+        main.store.put("jobs", id, {"candidate": {"source": source}}, owner="mateo", stage="queued", created_at=id)
+    main.store.put("jobs", "slsk-processing", {"candidate": {"source": "soulseek"}}, owner="mateo",
+                   stage="process_queued", created_at="0")
+    serial = ("soulseek",)
+    assert main.store.claim(("queued",), serial_sources=serial)["id"] == "slsk-1"
+    # slsk-2 is older than yt-1 but waits for slsk-1; the YouTube job goes ahead.
+    assert main.store.claim(("queued",), serial_sources=serial)["id"] == "yt-1"
+    assert main.store.claim(("queued",), serial_sources=serial) is None
+    # Processing a Soulseek download is not held back by a running Soulseek download.
+    assert main.store.claim(("process_queued",), serial_sources=serial)["id"] == "slsk-processing"
+    main.store.update_job("slsk-1", stage="process_queued")
+    assert main.store.claim(("queued",), serial_sources=serial)["id"] == "slsk-2"

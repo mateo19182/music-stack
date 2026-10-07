@@ -594,7 +594,7 @@ def worker(stages=("queued", "process_queued", "publish_queued")):
     sources = Sources(config)
     ingestor = Ingestor(config)
     while not stop.is_set():
-        job = store.claim(stages)
+        job = store.claim(stages, serial_sources=tuple(config.get("serial_download_sources", ["soulseek"])))
         if not job:
             stop.wait(1)
             continue
