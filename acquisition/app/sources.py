@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from hashlib import sha256
 from pathlib import Path, PureWindowsPath
 from urllib.parse import quote, unquote, urlsplit
@@ -118,6 +119,16 @@ def _terminal(transfer):
     return any(flag in state for flag in ('completed', 'succeeded', 'cancelled', 'timedout', 'errored', 'rejected', 'aborted', 'failed'))
 
 
+def _queue_limited(transfer):
+    """The uploader caps how much one user may queue ("Too many files"/"Too many megabytes"):
+    the file can be requested again once the accepted ones finish."""
+    reason = _detail(_get(transfer, 'exception') or _get(transfer, 'message') or _get(transfer, 'reason'))
+    text = reason.casefold()
+    # "Too many files this week/today" is a quota, not a queue limit: asking again will not help.
+    return _terminal(transfer) and 'too many' in text and any(word in text for word in ('files', 'megabytes')) \
+        and not any(word in text for word in ('week', 'today', 'day', 'month'))
+
+
 def _choose_transfer(matches):
     succeeded = [transfer for transfer in matches if 'succeeded' in _state(transfer).casefold()]
     active = [transfer for transfer in matches if not _terminal(transfer)]
@@ -137,6 +148,15 @@ def _transfer_failure(username, transfer):
     text = (state + ' ' + reason).casefold()
     peer = f"Soulseek peer {username}"
     retained = 'Partial files are retained. Retry to resume when the peer is available, or choose another uploader.'
+    if 'verification required' in text:
+        return (f'{peer} requires a human check: answer their private message in slskd (Messages), then retry '
+                f'this job. {retained}')
+    if 'banned' in text:
+        return f'{peer} has banned this account. Choose another uploader. {retained}'
+    if 'too many' in text and any(word in text for word in ('week', 'today', 'day', 'month')):
+        return f'{peer} has a download quota ({reason}). Choose another uploader, or retry after it resets. {retained}'
+    if 'enqueue remotely' in text:
+        return f'{peer} never accepted the request (no answer within 3 minutes). {retained}'
     if any(word in text for word in ('offline', 'useroffline', 'user not found', 'unavailable')):
         return f'{peer} is offline or unavailable. {retained}'
     if any(word in text for word in ('timedout', 'timed out', 'timeout')):
@@ -148,6 +168,52 @@ def _transfer_failure(username, transfer):
     if 'cancel' in text or 'abort' in text:
         return f'Download from {username} was interrupted. {retained}'
     return f'Download from {username} failed' + (f': {reason}.' if reason else f' ({state or "unknown state"}).') + f' {retained}'
+
+
+_CHECK = re.compile(r'prove (that )?you are|human check|are you (a )?human|verify (that )?you|verification|captcha|'
+                    r'please type|reply only|answer only|antworte nur', re.I)
+_CHECK_DONE = re.compile(r'you are verified|you have been verified|unlocked|whitelisted', re.I)
+
+
+def human_checks(conversations, answered_within=3600, now=None):
+    """Uploaders whose private message asks for a human check (anti-leech plugins such as
+    ProveIt). `open`: no reply from us since; `answered`: replied within the last hour, so the
+    user can see the outcome and retry. The user types the answer; nothing here answers."""
+    now = now or time.time()
+    checks = []
+    for conversation in conversations:
+        messages = sorted(_array(_get(conversation, 'messages', [])), key=lambda m: _get(m, 'timestamp', ''))
+        asked = None
+        replied = None
+        for m in messages:
+            text = str(_get(m, 'message', ''))
+            if _get(m, 'direction') == 'In' and _CHECK_DONE.search(text):
+                asked, replied = None, None
+            elif _get(m, 'direction') == 'In' and _CHECK.search(text):
+                asked, replied = m, None
+            elif _get(m, 'direction') == 'Out' and asked:
+                replied = m
+        if not asked:
+            continue
+        status = 'open'
+        if replied:
+            when = _timestamp(_get(replied, 'timestamp', ''))
+            if not when or now - when > answered_within:
+                continue
+            status = 'answered'
+        recent = messages[-6:]
+        checks.append({'username': _get(conversation, 'username'), 'status': status,
+                       'since': _get(asked, 'timestamp'), 'message': str(_get(asked, 'message', ''))[:500],
+                       'recent': [{'direction': _get(m, 'direction'), 'message': str(_get(m, 'message', ''))[:500],
+                                   'timestamp': _get(m, 'timestamp')} for m in recent]})
+    return sorted(checks, key=lambda c: (c['status'] != 'open', c['since'] or ''))
+
+
+def _timestamp(value):
+    try:
+        return datetime.fromisoformat(str(value).replace('Z', '+00:00')).timestamp()
+    except ValueError:
+        return None
 
 
 def _identity(*parts):
@@ -255,6 +321,20 @@ class Sources:
                               (f': {detail}.' if detail else '.') + ' Retry or choose another source.') from None
         except (httpx.HTTPError, ValueError):
             raise SourceError("Soulseek is unavailable; retry when the connection recovers.") from None
+
+    def soulseek_checks(self):
+        conversations = []
+        for conversation in _array(self._slskd('GET', '/conversations', params={'includeInactive': 'true'}) or []):
+            username = _get(conversation, 'username')
+            if username:
+                conversations.append(self._slskd('GET', f'/conversations/{quote(username, safe="")}',
+                                                 params={'includeMessages': 'true'}) or {})
+        return human_checks(conversations)
+
+    def reply(self, username, message):
+        """Send the user's own reply to an uploader's private message."""
+        self._slskd('POST', f'/conversations/{quote(username, safe="")}', json=message)
+        self._slskd('PUT', f'/conversations/{quote(username, safe="")}')
 
     def _youtube_options(self):
         return {"quiet": True, "no_warnings": True, "logger": _QuietLogger(), "socket_timeout": 20,
@@ -522,10 +602,16 @@ class Sources:
                         filename = directory.rstrip("\\") + "\\" + filename
                     if PureWindowsPath(filename).suffix.lower().lstrip(".") in AUDIO_EXTENSIONS:
                         files.append({"filename": filename, "size": _get(file, "size", 0)})
-            if not files:
+            if not files and not _array(response) and len(candidate["files"]) >= 2:
+                # Some clients answer every folder request with nothing. Their search results
+                # list the folder's files, so download those (the review still checks the album).
+                progress({"candidate": candidate, "message": f"{username} does not list folders; "
+                          f"downloading the {len(candidate['files'])} files from the search results"})
+            elif not files:
                 raise SourceError("Could not confirm the full album folder. Try another uploader.")
-            candidate.update(files=files, file_count=len(files), folder_complete=True)
-            progress({"candidate": candidate, "message": f"Confirmed {len(files)} album files"})
+            else:
+                candidate.update(files=files, file_count=len(files), folder_complete=True)
+                progress({"candidate": candidate, "message": f"Confirmed {len(files)} album files"})
         files = candidate["files"]
         for file in files:
             remote = PureWindowsPath(file["filename"])
@@ -557,15 +643,13 @@ class Sources:
             transfer = choose(matches)
             if transfer and (not _terminal(transfer) or 'succeeded' in _state(transfer).casefold()):
                 selected[file['filename']] = transfer
-        missing = [f for f in files if f["filename"] not in selected]
-        if missing:
+        def enqueue(missing, transfers):
             response = self._slskd("POST", base, json=[{"filename": f["filename"], "size": f["size"]} for f in missing])
             enqueued = _array(_get(response or {}, "enqueued", [])) if isinstance(response, dict) else []
             previous_ids = {_get(t, "id") for t in transfers}
             owned_ids = set(candidate.get("owned_transfer_ids", []))
             owned_ids.update(_get(t, "id") for t in enqueued if _get(t, "id") and _get(t, "id") not in previous_ids)
             candidate["owned_transfer_ids"] = sorted(owned_ids)
-            progress({"candidate": candidate, "message": "Downloads enqueued", "percent": 0})
             failures = _array(_get(response or {}, "failed", [])) if isinstance(response, dict) else []
             if failures:
                 # A concurrent job may have queued the same file between our GET
@@ -579,9 +663,18 @@ class Sources:
                     first = next((failure for failure in failures if
                                   _get(failure, 'filename', _get(failure, 'item1')) == unresolved[0]['filename']), failures[0])
                     raise SourceError(_transfer_failure(username, {'state': 'Errored', 'message': _detail(first)}))
-        deadline = time.monotonic() + float(self.config.get("download_timeout_seconds", 3600))
+
+        missing = [f for f in files if f["filename"] not in selected]
+        if missing:
+            enqueue(missing, transfers)
+            progress({"candidate": candidate, "message": "Downloads enqueued", "percent": 0})
+        # The time limit counts from the start or the last progress (bytes or a completed file), so a
+        # slow uploader that keeps delivering finishes; one that stalls is dropped after the limit.
+        timeout = float(self.config.get("download_timeout_seconds", 3600))
+        deadline = time.monotonic() + timeout
         result = []
         states = []
+        best_done, best_bytes, rounds_done, stalled_rounds = 0, 0, None, 0
         while time.monotonic() < deadline:
             if cancelled():
                 self.cancel(candidate)
@@ -590,6 +683,7 @@ class Sources:
             done, transferred, total = 0, 0, sum(int(f["size"] or 0) for f in files)
             ids = []
             states = []
+            limited = []
             for file in files:
                 matches = [t for t in transfers if _get(t, "filename") == file["filename"] and _get(t, "size") == file["size"]]
                 if not matches:
@@ -604,14 +698,35 @@ class Sources:
                 transferred += int(_get(transfer, "bytesTransferred", 0) or 0)
                 if 'succeeded' in state.casefold():
                     done += 1
+                elif _queue_limited(transfer):
+                    limited.append(file)
                 elif _terminal(transfer):
                     raise SourceError(_transfer_failure(username, transfer))
             candidate["transfer_ids"] = ids
+            if done > best_done or transferred > best_bytes:
+                best_done, best_bytes = max(done, best_done), max(transferred, best_bytes)
+                deadline = time.monotonic() + timeout
+            if limited and not any(not _terminal(t) for t in transfers if _get(t, "id") in ids):
+                # Everything the uploader accepted has finished: ask for the refused files again.
+                # Two rounds in a row with no newly completed file means it keeps refusing.
+                stalled_rounds = stalled_rounds + 1 if rounds_done == done else 0
+                if stalled_rounds >= 2:
+                    raise SourceError(f'Soulseek peer {username} keeps refusing files (it limits how many files one user '
+                                      f'may queue): {done}/{len(files)} files complete. Completed files are retained; '
+                                      'retry to continue with this uploader, or choose another uploader.')
+                rounds_done = done
+                enqueue(limited, transfers)
+                progress({'candidate': candidate, 'message': f'{done}/{len(files)} files complete. {username} limits queued '
+                          f'files; requested the remaining {len(limited)} again.'})
+                time.sleep(float(self.config.get("slskd_poll_seconds", 2)))
+                continue
             waiting = any('queued' in state.casefold() and 'remotely' in state.casefold() for state in states)
             positions = [_get(t, 'placeInQueue') for t in transfers if _get(t, 'id') in ids and _get(t, 'placeInQueue') is not None]
             message = f'{done}/{len(files)} files complete. '
             if waiting:
                 message += f'Waiting in {username} remote queue' + (f' (position {min(positions)})' if positions else '') + '; download starts when an upload slot opens.'
+            elif limited:
+                message += f'{username} limits queued files; {len(limited)} more will be requested when these finish.'
             else:
                 message += ', '.join(sorted(set(states))) or 'Waiting for Soulseek to confirm the transfer.'
             progress({'candidate': candidate, 'percent': min(100, round(100 * transferred / total, 1)) if total else None,

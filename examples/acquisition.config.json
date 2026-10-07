@@ -9,7 +9,7 @@
   "download_timeout_seconds": 3600,
   "ingestion_workers": 1,
   "download_workers": 1,
-  "serial_download_sources": ["soulseek"],
+  "source_download_limits": {"soulseek": 1},
   "analysis_hour": 4,
   "navidrome_url": "http://navidrome:4533",
   "navidrome_db": "/navidrome/navidrome.db",

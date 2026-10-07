@@ -1308,3 +1308,24 @@ body:has(#player-bar:not([hidden])) .review-bar {
 [data-filter-active="check"] .album-fields {
   display: none;
 }
+.check blockquote {
+  margin: 10px 0;
+  padding: 8px 12px;
+  border-left: 3px solid var(--accent);
+  background: #fff;
+  overflow-wrap: anywhere;
+}
+.check-reply {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+.check-reply input {
+  flex: 1 1 200px;
+  min-width: 0;
+}
+.check details p {
+  margin: 6px 0;
+  overflow-wrap: anywhere;
+}

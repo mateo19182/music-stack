@@ -757,18 +757,55 @@ def test_download_lanes_run_in_parallel_within_bounds(backend):
     assert len(main.download_lanes(50)) == 8
 
 
-def test_one_soulseek_download_at_a_time_while_other_sources_proceed(backend):
+def test_soulseek_downloads_up_to_the_source_limit_while_other_sources_proceed(backend):
     main, _ = backend
-    for id, source in [("slsk-1", "soulseek"), ("slsk-2", "soulseek"), ("yt-1", "youtube")]:
+    for id, source in [("slsk-1", "soulseek"), ("slsk-2", "soulseek"), ("slsk-3", "soulseek"), ("yt-1", "youtube")]:
         main.store.put("jobs", id, {"candidate": {"source": source}}, owner="mateo", stage="queued", created_at=id)
     main.store.put("jobs", "slsk-processing", {"candidate": {"source": "soulseek"}}, owner="mateo",
                    stage="process_queued", created_at="0")
-    serial = ("soulseek",)
-    assert main.store.claim(("queued",), serial_sources=serial)["id"] == "slsk-1"
-    # slsk-2 is older than yt-1 but waits for slsk-1; the YouTube job goes ahead.
-    assert main.store.claim(("queued",), serial_sources=serial)["id"] == "yt-1"
-    assert main.store.claim(("queued",), serial_sources=serial) is None
-    # Processing a Soulseek download is not held back by a running Soulseek download.
-    assert main.store.claim(("process_queued",), serial_sources=serial)["id"] == "slsk-processing"
+    limits = {"soulseek": 2}
+    assert main.store.claim(("queued",), source_limits=limits)["id"] == "slsk-1"
+    assert main.store.claim(("queued",), source_limits=limits)["id"] == "slsk-2"
+    # slsk-3 is older than yt-1 but waits for a Soulseek slot; the YouTube job goes ahead.
+    assert main.store.claim(("queued",), source_limits=limits)["id"] == "yt-1"
+    assert main.store.claim(("queued",), source_limits=limits) is None
+    # Processing a Soulseek download is not held back by running Soulseek downloads.
+    assert main.store.claim(("process_queued",), source_limits=limits)["id"] == "slsk-processing"
     main.store.update_job("slsk-1", stage="process_queued")
-    assert main.store.claim(("queued",), serial_sources=serial)["id"] == "slsk-2"
+    assert main.store.claim(("queued",), source_limits=limits)["id"] == "slsk-3"
+
+
+def test_one_soulseek_download_per_uploader(backend):
+    main, _ = backend
+    for id, user in [("a-1", "slow"), ("a-2", "slow"), ("b-1", "fast")]:
+        main.store.put("jobs", id, {"candidate": {"source": "soulseek", "username": user}}, owner="mateo",
+                       stage="queued", created_at=id)
+    limits = {"soulseek": 2}
+    assert main.store.claim(("queued",), source_limits=limits)["id"] == "a-1"
+    # a-2 is older but its uploader is busy with a-1: the second slot goes to another uploader.
+    assert main.store.claim(("queued",), source_limits=limits)["id"] == "b-1"
+    assert main.store.claim(("queued",), source_limits=limits) is None
+    main.store.update_job("b-1", stage="process_queued")
+    assert main.store.claim(("queued",), source_limits=limits) is None
+    main.store.update_job("a-1", stage="process_queued")
+    assert main.store.claim(("queued",), source_limits=limits)["id"] == "a-2"
+
+
+def test_human_checks_list_failed_jobs_and_only_admins_reply(backend, monkeypatch):
+    main, client = backend
+    check = {'username': 'peer', 'status': 'open', 'since': '2026-10-07T16:54:00Z', 'message': 'type "watermelon"', 'recent': []}
+    sent = []
+    monkeypatch.setattr(main.Sources, 'soulseek_checks', lambda self: [check])
+    monkeypatch.setattr(main.Sources, 'reply', lambda self, username, message: sent.append((username, message)))
+    main.store.put('jobs', 'blocked', {'candidate': {'username': 'peer'}, 'label': 'Album', 'error': 'human check'},
+                   owner='mateo', stage='failed', created_at='1')
+    main.store.put('jobs', 'other', {'candidate': {'username': 'someone'}}, owner='mateo', stage='failed', created_at='2')
+    signin(main, client, monkeypatch)
+    checks = client.get('/api/soulseek/checks').json()['checks']
+    assert [j['id'] for j in checks[0]['jobs']] == ['blocked']
+    assert client.post('/api/soulseek/checks/stranger/reply', json={'message': 'x'}).status_code == 404
+    assert client.post('/api/soulseek/checks/peer/reply', json={'message': ' watermelon '}).status_code == 200
+    assert sent == [('peer', 'watermelon')]
+    signin(main, client, monkeypatch, name='paulo', admin=False)
+    assert client.get('/api/soulseek/checks').json() == {'checks': []}
+    assert client.post('/api/soulseek/checks/peer/reply', json={'message': 'x'}).status_code == 403

@@ -101,6 +101,10 @@ class SharingConfig(BaseModel):
     enabled: bool
 
 
+class CheckReply(BaseModel):
+    message: str = Field(min_length=1, max_length=200)
+
+
 class FileSharing(BaseModel):
     shared: bool
 
@@ -594,7 +598,7 @@ def worker(stages=("queued", "process_queued", "publish_queued")):
     sources = Sources(config)
     ingestor = Ingestor(config)
     while not stop.is_set():
-        job = store.claim(stages, serial_sources=tuple(config.get("serial_download_sources", ["soulseek"])))
+        job = store.claim(stages, source_limits=config.get("source_download_limits", {"soulseek": 1}))
         if not job:
             stop.wait(1)
             continue
@@ -1711,6 +1715,45 @@ def authorized_file(id, user):
     if not any(path.is_relative_to(root) for root in roots) or not path.is_file():
         raise HTTPException(404, "Audio file unavailable")
     return record, path
+
+
+_checks_cache = {"at": 0.0, "checks": []}
+
+
+@app.get("/api/soulseek/checks")
+def soulseek_checks(user=Depends(check_user)):
+    """Uploaders asking for a human check, with this user's failed downloads from each."""
+    if not user["isAdmin"]:
+        return {"checks": []}
+    if time.time() - _checks_cache["at"] > 20:
+        try:
+            _checks_cache.update(at=time.time(), checks=Sources(config).soulseek_checks())
+        except SourceError as exc:
+            return {"checks": [], "error": str(exc)}
+    failed = store.list("jobs", "stage='failed'", order="created_at")
+    checks = []
+    for check in _checks_cache["checks"]:
+        jobs = [{"id": j["id"], "label": j.get("label"), "error": j.get("error")} for j in failed
+                if (j.get("candidate") or {}).get("username") == check["username"]]
+        if check["status"] == "open" or jobs:
+            checks.append({**check, "jobs": jobs})
+    return {"checks": checks}
+
+
+@app.post("/api/soulseek/checks/{username}/reply")
+def reply_to_check(username: str, body: CheckReply, user=Depends(check_user)):
+    """Send the answer the user typed. Agents may not answer human checks."""
+    require_manual(user)
+    if not user["isAdmin"]:
+        raise HTTPException(403, "Administrator access required")
+    if not any(c["username"] == username for c in _checks_cache["checks"]):
+        raise HTTPException(404, "No human check from this uploader")
+    try:
+        Sources(config).reply(username, body.message.strip())
+    except SourceError as exc:
+        raise HTTPException(502, str(exc)) from None
+    _checks_cache["at"] = 0.0
+    return {"ok": True}
 
 
 @app.get("/api/sharing")

@@ -606,6 +606,14 @@ document.addEventListener("click", (e) => {
       });
       await loadJobs();
     });
+  else if (button.dataset.retryCheck)
+    busy(button, async () => {
+      for (const id of button.dataset.retryCheck.split(","))
+        await api(`/api/jobs/${path(id)}/retry`, { stage: "download" });
+      toast("Downloads queued again.");
+      state.checksSignature = null;
+      await Promise.all([loadJobs(), loadChecks()]);
+    });
   else if (button.dataset.cancel)
     busy(button, async () => {
       await api(`/api/jobs/${path(button.dataset.cancel)}/cancel`, {});
@@ -726,7 +734,7 @@ async function start() {
   $("#login-view").hidden = true;
   $("#app").hidden = false;
   showTab("search");
-  const results = await Promise.allSettled([loadJobs(), loadReview(), loadAutoAdd()]);
+  const results = await Promise.allSettled([loadJobs(), loadReview(), loadAutoAdd(), loadChecks()]);
   for (const result of results)
     if (result.status === "rejected") toast(result.reason.message, true);
 }
@@ -744,12 +752,44 @@ setInterval(() => {
         .then(() => state.analysisRunning || loadLibrary())
         .catch(() => {});
     loadReview().catch(() => {});
+    loadChecks().catch(() => {});
     loadJobs().catch((e) => {
       if (state.tab === "activity") toast(e.message, true);
     });
   }
 }, 5000);
 
+// Uploaders whose anti-leech plugin asks for a human check. The user types the answer.
+async function loadChecks() {
+  if (!state.isAdmin) return;
+  const data = await api("/api/soulseek/checks");
+  const signature = JSON.stringify(data.checks || []);
+  if (document.activeElement?.closest("#checks") || signature === state.checksSignature) return;
+  state.checksSignature = signature;
+  $("#checks").innerHTML = (data.checks || [])
+    .map((c) => {
+      const jobs = c.jobs || [];
+      const since = c.since ? new Date(c.since).toLocaleString() : "";
+      const recent = (c.recent || [])
+        .map((m) => `<p class="${m.direction === "Out" ? "muted" : ""}"><strong>${m.direction === "Out" ? "You" : esc(c.username)}:</strong> ${esc(m.message)}</p>`)
+        .join("");
+      return `<article class="card check"><div class="card-head"><div><span class="badge ${c.status === "open" ? "failed" : "queued"}">${c.status === "open" ? "Uploader asks you to verify" : "Answered"}</span><h3>${esc(c.username)}</h3>${meta([since, jobs.length ? `${jobs.length} download${jobs.length === 1 ? "" : "s"} waiting on this` : ""])}</div></div>${c.status === "open" ? `<blockquote>${esc(c.message)}</blockquote><p class="muted">Soulseek uploaders use this to keep bots out. Read it and type the answer yourself; a wrong answer can lock you out for a day.</p><form class="check-reply" data-check-reply="${esc(c.username)}"><input name="message" maxlength="200" autocomplete="off" aria-label="Your answer to ${esc(c.username)}" required /><button>Send answer</button></form>` : `<details open><summary>Conversation</summary>${recent}</details><p class="muted">Check their reply, then retry.</p>`}${jobs.length ? `<details><summary>Blocked downloads</summary>${jobs.map((j) => `<p class="muted">${esc(j.label || j.id)}</p>`).join("")}</details><div class="actions"><button ${c.status === "open" ? 'class="quiet"' : ""} data-retry-check="${esc(jobs.map((j) => j.id).join(","))}">Retry ${jobs.length === 1 ? "download" : `${jobs.length} downloads`}</button></div>` : ""}</article>`;
+    })
+    .join("");
+}
+document.addEventListener("submit", (e) => {
+  const form = e.target.closest("[data-check-reply]");
+  if (!form) return;
+  e.preventDefault();
+  busy(form.querySelector("button"), async () => {
+    await api(`/api/soulseek/checks/${path(form.dataset.checkReply)}/reply`, formData(form));
+    toast("Answer sent.");
+    form.reset();
+    document.activeElement?.blur();
+    state.checksSignature = null;
+    await loadChecks();
+  });
+});
 function tagValue(value) {
   return value == null
     ? ""

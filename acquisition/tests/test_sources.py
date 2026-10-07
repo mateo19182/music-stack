@@ -97,6 +97,28 @@ class SourceTests(unittest.TestCase):
             self.assertEqual(len(files), 2)
             self.assertTrue(candidate['folder_complete'])
 
+    def test_album_folder_from_search_results_when_the_peer_lists_no_folders(self):
+        for listing, files, ok in [([], 2, True), ([], 1, False),
+                                   ([{'name': 'Music\\Other', 'files': [{'filename': 'x.mp3', 'size': 5}]}], 2, False)]:
+            with self.subTest(listing=listing, files=files), TemporaryDirectory() as root, TemporaryDirectory() as destination:
+                sources = Sources({'slskd_download_root': root})
+                names = [f'{n:02d}.mp3' for n in range(files)]
+                candidate = {'source': 'soulseek', 'username': 'peer', 'kind': 'album', 'directory': 'Music\\Album',
+                             'files': [{'filename': f'Music\\Album\\{n}', 'size': 5} for n in names]}
+                transfers = []
+                for n in names:
+                    p = Path(root) / 'Album' / n
+                    p.parent.mkdir(exist_ok=True)
+                    p.write_bytes(b'audio')
+                    transfers.append({'id': n, 'filename': f'Music\\Album\\{n}', 'size': 5, 'state': 'Completed, Succeeded'})
+                with patch.object(sources, '_slskd', return_value=listing), patch.object(sources, '_transfers', return_value=transfers):
+                    if ok:
+                        self.assertEqual(len(sources.download(candidate, destination, lambda _: None, lambda: False)), files)
+                        self.assertFalse(candidate.get('folder_complete'))
+                    else:
+                        with self.assertRaisesRegex(SourceError, 'Could not confirm'):
+                            sources.download(candidate, destination, lambda _: None, lambda: False)
+
     def test_playlist_limit_and_unavailable_entries_fail_explicitly(self):
         sources = Sources({'max_playlist_files': 2})
         for info in [
@@ -227,7 +249,11 @@ class SourceTests(unittest.TestCase):
         for state, detail, expected in [
             ('Completed, Errored', 'User peer appears to be offline', 'offline or unavailable'),
             ('TimedOut', '', 'did not respond in time'),
-            ('Completed, Rejected', 'Too many failed transfers today', 'refused the download'),
+            ('Completed, Rejected', 'Too many failed transfers today', 'download quota'),
+            ('Completed, Rejected', 'Too many files this week', 'download quota'),
+            ('Completed, Rejected', 'Verification required', 'human check.*private message'),
+            ('Completed, Rejected', 'Banned', 'banned this account'),
+            ('Completed, Errored', 'Download failed to enqueue remotely after hard time limit of 180 secs', 'never accepted'),
             ('Aborted', 'connection reset by peer', 'interrupted'),
             ('Completed, Errored', 'File not shared', 'no longer shares this file'),
         ]:
@@ -384,3 +410,115 @@ class SoulseekSearchTests(unittest.TestCase):
         self.assertEqual(albums[0]['file_count'], 2)
         self.assertEqual(albums[0]['formats'], {'flac': 1, 'mp3': 1})
         self.assertTrue(albums[0]['mixed_formats'])
+
+
+class QueueLimitedPeer:
+    """An uploader that accepts at most `limit` queued files per user and refuses the rest with
+    "Too many files"; each poll finishes the accepted transfers."""
+
+    def __init__(self, root, limit):
+        self.root, self.limit, self.transfers, self.posts = Path(root), limit, [], 0
+
+    def slskd(self, method, path, json=None):
+        self.posts += 1
+        for file in json:
+            active = sum(t['state'] == 'Queued, Remotely' for t in self.transfers)
+            accepted = active < self.limit
+            self.transfers.append({'id': f't{len(self.transfers)}', 'filename': file['filename'], 'size': file['size'],
+                                   'state': 'Queued, Remotely' if accepted else 'Completed, Rejected',
+                                   'exception': None if accepted else 'Transfer rejected: Too many files'})
+        return {'enqueued': [t for t in self.transfers[-len(json):]], 'failed': []}
+
+    def poll(self, username):
+        current = [dict(t) for t in self.transfers]
+        for t in self.transfers:
+            if t['state'] == 'Queued, Remotely':
+                name = t['filename'].split('\\')[-1]
+                (self.root / 'Album').mkdir(exist_ok=True)
+                (self.root / 'Album' / name).write_bytes(b'x' * t['size'])
+                t.update(state='Completed, Succeeded', bytesTransferred=t['size'])
+        return current
+
+
+class QueueLimitTests(unittest.TestCase):
+    def candidate(self, count):
+        return {'source': 'soulseek', 'username': 'peer', 'kind': 'track',
+                'files': [{'filename': f'Music\\Album\\{n:02d}.flac', 'size': 3} for n in range(count)]}
+
+    def test_files_refused_for_the_queue_limit_are_requested_again_in_rounds(self):
+        with TemporaryDirectory() as root, TemporaryDirectory() as destination:
+            peer = QueueLimitedPeer(root, limit=2)
+            sources = Sources({'slskd_download_root': root, 'slskd_poll_seconds': 0})
+            candidate, events = self.candidate(5), []
+            with patch.object(sources, '_transfers', side_effect=peer.poll), patch.object(sources, '_slskd', side_effect=peer.slskd):
+                files = sources.download(candidate, Path(destination), events.append, lambda: False)
+            self.assertEqual(len(files), 5)
+            self.assertEqual(peer.posts, 3)   # 2 + 2 + 1 files accepted per round
+            self.assertTrue(any('limits queued files' in str(event.get('message')) for event in events))
+            self.assertEqual(len(candidate['owned_transfer_ids']), 9)
+
+    def test_an_uploader_that_keeps_refusing_is_dropped_after_two_futile_rounds(self):
+        with TemporaryDirectory() as root, TemporaryDirectory() as destination:
+            peer = QueueLimitedPeer(root, limit=0)
+            sources = Sources({'slskd_download_root': root, 'slskd_poll_seconds': 0})
+            with patch.object(sources, '_transfers', side_effect=peer.poll), patch.object(sources, '_slskd', side_effect=peer.slskd):
+                with self.assertRaisesRegex(SourceError, 'keeps refusing files.*0/3 files complete'):
+                    sources.download(self.candidate(3), Path(destination), lambda _: None, lambda: False)
+            self.assertEqual(peer.posts, 3)
+
+    def test_other_refusals_still_fail_at_once(self):
+        with TemporaryDirectory() as root, TemporaryDirectory() as destination:
+            peer = QueueLimitedPeer(root, limit=0)
+            sources = Sources({'slskd_download_root': root, 'slskd_poll_seconds': 0})
+            original = peer.slskd
+            def banned(method, path, json=None):
+                response = original(method, path, json)
+                for t in peer.transfers:
+                    t['exception'] = 'Transfer rejected: Banned'
+                return response
+            with patch.object(sources, '_transfers', side_effect=peer.poll), patch.object(sources, '_slskd', side_effect=banned):
+                with self.assertRaisesRegex(SourceError, 'banned this account'):
+                    sources.download(self.candidate(2), Path(destination), lambda _: None, lambda: False)
+            self.assertEqual(peer.posts, 1)
+
+    def test_time_limit_counts_from_the_last_progress(self):
+        with TemporaryDirectory() as root, TemporaryDirectory() as destination:
+            sources = Sources({'slskd_download_root': root, 'download_timeout_seconds': 0.05, 'slskd_poll_seconds': 0.02})
+            candidate = self.candidate(1)
+            polls = 0
+            def transfers(username):
+                nonlocal polls
+                polls += 1
+                transfer = {'id': 't', 'filename': candidate['files'][0]['filename'], 'size': 3,
+                            'state': 'InProgress', 'bytesTransferred': polls}
+                if polls >= 12:   # about 0.24 s in: well past the limit, but bytes kept arriving
+                    (Path(root) / 'Album').mkdir(exist_ok=True)
+                    (Path(root) / 'Album' / '00.flac').write_bytes(b'xyz')
+                    transfer['state'] = 'Completed, Succeeded'
+                return [transfer]
+            with patch.object(sources, '_transfers', side_effect=transfers), patch.object(sources, '_slskd') as api:
+                files = sources.download(candidate, Path(destination), lambda _: None, lambda: False)
+            api.assert_not_called()
+            self.assertEqual(files[0].read_bytes(), b'xyz')
+
+
+class HumanCheckTests(unittest.TestCase):
+    def conversation(self, *messages):
+        return {'username': 'peer', 'messages': [{'direction': d, 'message': m, 'timestamp': t} for d, m, t in messages]}
+
+    def test_open_answered_and_verified_checks(self):
+        from app.sources import human_checks
+        now = 1_800_000_000
+        iso = lambda seconds_ago: __import__('datetime').datetime.fromtimestamp(now - seconds_ago, __import__('datetime').timezone.utc).isoformat()
+        ask = ('In', 'To prove you are a human downloading these files, please type "watermelon" in this chat', iso(7200))
+        self.assertEqual(human_checks([self.conversation(ask)], now=now)[0]['status'], 'open')
+        answered = human_checks([self.conversation(ask, ('Out', 'watermelon', iso(60)))], now=now)
+        self.assertEqual(answered[0]['status'], 'answered')
+        self.assertEqual(human_checks([self.conversation(ask, ('Out', 'watermelon', iso(7000)))], now=now), [])
+        self.assertEqual(human_checks([self.conversation(ask, ('In', 'ProveIt: You are verified.', iso(30)))], now=now), [])
+        self.assertEqual(human_checks([self.conversation(('In', 'thanks for sharing!', iso(10)))], now=now), [])
+        verified_then_link = self.conversation(ask, ('In', 'ProveIt: You are verified.', iso(30)),
+                                               ('In', 'https://github.com/example/Anti-Leecher-for-Nicotine-ProveIt', iso(29)))
+        self.assertEqual(human_checks([verified_then_link], now=now), [])
+        german = ('In', 'Human check for your requested album "X". Reply only with this word / Antworte nur mit diesem Wort: X.', iso(5))
+        self.assertEqual(human_checks([self.conversation(german)], now=now)[0]['status'], 'open')
