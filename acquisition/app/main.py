@@ -795,6 +795,12 @@ def ingestion_lanes(count):
     return lanes
 
 
+def download_lanes(count):
+    """Parallel downloads: one slow uploader's remote queue no longer holds up every other job."""
+    count = max(1, min(int(count or 1), 8))
+    return [("download-worker" if n == 1 else f"download-worker-{n}", ("queued",)) for n in range(1, count + 1)]
+
+
 @contextlib.asynccontextmanager
 async def lifespan(app):
     global worker_threads
@@ -806,9 +812,8 @@ async def lifespan(app):
     Ingestor(config)
     index_library()
     worker_threads = [
-        threading.Thread(
-            target=worker, args=(("queued",),), name="download-worker", daemon=True
-        ),
+        threading.Thread(target=worker, args=(stages,), name=name, daemon=True)
+        for name, stages in download_lanes(config.get("download_workers", 1))
     ]
     worker_threads += [
         threading.Thread(target=worker, args=(stages,), name=name, daemon=True)

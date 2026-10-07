@@ -747,3 +747,11 @@ def test_replaced_versions_go_to_trash_once(backend):
     assert [e["path"] for e in first] == [old["path"]] and not Path(old["path"]).exists()
     assert not main.store.list("files", "path=?", (old["path"],))
     assert main.retire_versions(ingestor, main.store.get("jobs", "better")) == first
+
+
+def test_download_lanes_run_in_parallel_within_bounds(backend):
+    main, _ = backend
+    assert main.download_lanes(None) == [("download-worker", ("queued",))]
+    assert [name for name, _ in main.download_lanes(4)] == ["download-worker", "download-worker-2", "download-worker-3", "download-worker-4"]
+    assert all(stages == ("queued",) for _, stages in main.download_lanes(4))
+    assert len(main.download_lanes(50)) == 8
