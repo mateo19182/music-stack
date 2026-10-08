@@ -41,6 +41,7 @@ services:
     - ${MUSIC_DATA_ROOT:-/mnt/data/music-library}:/music-storage
     - ${MUSIC_DATA_ROOT:-/mnt/data/music-library}/incoming/acquisition:/staging
     - ${MUSIC_DATA_ROOT:-/mnt/data/music-library}/downloads/slskd:/downloads/slskd:ro
+    - ${MUSIC_DATA_ROOT:-/mnt/data/music-library}/downloads/torrents:/downloads/torrents:ro
     ports:
     - 127.0.0.1:4534:4534
     networks:

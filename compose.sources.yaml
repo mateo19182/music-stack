@@ -53,6 +53,50 @@ services:
     - ${BEETS_STATE_DIR:-./config/beets}:/config
     - ${MUSIC_DATA_ROOT:-/mnt/data/music-library}:/data
     restart: 'no'
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent@sha256:b522f9f4b769f8f36d49d22d5eb6a92e9aa18904c6a1830b1439df511ec21983
+    container_name: qbittorrent
+    environment:
+      PUID: '1000'
+      PGID: '1000'
+      TZ: Europe/Madrid
+      WEBUI_PORT: '8091'
+    volumes:
+    - ${QBITTORRENT_STATE_DIR:-./config/qbittorrent}:/config
+    - ${MUSIC_DATA_ROOT:-/mnt/data/music-library}/downloads/torrents:/downloads/torrents
+    restart: unless-stopped
+    network_mode: service:gluetun
+    depends_on:
+      gluetun:
+        condition: service_healthy
+        restart: true
+  prowlarr:
+    image: lscr.io/linuxserver/prowlarr@sha256:f9151e5bc1025c6d0a630d503210cdcb6bb55a7cc098562609d96a408d838902
+    container_name: prowlarr
+    environment:
+      PUID: '1000'
+      PGID: '1000'
+      TZ: Europe/Madrid
+    volumes:
+    - ${PROWLARR_STATE_DIR:-./config/prowlarr}:/config
+    restart: unless-stopped
+    network_mode: service:gluetun
+    depends_on:
+      gluetun:
+        condition: service_healthy
+        restart: true
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr@sha256:c80ae007ce2ccdcd217a12426e4f039ef763ff90738c808d38810c3e59323767
+    container_name: flaresolverr
+    environment:
+      TZ: Europe/Madrid
+      LOG_LEVEL: info
+    restart: unless-stopped
+    network_mode: service:gluetun
+    depends_on:
+      gluetun:
+        condition: service_healthy
+        restart: true
   gluetun:
     image: qmcgaw/gluetun:v3.41.1@sha256:1a5bf4b4820a879cdf8d93d7ef0d2d963af56670c9ebff8981860b6804ebc8ab
     container_name: slskd-vpn
@@ -66,15 +110,19 @@ services:
       TZ: Europe/Madrid
       VPN_SERVICE_PROVIDER: airvpn
       VPN_TYPE: wireguard
-      FIREWALL_INPUT_PORTS: '5030'
+      FIREWALL_INPUT_PORTS: '5030,8091,9696'
     volumes:
     - ${GLUETUN_STATE_DIR:-./config/airvpn/gluetun}:/gluetun
     ports:
     - 127.0.0.1:5030:5030
+    - 127.0.0.1:8091:8091
+    - 127.0.0.1:9696:9696
     networks:
       default:
         aliases:
         - slskd
+        - qbittorrent
+        - prowlarr
     restart: unless-stopped
 name: lidarr
 networks:

@@ -47,7 +47,9 @@ const sourceLabel = (source) =>
     ? "yt-dlp"
     : source === "soulseek"
       ? "Soulseek"
-      : String(source || "");
+      : source === "torrent"
+        ? "Torrent"
+        : String(source || "");
 const duration = (n) =>
   n
     ? `${Math.floor(n / 60)}:${String(Math.floor(n % 60)).padStart(2, "0")}`
@@ -177,6 +179,10 @@ function downloads(file, editable = false) {
   return `<button class="quiet" data-preview="${esc(file.id)}" data-title="${esc(file.title || file.filename || "Track")}" data-artist="${esc(file.artist || "")}">Play</button><a href="/api/files/${path(file.id)}/download">Download</a><details class="more-actions"><summary aria-label="More actions for ${esc(file.title || "track")}">More</summary><div>${file.published && file.shared !== undefined ? (state.isAdmin ? `<label class="checkbox"><input type="checkbox" data-share-file="${esc(file.id)}" ${file.shared ? "checked" : ""}>Share on Soulseek</label><span class="error sharing-file-error" role="alert"></span>` : `<span class="muted">${file.shared ? "Selected for sharing" : "Private on Soulseek"}</span>`) : ""}${editable && state.isAdmin ? `<button class="quiet" data-edit-tags="${esc(file.id)}">Edit tags</button>` : ""}${file.album_id ? `<a href="/api/albums/${path(file.album_id)}/download">Album ZIP</a>` : ""}${file.navidrome_url ? `<a href="${safeLink(file.navidrome_url)}" target="_blank" rel="noopener">Open in Navidrome ↗</a>` : ""}<span class="muted">${esc([file.format, file.bitrate ? `${file.bitrate} kbps` : "", duration(file.duration), bytes(file.size)].filter(Boolean).join(" · "))}</span></div></details>`;
 }
 function resultSourceLink(result) {
+  if (result.source === "torrent" && result.info_url) {
+    const href = safeLink(result.info_url);
+    return href === "#" ? "" : `<a class="result-source-link" href="${href}" target="_blank" rel="noopener noreferrer">${esc(result.provider || "Tracker")} page ↗</a>`;
+  }
   if (!["youtube", "yt-dlp"].includes(result.source) || !result.url) return "";
   const href = safeLink(result.url);
   if (href === "#") return "";
@@ -263,7 +269,7 @@ function renderResults(data) {
       results
         .map(
           (r) =>
-            `<article class="result-row"><div class="track-info"><h3>${esc(r.title || r.filename || r.album || "Untitled")}</h3>${meta([r.artist, r.album])}${searchLibraryHint(r)}${resultSourceLink(r)}<details class="source-details"><summary>${esc(sourceLabel(r.source))} · ${esc(r.username || r.uploader || r.provider || "Source details")}</summary>${meta([r.provider, r.queue_length != null ? `Queue ${r.queue_length}` : "", r.free_slots != null ? `${r.free_slots} free slots` : "", bytes(r.size)])}${r.folder_complete === false ? '<p class="muted">The full album folder is checked when queued.</p>' : ""}${r.files?.length ? `<ul class="file-list">${r.files.map((f) => `<li>${esc(f.filename)} ${esc(bytes(f.size))}</li>`).join("")}</ul>` : ""}</details></div><div class="quality">${meta([r.format, r.bitrate ? `${r.bitrate} kbps` : "", duration(r.duration)])}${r.files?.length ? `<span class="muted">${esc(r.file_count || r.files.length)} files</span>` : ""}</div><button class="quiet" data-enqueue="${esc(r.id)}" ${state.queuedCandidates.has(r.id) ? 'disabled data-queued="true"' : ""}>${state.queuedCandidates.has(r.id) ? "Queued" : "Queue"}</button></article>`,
+            `<article class="result-row"><div class="track-info"><h3>${esc(r.title || r.filename || r.album || "Untitled")}</h3>${meta([r.artist, r.album])}${searchLibraryHint(r)}${resultSourceLink(r)}<details class="source-details"><summary>${esc(sourceLabel(r.source))} · ${esc(r.username || r.uploader || r.provider || "Source details")}</summary>${meta([r.provider, r.seeders != null ? `${r.seeders} seeders` : "", r.queue_length != null ? `Queue ${r.queue_length}` : "", r.free_slots != null ? `${r.free_slots} free slots` : "", bytes(r.size)])}${r.folder_complete === false ? '<p class="muted">The full album folder is checked when queued.</p>' : ""}${r.files?.length ? `<ul class="file-list">${r.files.map((f) => `<li>${esc(f.filename)} ${esc(bytes(f.size))}</li>`).join("")}</ul>` : ""}</details></div><div class="quality">${meta([r.format, r.bitrate ? `${r.bitrate} kbps` : "", duration(r.duration)])}${r.files?.length ? `<span class="muted">${esc(r.file_count || r.files.length)} files</span>` : ""}</div><button class="quiet" data-enqueue="${esc(r.id)}" ${state.queuedCandidates.has(r.id) ? 'disabled data-queued="true"' : ""}>${state.queuedCandidates.has(r.id) ? "Queued" : "Queue"}</button></article>`,
         )
         .join("") +
       "</div>"
@@ -990,6 +996,8 @@ function jobOrigin(job) {
   const parts =
     job.source === "soulseek"
       ? [`Soulseek${request.username ? ` from ${request.username}` : ""}`, folder]
+      : job.source === "torrent"
+        ? [`Torrent${request.provider ? ` from ${request.provider}` : ""}`]
       : job.source === "existing"
         ? ["Inbox", job.label !== title ? String(job.label || "").replace(/ · \d+ files$/, "") : ""]
         : [sourceLabel(job.source), request.uploader];

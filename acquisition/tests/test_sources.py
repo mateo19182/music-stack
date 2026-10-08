@@ -555,3 +555,135 @@ class HumanCheckTests(unittest.TestCase):
         self.assertEqual(human_checks([verified_then_link], now=now), [])
         german = ('In', 'Human check for your requested album "X". Reply only with this word / Antworte nur mit diesem Wort: X.', iso(5))
         self.assertEqual(human_checks([self.conversation(german)], now=now)[0]['status'], 'open')
+
+
+class TorrentTests(unittest.TestCase):
+    def test_releases_rank_by_seeders_and_drop_images_and_dead_torrents(self):
+        from app.sources import normalize_torrents
+        releases = [
+            {'title': 'Artist - Album - 2024, FLAC (tracks), lossless', 'downloadUrl': 'http://p/1', 'seeders': 3, 'indexer': 'RuTracker', 'guid': 'a'},
+            {'title': 'Artist - Album - 2024, MP3, 320 kbps', 'downloadUrl': 'http://p/2', 'seeders': 9, 'indexer': 'RuTracker', 'guid': 'b'},
+            {'title': 'Artist - Album - 2024, FLAC (image+.cue), lossless', 'downloadUrl': 'http://p/3', 'seeders': 50, 'guid': 'c'},
+            {'title': 'Artist - Album - 2024, APE (tracks)', 'downloadUrl': 'http://p/4', 'seeders': 50, 'guid': 'd'},
+            {'title': 'Artist - Album - 2024, FLAC (tracks)', 'downloadUrl': 'http://p/5', 'seeders': 0, 'guid': 'e'},
+            {'title': '[TR24][OF] Artist - Album - 2024 (Jazz)', 'downloadUrl': 'http://p/6', 'seeders': 1, 'guid': 'f'},
+        ]
+        found = normalize_torrents(releases)
+        self.assertEqual([(c['format'], c['bitrate'], c['seeders']) for c in found], [('mp3', 320, 9), ('flac', None, 3), ('flac', None, 1)])
+        self.assertEqual(found[0]['username'], 'RuTracker')
+
+    def test_a_discography_torrent_downloads_only_the_requested_album(self):
+        from app.sources import torrent_selection
+        files = [{'index': 0, 'name': 'Artist - Discography/2019 - First/01 A.flac'},
+                 {'index': 1, 'name': 'Artist - Discography/2024 - Mid Spiral/CD1/01 B.flac'},
+                 {'index': 2, 'name': 'Artist - Discography/2024 - Mid Spiral/CD2/01 C.flac'},
+                 {'index': 3, 'name': 'Artist - Discography/2024 - Mid Spiral (Remixes)/01 D.flac'},
+                 {'index': 4, 'name': 'Artist - Discography/2024 - Mid Spiral/cover.jpg'}]
+        self.assertEqual([f['index'] for f in torrent_selection(files, 'Mid Spiral')], [1, 2])
+        with self.assertRaises(SourceError):
+            torrent_selection(files, None)
+        with self.assertRaises(SourceError):
+            torrent_selection(files, 'Something Else')
+
+    def test_single_file_cue_images_are_refused(self):
+        from app.sources import torrent_selection
+        with self.assertRaises(SourceError):
+            torrent_selection([{'index': 0, 'name': 'Album/Album.flac'}, {'index': 1, 'name': 'Album/Album.cue'}], 'Album')
+
+    def test_torrent_download_selects_files_waits_and_copies(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp) / 'torrents'
+            (root / 'Disco' / 'Album').mkdir(parents=True)
+            (root / 'Disco' / 'Album' / '01 A.flac').write_bytes(b'a' * 10)
+            (root / 'Disco' / 'Album' / '02 B.flac').write_bytes(b'b' * 10)
+            sources = Sources({'torrent_download_root': str(root), 'torrent_poll_seconds': 0})
+            progress_of = {0: 0.0, 1: 0.0}
+            calls, torrents = [], []
+
+            def qbit(method, path, **kwargs):
+                calls.append((path, kwargs.get('data')))
+                if path == '/torrents/info':
+                    return torrents
+                if path == '/torrents/files':
+                    for index in progress_of:
+                        progress_of[index] = min(1.0, progress_of[index] + 0.5)
+                    return [{'index': 0, 'name': 'Disco/Album/01 A.flac', 'size': 10, 'priority': 1, 'progress': progress_of[0]},
+                            {'index': 1, 'name': 'Disco/Album/02 B.flac', 'size': 10, 'priority': 1, 'progress': progress_of[1]},
+                            {'index': 2, 'name': 'Disco/Other/01 C.flac', 'size': 10, 'priority': 1, 'progress': 0}]
+                return ''
+
+            def add(candidate, tag):
+                torrents.append({'hash': 'h1', 'name': 'Disco', 'state': 'stoppedDL', 'save_path': str(root), 'num_seeds': 2})
+
+            candidate = {'id': 'c1', 'torrent_key': 'k' * 32, 'source': 'torrent', 'download_url': 'http://p/1',
+                         'requested_album': 'Album', 'title': 'Disco'}
+            with patch.object(Sources, '_qbit', side_effect=qbit), patch.object(Sources, '_add_torrent', side_effect=add), \
+                    patch('app.sources.time.sleep'):
+                paths = sources.download(candidate, Path(tmp) / 'out', lambda value: None, lambda: False)
+            self.assertEqual([p.name for p in paths], ['001-01 A.flac', '002-02 B.flac'])
+            self.assertIn(('/torrents/filePrio', {'hash': 'h1', 'id': '2', 'priority': 0}), calls)
+            self.assertEqual(candidate['torrent_files'], [0, 1])
+            self.assertFalse(any(path == '/torrents/delete' for path, _ in calls))   # keeps seeding
+
+    def test_a_torrent_without_progress_is_removed_and_fails(self):
+        with TemporaryDirectory() as tmp:
+            sources = Sources({'torrent_download_root': tmp, 'torrent_poll_seconds': 0, 'torrent_stall_seconds': 0})
+            calls, priority = [], {0: 1}
+
+            def qbit(method, path, **kwargs):
+                calls.append(path)
+                if path == '/torrents/info':
+                    return [{'hash': 'h1', 'name': 'Album', 'state': 'stalledDL', 'save_path': tmp, 'num_seeds': 0}]
+                if path == '/torrents/filePrio':
+                    priority[0] = kwargs['data']['priority']
+                if path == '/torrents/files':
+                    return [{'index': 0, 'name': 'Album/01 A.flac', 'size': 10, 'priority': priority[0], 'progress': 0}]
+                return ''
+
+            candidate = {'id': 'c1', 'source': 'torrent', 'download_url': 'http://p/1', 'requested_album': 'Album'}
+            with patch.object(Sources, '_qbit', side_effect=qbit), patch('app.sources.time.sleep'):
+                with self.assertRaisesRegex(SourceError, 'no progress'):
+                    sources.download(candidate, Path(tmp) / 'out', lambda value: None, lambda: False)
+            self.assertIn('/torrents/delete', calls)
+
+    def test_torrent_search_without_an_enabled_tracker_is_an_error_not_an_empty_result(self):
+        sources = Sources({'prowlarr_url': 'http://prowlarr:9696', 'prowlarr_api_key': 'k'})
+        with patch.object(Sources, '_prowlarr', return_value=[{'name': 'RuTracker', 'enable': False}]):
+            with self.assertRaisesRegex(SourceError, 'No torrent tracker'):
+                sources.search('Artist Album', 'torrent', 'album')
+        releases = [{'title': 'Artist - Album - 2024, FLAC (tracks)', 'downloadUrl': 'http://p/1', 'seeders': 2}]
+        with patch.object(Sources, '_prowlarr', side_effect=[[{'enable': True}], releases]):
+            self.assertEqual(len(sources.search('Artist Album', 'torrent', 'album')), 1)
+
+
+class YouTubeMusicAlbumTests(unittest.TestCase):
+    def test_album_search_returns_official_youtube_music_releases(self):
+        pages = {
+            'search': {'entries': [{'url': 'https://music.youtube.com/browse/A'}, {'url': 'https://music.youtube.com/browse/B'},
+                                   {'url': 'https://music.youtube.com/browse/C'}]},
+            'https://music.youtube.com/browse/A': {'id': 'OLAK5uy_full', 'title': 'Album - Mid Spiral', 'playlist_count': 2,
+                                                   'entries': [{'channel': 'Band - Topic', 'duration': 100}, {'channel': 'Band - Topic', 'duration': 50}]},
+            'https://music.youtube.com/browse/B': {'id': 'PLfanmade', 'title': 'Mid Spiral (fan playlist)', 'entries': [{'channel': 'someone'}]},
+            'https://music.youtube.com/browse/C': {'id': 'OLAK5uy_ep', 'title': 'EP - Mid Spiral: Order', 'playlist_count': 6,
+                                                   'entries': [{'channel': 'Band', 'duration': 10}]},
+        }
+
+        class FakeYDL:
+            def __init__(self, options):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def extract_info(self, url, download=False):
+                return pages['search' if 'search?q=' in url else url]
+
+        with patch('app.sources.yt_dlp.YoutubeDL', FakeYDL):
+            found = Sources({}).search('Band Mid Spiral', 'youtube', 'album')
+        self.assertEqual([(c['title'], c['release_type'], c['artist'], c['file_count']) for c in found],
+                         [('Mid Spiral', 'Album', 'Band', 2), ('Mid Spiral: Order', 'EP', 'Band', 6)])
+        self.assertEqual(found[0]['url'], 'https://www.youtube.com/playlist?list=OLAK5uy_full')
+        self.assertEqual(found[0]['duration'], 150)

@@ -1069,7 +1069,7 @@ def logout(request: Request, response: Response):
 
 @app.post("/api/search")
 def search(body: Search, user=Depends(check_user)):
-    if body.source not in {"all", "soulseek", "youtube"} or body.kind not in {
+    if body.source not in {"all", "soulseek", "youtube", "torrent"} or body.kind not in {
         "track",
         "album",
     }:

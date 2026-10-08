@@ -294,6 +294,83 @@ def normalize_soulseek(data, kind="track"):
     return sorted(result, key=lambda c: (not c["free_slots"], c["queue_length"] or 0, -(c["bitrate"] or 0)))[:500]
 
 
+_SIZE_WORD = re.compile(r"[^\w]+")
+_TORRENT_DONE = {"uploading", "stalledUP", "queuedUP", "forcedUP", "stoppedUP", "pausedUP", "checkingUP"}
+
+
+def _torrent_format(title):
+    """RuTracker titles end like "2024, FLAC (tracks), lossless" or "MP3, 320 kbps"."""
+    lower = title.casefold()
+    image = "image" in lower and "tracks" not in lower
+    for name in ("flac", "alac", "mp3", "aac", "ogg", "opus", "wav", "ape", "wavpack"):
+        if re.search(rf"\b{name}\b", lower):
+            bitrate = re.search(r"(\d{3})\s*kbps", lower)
+            return name, int(bitrate.group(1)) if bitrate else None, image
+    if re.search(r"\[TR(?:16|24)\]", title):
+        return "flac", None, image   # RuTracker's hi-res tag: "tracks, 16/24-bit lossless"
+    return None, None, image
+
+
+def normalize_torrents(releases):
+    """Prowlarr releases as album candidates. Releases ripped as one file plus a CUE sheet
+    ("image") are dropped: the album has to arrive as tracks."""
+    result = []
+    for release in _array(releases):
+        title = _get(release, "title", "")
+        link = _get(release, "downloadUrl") or _get(release, "magnetUrl")
+        if not title or not link:
+            continue
+        fmt, bitrate, image = _torrent_format(title)
+        if image or fmt in {"ape", "wavpack"}:
+            continue
+        seeders = _get(release, "seeders") or 0
+        key = _identity("torrent", _get(release, "indexer", ""), _get(release, "guid") or link)
+        result.append({"id": key, "torrent_key": key, "source": "torrent", "kind": "album", "title": title,
+                       "artist": None, "album": None, "username": _get(release, "indexer") or "torrent",
+                       "provider": _get(release, "indexer"), "filename": None, "format": fmt, "bitrate": bitrate,
+                       "duration": None, "size": _get(release, "size"), "seeders": seeders,
+                       "leechers": _get(release, "leechers"), "queue_length": None, "free_slots": None,
+                       "url": None, "info_url": _get(release, "infoUrl"), "download_url": link,
+                       "file_count": _get(release, "files"), "files": []})
+    return sorted([c for c in result if c["seeders"] > 0], key=lambda c: -c["seeders"])
+
+
+def _torrent_words(text):
+    return set(_SIZE_WORD.sub(" ", without_accents(str(text or "")).casefold()).split())
+
+
+def torrent_selection(files, album=None):
+    """The audio files of one album in a torrent. A discography torrent holds many album
+    folders; the one whose path names the requested album is taken."""
+    audio = [f for f in files if PureWindowsPath(f["name"]).suffix.lower().lstrip(".") in AUDIO_EXTENSIONS
+             and not PureWindowsPath(f["name"]).name.startswith("._")]
+    if not audio:
+        raise SourceError("The torrent has no audio files.")
+    if len(audio) == 1 and any(f["name"].lower().endswith(".cue") for f in files):
+        raise SourceError("The torrent holds the album as one file with a CUE sheet; choose a release with separate tracks.")
+    groups = {}
+    for f in audio:
+        parent = PureWindowsPath(f["name"].replace("/", "\\")).parent
+        if _DISC_FOLDER.match(parent.name) and parent.parent.name:
+            parent = parent.parent
+        groups.setdefault(str(parent), []).append(f)
+    if len(groups) == 1:
+        return audio
+    wanted = _torrent_words(album)
+    if not wanted:
+        raise SourceError(f"The torrent holds {len(groups)} albums; queue it with the album name to choose one.")
+
+    def score(folder):
+        # Only the album's own folder name counts: the artist and discography names sit above it.
+        own = _torrent_words(PureWindowsPath(folder).name)
+        return len(wanted & own) / len(wanted), -len(own - wanted)
+
+    best = max(groups, key=score)
+    if score(best)[0] < 0.6:
+        raise SourceError(f"None of the {len(groups)} albums in the torrent matches “{album}”. Choose another release.")
+    return groups[best]
+
+
 class _QuietLogger:
     def debug(self, message):
         pass
@@ -310,6 +387,7 @@ class Sources:
         self.config = config
         self.last_errors = {}
         self.completed_root = Path(config.get("slskd_download_root", "/data/downloads/slskd")).resolve()
+        self.torrent_root = Path(config.get("torrent_download_root", "/downloads/torrents")).resolve()
 
     def _slskd(self, method, path, **kwargs):
         try:
@@ -369,15 +447,17 @@ class Sources:
         query = query.strip()
         if not query:
             raise SourceError("Enter a search or YouTube URL.")
-        if source not in {"all", "soulseek", "youtube"} or kind not in {"track", "album"}:
+        if source not in {"all", "soulseek", "youtube", "torrent"} or kind not in {"track", "album"}:
             raise SourceError("Unsupported search source or kind.")
         if urlsplit(query).scheme or query.startswith(("www.", "youtube.com/", "youtu.be/")):
             youtube_url(query)
-            if source == "soulseek":
+            if source in {"soulseek", "torrent"}:
                 raise SourceError("Use the YouTube source for a YouTube URL.")
             self.last_errors = {}
             return self._search_youtube(query, kind)
         selected = {"soulseek": self._search_soulseek, "youtube": self._search_youtube}
+        if self.torrents_configured() and (source == "torrent" or kind == "album"):
+            selected["torrent"] = self._search_torrent
         if source != "all":
             selected = {source: selected[source]}
         errors, results = {}, []
@@ -437,6 +517,8 @@ class Sources:
 
     def _search_youtube(self, query, kind):
         direct = bool(urlsplit(query).scheme)
+        if kind == "album" and not direct:
+            return self._search_youtube_albums(query)
         target = youtube_url(query) if direct else f"ytsearch12:{query}"
         options = {**self._youtube_options(), "extract_flat": "in_playlist", "skip_download": True,
                    "noplaylist": kind == "track" and direct}
@@ -470,6 +552,39 @@ class Sources:
                            "file_count": len(entry.get("entries") or []) if is_album else 1})
         return result
 
+    def _search_youtube_albums(self, query, limit=5):
+        """Official releases on YouTube Music: the album playlists (ids "OLAK5uy_") that YouTube
+        builds from label uploads, with tracks on the artist's "Topic" or own channel."""
+        options = {**self._youtube_options(), "extract_flat": "in_playlist", "skip_download": True}
+        try:
+            with yt_dlp.YoutubeDL({**options, "playlistend": limit}) as downloader:
+                found = downloader.extract_info("https://music.youtube.com/search?q=" + quote(query) + "#albums", download=False)
+        except Exception:
+            raise SourceError("YouTube Music search failed. Retry later.") from None
+        result = []
+        for entry in (found or {}).get("entries") or []:
+            try:
+                with yt_dlp.YoutubeDL(options) as downloader:
+                    info = downloader.extract_info(entry["url"], download=False)
+            except Exception:
+                continue   # one album page failing must not lose the others
+            tracks = [t for t in info.get("entries") or [] if t]
+            if not str(info.get("id", "")).startswith("OLAK5uy_") or not tracks:
+                continue
+            kind_label, _, title = str(info.get("title") or "").partition(" - ")
+            if not title:
+                kind_label, title = "Album", kind_label
+            channel = tracks[0].get("channel") or tracks[0].get("uploader") or ""
+            url = f"https://www.youtube.com/playlist?list={info['id']}"
+            result.append({"id": _identity("youtube", url), "source": "youtube", "kind": "album", "title": title,
+                           "album": title, "release_type": kind_label, "artist": channel.removesuffix(" - Topic") or None,
+                           "provider": "YouTube Music", "uploader": channel, "official": True, "username": None,
+                           "filename": None, "format": None, "bitrate": None,
+                           "duration": sum(t.get("duration") or 0 for t in tracks) or None, "size": None,
+                           "queue_length": None, "free_slots": None, "url": url, "files": [],
+                           "file_count": info.get("playlist_count") or len(tracks)})
+        return result
+
     def download(self, candidate, destination, progress, cancelled):
         destination = Path(destination).resolve()
         destination.mkdir(parents=True, exist_ok=True)
@@ -479,7 +594,163 @@ class Sources:
             return self._download_youtube(candidate, destination, progress, cancelled)
         if candidate.get("source") == "soulseek":
             return self._download_soulseek(candidate, destination, progress, cancelled)
+        if candidate.get("source") == "torrent":
+            return self._download_torrent(candidate, destination, progress, cancelled)
         raise SourceError("Unsupported download source.")
+
+    def torrents_configured(self):
+        return bool(self.config.get("prowlarr_url") and self.config.get("prowlarr_api_key"))
+
+    def _prowlarr(self, path, **params):
+        try:
+            response = httpx.get(self.config["prowlarr_url"].rstrip("/") + "/api/v1" + path, params=params,
+                                 headers={"X-Api-Key": self.config["prowlarr_api_key"]}, timeout=90)
+            response.raise_for_status()
+            return response.json()
+        except (httpx.HTTPError, ValueError, KeyError):
+            raise SourceError("Torrent search (Prowlarr) failed. Retry later.") from None
+
+    def _search_torrent(self, query, kind):
+        if kind != "album":
+            return []   # torrents hold whole releases
+        if not self.torrents_configured():
+            raise SourceError("Torrent search is not set up.")
+        if not any(i.get("enable") for i in _array(self._prowlarr("/indexer"))):
+            raise SourceError("No torrent tracker is enabled in Prowlarr.")   # an empty answer would read as "not found"
+        return normalize_torrents(self._prowlarr("/search", query=query, categories=3000, type="search", limit=100))
+
+    def _qbit(self, method, path, **kwargs):
+        base = self.config.get("qbittorrent_url", "http://qbittorrent:8091").rstrip("/") + "/api/v2"
+        for attempt in range(2):
+            if not getattr(self, "_qbit_client", None):
+                self._qbit_client = httpx.Client(timeout=60, headers={"Referer": base})
+                login = self._qbit_client.post(base + "/auth/login", data={
+                    "username": self.config.get("qbittorrent_username", "admin"),
+                    "password": self.config.get("qbittorrent_password", "")})
+                if login.status_code >= 400 or not self._qbit_client.cookies:
+                    self._qbit_client = None
+                    raise SourceError("qBittorrent refused the login. Check its credentials in the settings.")
+            try:
+                response = self._qbit_client.request(method, base + path, **kwargs)
+            except httpx.HTTPError:
+                self._qbit_client = None
+                raise SourceError("qBittorrent is unavailable. Retry when it is running.") from None
+            if response.status_code == 403 and attempt == 0:
+                self._qbit_client = None   # session expired
+                continue
+            if response.status_code >= 400:
+                raise SourceError(f"qBittorrent returned HTTP {response.status_code}.")
+            return response.json() if "json" in response.headers.get("content-type", "") else response.text
+        raise SourceError("qBittorrent refused the request.")
+
+    def _torrent_info(self, tag):
+        found = self._qbit("GET", "/torrents/info", params={"tag": tag})
+        return found[0] if found else None
+
+    def _add_torrent(self, candidate, tag):
+        link = candidate["download_url"]
+        data = {"tags": tag, "category": "acquisition", "savepath": self.torrent_root.as_posix()}
+        stopped = {"stopped": "true", "paused": "true"}   # start once the album's files are chosen
+        if not link.startswith("magnet:"):
+            try:
+                response = httpx.get(link, timeout=60, follow_redirects=False)
+                if response.is_redirect and response.headers.get("location", "").startswith("magnet:"):
+                    link = response.headers["location"]
+                else:
+                    response.raise_for_status()
+                    self._qbit("POST", "/torrents/add", data={**data, **stopped}, files={"torrents": ("release.torrent", response.content)})
+                    return
+            except httpx.HTTPError:
+                raise SourceError("Could not fetch the .torrent file from the tracker. Retry or choose another release.") from None
+        # A stopped magnet never fetches its file list: start it, and choose files once it has one.
+        self._qbit("POST", "/torrents/add", data={**data, "urls": link})
+
+    def _start_torrent(self, hash):
+        try:
+            self._qbit("POST", "/torrents/start", data={"hashes": hash})
+        except SourceError:
+            self._qbit("POST", "/torrents/resume", data={"hashes": hash})   # qBittorrent 4
+
+    def _release_torrent(self, hash, indexes):
+        """Stop wanting these files; delete the torrent when no job wants anything from it."""
+        if indexes:
+            self._qbit("POST", "/torrents/filePrio", data={"hash": hash, "id": "|".join(map(str, indexes)), "priority": 0})
+        files = self._qbit("GET", "/torrents/files", params={"hash": hash}) or []
+        if not any(f.get("priority") for f in files):
+            self._qbit("POST", "/torrents/delete", data={"hashes": hash, "deleteFiles": "true"})
+
+    def _download_torrent(self, candidate, destination, progress, cancelled):
+        tag = "acq-" + candidate.get("torrent_key", candidate["id"])[:16]
+        added = not self._torrent_info(tag)
+        if added:
+            self._add_torrent(candidate, tag)
+            progress({"message": "Added to qBittorrent; fetching the torrent's file list"})
+        deadline = time.monotonic() + float(self.config.get("torrent_metadata_seconds", 900))
+        while True:
+            info = self._torrent_info(tag)
+            files = self._qbit("GET", "/torrents/files", params={"hash": info["hash"]}) if info else []
+            if files and info.get("state") != "metaDL":
+                break
+            if cancelled():
+                raise DownloadCancelled("Download cancelled.")
+            if time.monotonic() >= deadline:
+                if info:
+                    self._qbit("POST", "/torrents/delete", data={"hashes": info["hash"], "deleteFiles": "true"})
+                raise SourceError("No peer sent the torrent's file list within 15 minutes (no seeders). Choose another release.")
+            time.sleep(float(self.config.get("torrent_poll_seconds", 5)))
+        hash = info["hash"]
+        if not candidate.get("torrent_files"):
+            chosen = torrent_selection(files, candidate.get("requested_album"))
+            wanted = {f["index"] for f in chosen}
+            skipped = [f["index"] for f in files if f["index"] not in wanted]
+            if added and skipped:
+                # Another job may share a torrent it added: then only switch our own files on.
+                self._qbit("POST", "/torrents/filePrio", data={"hash": hash, "id": "|".join(map(str, skipped)), "priority": 0})
+            self._qbit("POST", "/torrents/filePrio", data={"hash": hash, "id": "|".join(map(str, wanted)), "priority": 1})
+            candidate.update(torrent_hash=hash, torrent_files=sorted(wanted), file_count=len(wanted),
+                             source_title=info.get("name") or candidate.get("title"))
+            progress({"candidate": candidate, "message": f"Downloading {len(wanted)} of the torrent's {len(files)} files"})
+        self._start_torrent(hash)
+        wanted = set(candidate["torrent_files"])
+        stall = float(self.config.get("torrent_stall_seconds", 3600))
+        best, stalled_since = -1, time.monotonic()
+        while True:
+            if cancelled():
+                raise DownloadCancelled("Download cancelled.")
+            info = self._torrent_info(tag)
+            if not info:
+                raise SourceError("The torrent was removed from qBittorrent. Retry to add it again.")
+            files = [f for f in self._qbit("GET", "/torrents/files", params={"hash": hash}) if f["index"] in wanted]
+            total = sum(f["size"] for f in files) or 1
+            got = sum(f["size"] * f.get("progress", 0) for f in files)
+            if info.get("state") in {"error", "missingFiles"}:
+                raise SourceError(f"qBittorrent reports the torrent as {info['state']}. Retry or choose another release.")
+            if files and all(f.get("progress", 0) >= 1 for f in files):
+                break
+            if got > best:
+                best, stalled_since = got, time.monotonic()
+            elif time.monotonic() - stalled_since >= stall:
+                self._release_torrent(hash, sorted(wanted))
+                raise SourceError(f"The torrent made no progress for {round(stall / 60)} minutes "
+                                  f"({info.get('num_seeds', 0)} seeders connected); it was removed. Choose another release.")
+            seeds = info.get("num_seeds", 0)
+            progress({"percent": round(100 * got / total, 1),
+                      "message": f"{round(100 * got / total)}% · {seeds} seeder{'s' if seeds != 1 else ''} · "
+                                 f"{round((info.get('dlspeed') or 0) / 1024)} KB/s"})
+            time.sleep(float(self.config.get("torrent_poll_seconds", 5)))
+        root = Path(info.get("save_path") or self.torrent_root).resolve()
+        result = []
+        for index, file in enumerate(sorted(files, key=lambda f: f["name"])):
+            source = (root / file["name"]).resolve()
+            if not source.is_relative_to(self.torrent_root) or not source.is_file():
+                raise SourceError("A finished torrent file is missing from the download folder. Retry.")
+            target = destination / f"{index + 1:03d}-{source.name}"
+            if not target.exists() or target.stat().st_size != source.stat().st_size:
+                temporary = target.with_suffix(target.suffix + ".copying")
+                shutil.copy2(source, temporary)
+                temporary.replace(target)
+            result.append(target)
+        return result   # the torrent keeps seeding from the download folder
 
     def _download_youtube(self, candidate, destination, progress, cancelled):
         url = youtube_url(candidate["url"])
@@ -778,6 +1049,13 @@ class Sources:
         raise SourceError(f'Download from {username} exceeded the job time limit. Existing transfers and partial files are retained; retry to continue or choose another uploader.')
 
     def cancel(self, candidate):
+        if candidate.get("source") == "torrent":
+            if candidate.get("torrent_hash"):
+                try:
+                    self._release_torrent(candidate["torrent_hash"], candidate.get("torrent_files", []))
+                except SourceError:
+                    pass
+            return
         if candidate.get("source") != "soulseek":
             return
         # A job may reuse transfers started by another job or Aurral. Only cancel
