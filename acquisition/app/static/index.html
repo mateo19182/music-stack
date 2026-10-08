@@ -6,8 +6,8 @@
     <meta name="color-scheme" content="light" />
     <title>Acquire</title>
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v=20261005-2" />
-    <link rel="stylesheet" href="/static/style.css?v=20261008-2" />
-    <script defer src="/static/app.js?v=20261008-2"></script>
+    <link rel="stylesheet" href="/static/style.css?v=20261008-3" />
+    <script defer src="/static/app.js?v=20261008-3"></script>
   </head>
   <body>
     <div id="toast" role="status" aria-live="polite" hidden></div>
@@ -46,6 +46,7 @@
           <button data-tab="search" class="selected">Search</button
           ><button data-tab="activity">
             Queue <span id="active-count"></span></button
+          ><button data-tab="wishlist">Wishlist</button
           ><button data-tab="library">Library</button>
         </nav>
         <section id="search-view">
@@ -186,6 +187,39 @@
               </div>
             </form>
           </details>
+        </section>
+        <section id="wishlist-view" hidden>
+          <div class="section-title">
+            <h1>Wishlist</h1>
+            <button id="refresh-wishlist" class="quiet">Refresh</button>
+          </div>
+          <p class="muted">
+            Albums you want. Each one is searched on Soulseek and RuTracker,
+            the copies are ranked by quality, and they are tried one by one
+            until the album is in your library. YouTube Music's official album
+            is the last resort.
+          </p>
+          <form id="wishlist-form" class="wishlist-add">
+            <label>Artist<input name="artist" id="wish-artist" required maxlength="200" autocomplete="off" /></label>
+            <label>Album<input name="album" id="wish-album" required maxlength="300" autocomplete="off" /></label>
+            <label>List<input name="list" id="wish-list" list="wish-lists" value="Wishlist" required maxlength="120" /></label>
+            <datalist id="wish-lists"></datalist>
+            <button type="submit">Add album</button>
+          </form>
+          <div class="wishlist-filters">
+            <label>List<select id="wish-filter-list"><option value="">All lists</option></select></label>
+            <label>Status<select id="wish-filter-status">
+              <option value="">All</option>
+              <option value="open">Still looking</option>
+              <option value="active">Downloading</option>
+              <option value="review">In review</option>
+              <option value="have">In library</option>
+              <option value="stopped">Not found or gave up</option>
+              <option value="skipped">Skipped</option>
+            </select></label>
+            <span id="wishlist-summary" class="muted"></span>
+          </div>
+          <div id="wishlist"></div>
         </section>
         <section id="library-view" hidden>
           <div class="section-title">

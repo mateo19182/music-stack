@@ -16,6 +16,8 @@ from mediafile import MediaFile
 
 from .store import Store, uid, now
 from .sources import Sources, SourceError, SoulseekUnavailable, DownloadCancelled, youtube_url
+from .wishlist import Wishlist
+from typing import List
 from .health import SoulseekHealth, telegram
 from .ingestion import Ingestor, IngestionCancelled
 from .keys import camelot, key_fields, sort_key
@@ -114,6 +116,28 @@ class Import(BaseModel):
     paths: list[str] = Field(min_length=1, max_length=100)
 
 
+class WishlistAdd(BaseModel):
+    artist: str = Field(min_length=1, max_length=200)
+    album: str = Field(min_length=1, max_length=300)
+    list: str = Field(default="Wishlist", min_length=1, max_length=120)
+
+
+class WishlistEntry(BaseModel):
+    artist: str = Field(default="", max_length=200)
+    album: str = Field(default="", max_length=300)
+    star: bool = False
+    skip: str | None = Field(default=None, max_length=200)
+    year: int | None = None
+    wrong_jobs: list[str] = Field(default_factory=list, max_length=20)
+
+
+class WishlistImport(BaseModel):
+    items: List[WishlistEntry] = Field(min_length=1, max_length=500)   # typing.List: the `list` field shadows the builtin
+    list: str = Field(min_length=1, max_length=120)
+    playlist: bool = False
+    list_order: int = 0
+
+
 class AgentCredential(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     can_approve: bool = False
@@ -204,6 +228,19 @@ def soulseek_watcher():
                 check()
             except Exception:
                 log.exception("Watchdog check failed")
+        stop.wait(60)
+
+
+wishlist = Wishlist(store, config, lambda: Sources(config), lambda candidate, user: enqueue(candidate, user),
+                    soulseek_ready=lambda: soulseek_health.ready())
+
+
+def wishlist_worker():
+    while not stop.is_set():
+        try:
+            wishlist.tick()
+        except Exception:
+            log.exception("Wishlist pass failed")
         stop.wait(60)
 
 
@@ -908,6 +945,8 @@ async def lifespan(app):
     ]
     worker_threads.append(threading.Thread(target=sharing_worker, name="sharing-worker", daemon=True))
     worker_threads.append(threading.Thread(target=soulseek_watcher, name="soulseek-watcher", daemon=True))
+    if config.get("wishlist_enabled", True):
+        worker_threads.append(threading.Thread(target=wishlist_worker, name="wishlist", daemon=True))
     worker_threads.append(threading.Thread(target=advice_worker, name="advice-worker", daemon=True))
     worker_threads.append(threading.Thread(target=library_index_worker, name="library-index", daemon=True))
     if config.get("analysis_hour", 4) is not None:
@@ -1802,6 +1841,63 @@ def authorized_file(id, user):
 
 
 _checks_cache = {"at": 0.0, "checks": []}
+
+
+def owned_wish(id, user):
+    item = store.get("wishlist", id)
+    if not item or item["owner"] != user["username"]:
+        raise HTTPException(404, "Wishlist album not found")
+    return item
+
+
+@app.get("/api/wishlist")
+def wishlist_list(user=Depends(check_user)):
+    items = wishlist.items(user["username"])
+    jobs = {j["id"]: j for j in store.list("jobs", "owner=? AND stage NOT IN ('failed','cancelled','rejected','published')",
+                                           (user["username"],))}
+    lists = list(dict.fromkeys(i["list"] for i in items))
+    return {"lists": lists, "items": [wishlist.view(i, jobs) for i in items]}
+
+
+@app.post("/api/wishlist")
+def wishlist_add(body: WishlistAdd, user=Depends(check_user)):
+    item = wishlist.add(user["username"], body.artist.strip(), body.album.strip(), body.list.strip(),
+                        position=int(time.time()))
+    return wishlist.view(item)
+
+
+@app.post("/api/wishlist/import")
+def wishlist_import(body: WishlistImport, user=Depends(check_user)):
+    added = [wishlist.add(user["username"], e.artist.strip(), e.album.strip(), body.list.strip(), position=n, star=e.star,
+                          playlist=body.playlist, list_order=body.list_order, year=e.year,
+                          **({"skip": e.skip} if e.skip else {}), **({"wrong_jobs": e.wrong_jobs} if e.wrong_jobs else {}))
+             for n, e in enumerate(body.items)]
+    return {"count": len(added)}
+
+
+@app.post("/api/wishlist/{id}/retry")
+def wishlist_retry(id: str, user=Depends(check_user)):
+    item = owned_wish(id, user)
+    if item.get("job_id"):
+        raise HTTPException(409, "A download for this album is still running")
+    wishlist.retry(item)
+    return {"ok": True}
+
+
+@app.post("/api/wishlist/{id}/skip")
+def wishlist_skip(id: str, user=Depends(check_user)):
+    item = owned_wish(id, user)
+    item.update(status="skipped", note="Skipped by you")
+    wishlist.save(item)
+    return {"ok": True}
+
+
+@app.post("/api/wishlist/{id}/remove")
+def wishlist_remove(id: str, user=Depends(check_user)):
+    owned_wish(id, user)
+    with store.db() as db:
+        db.execute("DELETE FROM wishlist WHERE id=?", (id,))
+    return {"ok": True}
 
 
 @app.get("/api/soulseek/status")

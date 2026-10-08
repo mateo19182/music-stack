@@ -882,3 +882,26 @@ def test_needs_you_alerts_once_per_check_and_review(backend, monkeypatch):
     main.needs_you_alerts(lambda text: False)
     main.needs_you_alerts(send)
     assert len(sent) == 3 and "Album Two" in sent[2]
+
+
+def test_wishlist_import_list_retry_skip_and_ownership(backend, monkeypatch):
+    main, client = backend
+    signin(main, client, monkeypatch)
+    body = {"list": "Blog favorites 2025", "playlist": True, "items": [
+        {"artist": "Moor Mother", "album": "Jazz Codes", "star": True}, {"artist": "", "album": "Talk"},
+        {"artist": "X", "album": "Y", "skip": "kept only in 2024"}]}
+    assert client.post("/api/wishlist/import", json=body).json() == {"count": 3}
+    assert client.post("/api/wishlist/import", json=body).json() == {"count": 3}   # same entries, no duplicates
+    listed = client.get("/api/wishlist").json()
+    assert listed["lists"] == ["Blog favorites 2025"]
+    assert [(i["album"], i["status"]) for i in listed["items"]] == [("Jazz Codes", "wanted"), ("Talk", "skipped"), ("Y", "skipped")]
+    first = listed["items"][0]["id"]
+    added = client.post("/api/wishlist", json={"artist": "Puma Blue", "album": "antichamber"}).json()
+    assert added["list"] == "Wishlist" and added["status"] == "wanted"
+    assert client.post(f"/api/wishlist/{first}/skip", json={}).status_code == 200
+    assert client.post(f"/api/wishlist/{first}/retry", json={}).status_code == 200
+    assert main.store.get("wishlist", first)["status"] == "wanted"
+    signin(main, client, monkeypatch, name="other")
+    assert client.post(f"/api/wishlist/{first}/retry", json={}).status_code == 404
+    assert client.post(f"/api/wishlist/{first}/remove", json={}).status_code == 404
+    assert client.get("/api/wishlist").json()["items"] == []

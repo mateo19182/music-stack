@@ -45,6 +45,8 @@ def initialize(instance):
     ("retry_job", {"id": "job", "stage": "processing"}, "POST", "/api/jobs/job/retry", {"stage": "processing"}),
     ("cancel_job", {"id": "job"}, "POST", "/api/jobs/job/cancel", {}),
     ("import_files", {"paths": ["Album/Sauna.m4a"]}, "POST", "/api/import", {"paths": ["Album/Sauna.m4a"]}),
+    ("wishlist", {}, "GET", "/api/wishlist", {}),
+    ("add_to_wishlist", {"artist": "Moor Mother", "album": "Jazz Codes"}, "POST", "/api/wishlist", {"artist": "Moor Mother", "album": "Jazz Codes"}),
 ])
 def test_tools_use_exact_api_contract(bridge, name, args, method, path, payload):
     instance, received = bridge
@@ -122,7 +124,7 @@ def test_handshake_registry_notifications_and_invalid_requests(bridge):
     initialize(instance)
     assert instance.handle({"jsonrpc": "2.0", "id": 2, "method": "ping"})["result"] == {}
     registry = instance.handle({"jsonrpc": "2.0", "id": 3, "method": "tools/list"})["result"]["tools"]
-    assert len(registry) == 14
+    assert len(registry) == 16
     assert [item["name"] for item in registry if "approve" in item["name"]] == ["approve_review"]
     assert not any(any(word in item["name"] for word in ["reject", "publish", "delete", "sharing"]) for item in registry)
     for item in registry:

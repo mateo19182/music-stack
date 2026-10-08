@@ -819,10 +819,11 @@ class Sources:
                 progress({"candidate": candidate, "message": "Audio downloaded", "percent": 100})
         except DownloadCancelled:
             raise
-        except Exception:
+        except Exception as exc:
             if cancelled():
                 raise DownloadCancelled("Download cancelled. Retry to resume.") from None
-            raise SourceError("yt-dlp download failed. Retry or choose another candidate.") from None
+            reason = re.sub(r"\x1b\[[0-9;]*m", "", str(exc)).replace("ERROR: ", "")[:240]
+            raise SourceError(f"yt-dlp download failed ({reason}). Retry or choose another candidate.") from None
         files = [p for p in destination.iterdir() if p.is_file() and p.suffix.lstrip(".").lower() in AUDIO_EXTENSIONS]
         expected_ids = {str(entry["id"]) for entry in entries}
         actual_ids = {p.stem for p in files}

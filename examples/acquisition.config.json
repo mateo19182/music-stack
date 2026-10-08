@@ -30,5 +30,9 @@
   "qbittorrent_url": "http://qbittorrent:8091",
   "qbittorrent_username": "admin",
   "qbittorrent_password": "",
-  "torrent_download_root": "/downloads/torrents"
+  "torrent_download_root": "/downloads/torrents",
+  "wishlist_enabled": true,
+  "wishlist_searches_per_tick": 3,
+  "navidrome_playlist_username": "",
+  "navidrome_playlist_password": ""
 }

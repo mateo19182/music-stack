@@ -25,6 +25,7 @@ class Store:
             CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, owner TEXT NOT NULL, stage TEXT NOT NULL, created_at TEXT NOT NULL, data TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS files (id TEXT PRIMARY KEY, job_id TEXT, owner TEXT, published INTEGER NOT NULL DEFAULT 0, path TEXT UNIQUE NOT NULL, data TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS jobs_stage ON jobs(stage,created_at);
+            CREATE TABLE IF NOT EXISTS wishlist (id TEXT PRIMARY KEY, owner TEXT NOT NULL, data TEXT NOT NULL);
             """)
 
     @contextlib.contextmanager
@@ -41,7 +42,7 @@ class Store:
             db.close()
 
     def put(self, table, id, data, **columns):
-        if table not in {"sessions", "searches", "candidates", "jobs", "files"}:
+        if table not in {"sessions", "searches", "candidates", "jobs", "files", "wishlist"}:
             raise ValueError(table)
         values = {"id": id, **columns, "data": json.dumps(data, ensure_ascii=False)}
         with self.db() as db:
@@ -52,7 +53,7 @@ class Store:
             )
 
     def get(self, table, id):
-        if table not in {"sessions", "searches", "candidates", "jobs", "files"}:
+        if table not in {"sessions", "searches", "candidates", "jobs", "files", "wishlist"}:
             raise ValueError(table)
         with self.db() as db:
             r = db.execute(f"SELECT * FROM {table} WHERE id=?", (id,)).fetchone()
@@ -66,7 +67,7 @@ class Store:
         return {**json.loads(row.pop("data")), **row}
 
     def list(self, table, where="1", params=(), order="id"):
-        if table not in {"sessions", "searches", "candidates", "jobs", "files"}:
+        if table not in {"sessions", "searches", "candidates", "jobs", "files", "wishlist"}:
             raise ValueError(table)
         with self.db() as db:
             rows = db.execute(

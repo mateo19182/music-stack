@@ -151,7 +151,7 @@ async function busy(button, fn) {
 function showTab(tab) {
   if (["review", "inbox"].includes(tab)) tab = "activity";
   state.tab = tab;
-  for (const name of ["search", "activity", "library"]) {
+  for (const name of ["search", "activity", "wishlist", "library"]) {
     $(`#${name}-view`).hidden = name !== tab;
     const navButton = $(`nav [data-tab="${name}"]`);
     navButton.classList.toggle("selected", name === tab);
@@ -161,6 +161,7 @@ function showTab(tab) {
     Promise.all([loadJobs(), loadReview()]).catch((e) =>
       toast(e.message, true),
     );
+  if (tab === "wishlist") loadWishlist().catch((e) => toast(e.message, true));
   if (tab === "library") {
     loadLibrary().catch((e) => toast(e.message, true));
     if (state.isAdmin) {
@@ -1502,3 +1503,97 @@ $("#library-analysis").addEventListener("toggle", (e) => {
 $("#import-existing").addEventListener("toggle", (e) => {
   if (e.target.open) loadInbox().catch((error) => toast(error.message, true));
 });
+
+// Wishlist: albums the server keeps looking for until they are in the library.
+const WISH_LABELS = {
+  wanted: "Looking", queued: "Queued", downloading: "Downloading", processing: "Processing",
+  review: "In review", have: "In library", not_found: "Not found", gave_up: "Gave up", skipped: "Skipped",
+};
+const WISH_GROUPS = {
+  open: ["wanted"], active: ["queued", "downloading", "processing"], review: ["review"],
+  have: ["have"], stopped: ["not_found", "gave_up"], skipped: ["skipped"],
+};
+const WISH_BADGE = { have: "published", review: "review", not_found: "failed", gave_up: "failed" };
+function relativeTime(seconds) {
+  const diff = Math.round(seconds - Date.now() / 1000);
+  const hours = Math.round(Math.abs(diff) / 3600);
+  const text = Math.abs(diff) < 3600 ? `${Math.max(1, Math.round(Math.abs(diff) / 60))} min` : `${hours} h`;
+  return diff > 0 ? `in ${text}` : `${text} ago`;
+}
+function wishRow(i) {
+  const job = i.job;
+  const tried = i.tried.length
+    ? `<details><summary>${i.tries} tr${i.tries === 1 ? "y" : "ies"}</summary>${i.tried
+        .map((t) => `<p class="muted">${esc(sourceLabel(t.source))} · ${esc(String(t.provider || "").slice(0, 40))} · ${esc(t.outcome)}${t.error ? `: ${esc(t.error.slice(0, 140))}` : ""}</p>`)
+        .join("")}</details>`
+    : "";
+  const next = i.next.length && !["have", "skipped"].includes(i.status)
+    ? `<details><summary>${i.candidates} candidate${i.candidates === 1 ? "" : "s"} found</summary>${i.next
+        .map((c) => `<p class="muted">${esc(sourceLabel(c.source))} · ${esc(c.username || c.provider || "")} · ${esc(c.title || "")} · ${esc([c.format, c.bitrate ? `${c.bitrate} kbps` : "", c.file_count ? `${c.file_count} files` : "", c.seeders != null ? `${c.seeders} seeders` : ""].filter(Boolean).join(" · "))}</p>`)
+        .join("")}</details>`
+    : "";
+  const when = i.status === "wanted" && i.next_search_at && i.next_search_at * 1000 > Date.now()
+    ? `Next search ${relativeTime(i.next_search_at)}` : i.searched_at ? `Searched ${relativeTime(i.searched_at)}` : "";
+  const actions = [
+    ["not_found", "gave_up", "skipped", "wanted"].includes(i.status) && !job ? `<button class="quiet" data-wish-retry="${esc(i.id)}">Search again</button>` : "",
+    !["have", "skipped"].includes(i.status) && !job ? `<button class="quiet" data-wish-skip="${esc(i.id)}">Skip</button>` : "",
+    `<button class="quiet" data-wish-remove="${esc(i.id)}">Remove</button>`,
+  ].join("");
+  return `<article class="card wish-row"><div class="card-head"><div><span class="badge ${WISH_BADGE[i.status] || ""}">${esc(WISH_LABELS[i.status] || i.status)}</span>${i.star ? ' <span class="badge">★</span>' : ""}<h3>${esc(i.artist)} — ${esc(i.album)}</h3>${meta([i.note, when])}</div></div>${job && job.progress != null && ["downloading", "queued"].includes(job.stage) ? `<progress value="${Math.max(0, Math.min(100, Number(job.progress) || 0))}" max="100"></progress>` : ""}${next}${tried}<div class="actions">${actions}</div></article>`;
+}
+async function loadWishlist() {
+  const data = await api("/api/wishlist");
+  state.wishlist = data;
+  const lists = $("#wish-filter-list");
+  const chosen = lists.value;
+  lists.innerHTML = `<option value="">All lists</option>${data.lists.map((l) => `<option ${l === chosen ? "selected" : ""}>${esc(l)}</option>`).join("")}`;
+  $("#wish-lists").innerHTML = data.lists.map((l) => `<option value="${esc(l)}"></option>`).join("");
+  renderWishlist();
+}
+function renderWishlist() {
+  const data = state.wishlist || { lists: [], items: [] };
+  const list = $("#wish-filter-list").value;
+  const group = $("#wish-filter-status").value;
+  const items = data.items.filter((i) => (!list || i.list === list) && (!group || WISH_GROUPS[group].includes(i.status)));
+  const counts = {};
+  for (const i of data.items.filter((i) => !list || i.list === list))
+    for (const [g, statuses] of Object.entries(WISH_GROUPS)) if (statuses.includes(i.status)) counts[g] = (counts[g] || 0) + 1;
+  $("#wishlist-summary").textContent = [
+    counts.have ? `${counts.have} in library` : "", counts.active ? `${counts.active} downloading` : "",
+    counts.review ? `${counts.review} in review` : "", counts.open ? `${counts.open} looking` : "",
+    counts.stopped ? `${counts.stopped} not found or gave up` : "",
+  ].filter(Boolean).join(" · ");
+  const byList = {};
+  for (const i of items) (byList[i.list] ||= []).push(i);
+  $("#wishlist").innerHTML = Object.keys(byList).length
+    ? Object.entries(byList).map(([name, rows]) => `<div class="section-title"><h2>${esc(name)} <span class="muted">${rows.length}</span></h2></div>${rows.map(wishRow).join("")}`).join("")
+    : `<p class="muted">${data.items.length ? "Nothing matches these filters." : "No albums yet. Add one above."}</p>`;
+}
+$("#wish-filter-list").addEventListener("change", renderWishlist);
+$("#wish-filter-status").addEventListener("change", renderWishlist);
+$("#refresh-wishlist").addEventListener("click", (e) => busy(e.currentTarget, loadWishlist));
+$("#wishlist-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const form = e.currentTarget;
+  busy(form.querySelector("button"), async () => {
+    const item = await api("/api/wishlist", { artist: $("#wish-artist").value, album: $("#wish-album").value, list: $("#wish-list").value });
+    toast(`Added ${item.album}. It will be searched shortly.`);
+    $("#wish-artist").value = "";
+    $("#wish-album").value = "";
+    await loadWishlist();
+  });
+});
+document.addEventListener("click", (e) => {
+  const button = e.target.closest("[data-wish-retry],[data-wish-skip],[data-wish-remove]");
+  if (!button) return;
+  const [action, id] = button.dataset.wishRetry ? ["retry", button.dataset.wishRetry]
+    : button.dataset.wishSkip ? ["skip", button.dataset.wishSkip] : ["remove", button.dataset.wishRemove];
+  busy(button, async () => {
+    await api(`/api/wishlist/${path(id)}/${action}`, {});
+    toast({ retry: "Searching again shortly.", skip: "Skipped.", remove: "Removed from the wishlist." }[action]);
+    await loadWishlist();
+  });
+});
+setInterval(() => {
+  if (state.tab === "wishlist" && !document.hidden) loadWishlist().catch(() => {});
+}, 20000);

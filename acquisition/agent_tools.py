@@ -48,7 +48,7 @@ IDENTIFIER = string(128, 1)
 IDENTITY = {"artist": string(200), "title": string(200), "album": string(200)}
 TOOLS = [
     tool("health", "Check acquisition workers and service availability.", "GET", "/api/health"),
-    tool("search_music", "Start a Soulseek/YouTube track or album search. Poll get_search with its returned id; candidates require explicit selection before enqueue.", "POST", "/api/search", {"query": string(), "source": string(values=["all", "soulseek", "youtube"]), "kind": string(values=["track", "album"]), **IDENTITY}, external=True),
+    tool("search_music", "Start a Soulseek/YouTube/torrent track or album search. Poll get_search with its returned id; candidates require explicit selection before enqueue.", "POST", "/api/search", {"query": string(), "source": string(values=["all", "soulseek", "youtube", "torrent"]), "kind": string(values=["track", "album"]), **IDENTITY}, external=True),
     tool("get_search", "Read search status, source candidates and conservative library-match hints.", "GET", "/api/search/{id}", {"id": IDENTIFIER}, ["id"]),
     tool("list_jobs", "List visible acquisition jobs and their current stages.", "GET", "/api/jobs"),
     tool("get_job", "Read one job, its progress, failures and prepared/published file metadata.", "GET", "/api/jobs/{id}", {"id": IDENTIFIER}, ["id"]),
@@ -60,6 +60,8 @@ TOOLS = [
     tool("enqueue_url", "Queue a supported media URL as a track or album/playlist. Processing stops at manual review.", "POST", "/api/url", {"url": string(2000, 1), "kind": string(values=["track", "album"]), **IDENTITY}, ["url"], external=True),
     tool("retry_job", "Retry a failed/cancelled job. Prefer processing when downloaded. A publishing retry only resumes a previously approved publication.", "POST", "/api/jobs/{id}/retry", {"id": IDENTIFIER, "stage": string(values=["download", "processing", "publishing"])}, ["id", "stage"], external=True),
     tool("cancel_job", "Request cancellation of a queued/active acquisition job. Completed source files are retained.", "POST", "/api/jobs/{id}/cancel", {"id": IDENTIFIER}, ["id"], destructive=True, external=True),
+    tool("wishlist", "List wishlist albums: their lists, status (looking, downloading, in review, in library, not found, gave up) and recent tries.", "GET", "/api/wishlist"),
+    tool("add_to_wishlist", "Add an album the user wants. The server searches Soulseek and RuTracker, tries the ranked copies until one downloads, and falls back to YouTube Music's official album. Downloads still stop at review unless automatic adding is on.", "POST", "/api/wishlist", {"artist": string(200, 1), "album": string(300, 1), "list": string(120, 1)}, ["artist", "album"], external=True),
     tool("import_files", "Prepare explicitly selected completed files for review. Requires an authorized admin agent; paths are relative to the acquisition inbox.", "POST", "/api/import", {"paths": {"type": "array", "items": string(2000, 1), "minItems": 1, "maxItems": 100}}, ["paths"]),
 ]
 TOOL_MAP = {entry["name"]: entry for entry in TOOLS}
