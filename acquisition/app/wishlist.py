@@ -175,7 +175,12 @@ class Wishlist:
         tried = {t["provider"] for t in item["tried"]}
         fresh = item.get("searched_at") and now - item["searched_at"] < FRESH
         if fresh:
+            # Re-check cached candidates against today's rules: a fix should not wait 48 h to apply.
+            current = {matching.provider(c) for c in matching.ranked(item["candidates"], item["album"], item["artist"],
+                                                                      limit=len(item["candidates"]))}
             for c in item["candidates"]:
+                if matching.provider(c) not in current:
+                    continue
                 who = matching.provider(c)
                 if who in tried or who in blocked:
                     continue
