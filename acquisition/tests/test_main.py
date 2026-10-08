@@ -861,3 +861,24 @@ def test_soulseek_status_endpoint(backend, monkeypatch):
     signin(main, client, monkeypatch)
     status = client.get("/api/soulseek/status").json()
     assert status["connected"] is False and status["logged_in"] is False and status["waiting"] == 0
+
+
+def test_needs_you_alerts_once_per_check_and_review(backend, monkeypatch):
+    main, _ = backend
+    check = {"username": "peer", "status": "open", "since": "2026-10-08T10:00:00Z", "message": 'type "watermelon"', "recent": []}
+    monkeypatch.setattr(main.Sources, "soulseek_checks", lambda self: [check])
+    main.store.put("jobs", "r1", {"candidate": {}, "label": "Album One"}, owner="mateo", stage="review", created_at="1")
+    sent = []
+    send = lambda text: sent.append(text) or True
+    main.needs_you_alerts(send)
+    assert len(sent) == 1 and "peer" in sent[0] and "watermelon" in sent[0]   # review waits a tick for auto-adding
+    main.needs_you_alerts(send)
+    assert len(sent) == 2 and "Album One" in sent[1]
+    main.needs_you_alerts(send)
+    assert len(sent) == 2
+    # Failed sends are retried on the next tick.
+    main.store.put("jobs", "r2", {"candidate": {}, "label": "Album Two"}, owner="mateo", stage="review", created_at="2")
+    main.needs_you_alerts(send)
+    main.needs_you_alerts(lambda text: False)
+    main.needs_you_alerts(send)
+    assert len(sent) == 3 and "Album Two" in sent[2]

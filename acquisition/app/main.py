@@ -152,12 +152,58 @@ def download_limits(stages):
     return limits
 
 
+_review_sightings = {}
+
+
+def needs_you_alerts(send=None):
+    """Telegram, once each: uploaders asking for a human check, and downloads waiting for review."""
+    send = send or (lambda text: telegram(config, text))
+    path = STATE / "notified.json"
+    seen = set(json.loads(path.read_text())) if path.exists() else set()
+    link = config.get("public_url", "").rstrip("/")
+    footer = f"\n{link}" if link else ""
+    messages = []
+    try:
+        checks = Sources(config).soulseek_checks()
+    except SourceError:
+        checks = []
+    for check in checks:
+        key = f"check:{check['username']}:{check.get('since')}"
+        if check["status"] == "open" and key not in seen:
+            messages.append(([key], f"🔐 Soulseek user {check['username']} asks for a human check before sharing:\n"
+                                    f"“{str(check.get('message') or '')[:300]}”\nAnswer it in Needs you." + footer))
+    # A job seen in review on two ticks in a row: automatic adding had its chance and left questions.
+    reviews = {job["id"]: job for job in store.list("jobs", "stage='review'")}
+    for id in list(_review_sightings):
+        if id not in reviews:
+            del _review_sightings[id]
+    ready = []
+    for id, job in reviews.items():
+        if f"review:{id}" in seen:
+            continue
+        if _review_sightings.get(id):
+            ready.append(job)
+        _review_sightings[id] = True
+    if ready:
+        names = "\n".join(f"• {job.get('label') or 'Download'}" for job in ready[:10])
+        more = f"\n…and {len(ready) - 10} more" if len(ready) > 10 else ""
+        messages.append(([f"review:{job['id']}" for job in ready],
+                         f"🎧 {len(ready)} download{'s' if len(ready) > 1 else ''} waiting for your review:\n{names}{more}" + footer))
+    sent = [key for keys, text in messages if send(text) for key in keys]
+    if sent:
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(sorted(seen | set(sent))))
+        temporary.replace(path)
+
+
 def soulseek_watcher():
     while not stop.is_set():
-        try:
-            soulseek_health.watch(lambda text: telegram(config, text), soulseek_waiting)
-        except Exception:
-            log.exception("Soulseek watchdog failed")
+        for check in (lambda: soulseek_health.watch(lambda text: telegram(config, text), soulseek_waiting),
+                      needs_you_alerts):
+            try:
+                check()
+            except Exception:
+                log.exception("Watchdog check failed")
         stop.wait(60)
 
 
