@@ -64,3 +64,15 @@ def test_quiet_recovery_when_no_alert_was_sent():
     clock.now += 120
     health.watch(lambda t: sent.append(t) or True)
     assert sent == []
+
+
+def test_one_slow_uploader_pauses_quietly_a_run_of_errors_shows_an_outage():
+    clock = Clock()
+    health = SoulseekHealth(lambda: True, clock=clock)
+    health.failed()
+    status = health.status()
+    assert status["paused"] and status["connected"] and not health.ready()   # paused, but no banner
+    health.failed()
+    health.failed()
+    status = health.status()
+    assert status["paused"] and not status["connected"]

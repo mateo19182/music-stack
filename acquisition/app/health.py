@@ -26,6 +26,7 @@ class SoulseekHealth:
         self._lock = threading.Lock()
         self._checked_at, self._logged_in = 0.0, True
         self.paused_until, self.down_since, self.alerted = 0.0, None, False
+        self.burst = False   # the long pause: several errors in a row, likely the network
         self._errors = []
 
     def refresh(self, force=False):
@@ -50,7 +51,8 @@ class SoulseekHealth:
         now = self._clock()
         with self._lock:
             self._errors = [t for t in self._errors if now - t < BURST_WINDOW] + [now]
-            pause = LONG_PAUSE if len(self._errors) >= BURST else SHORT_PAUSE
+            self.burst = len(self._errors) >= BURST
+            pause = LONG_PAUSE if self.burst else SHORT_PAUSE
             self.paused_until = max(self.paused_until, now + pause)
             self._checked_at = 0.0   # check the server again before the next start
 
@@ -58,7 +60,10 @@ class SoulseekHealth:
         now = self._clock()
         logged_in = self.refresh()
         paused = now < self.paused_until
-        return {"connected": logged_in and not paused, "logged_in": logged_in,
+        # One slow uploader ("wait timed out") pauses new downloads for a minute, quietly; only a
+        # logout or a run of errors (the network) is an outage worth a banner.
+        outage = not logged_in or paused and self.burst
+        return {"connected": not outage, "logged_in": logged_in, "paused": paused,
                 "paused_until": self.paused_until if paused else None, "down_since": self.down_since}
 
     def watch(self, notify, waiting=lambda: 0):

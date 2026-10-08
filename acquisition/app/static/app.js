@@ -774,7 +774,8 @@ async function loadSoulseekStatus() {
   banner.hidden = s.connected;
   if (s.connected) return;
   const since = s.down_since ? ` since ${new Date(s.down_since * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "";
-  const why = s.logged_in ? "Soulseek connection errors" : `Soulseek is disconnected${since}`;
+  const until = s.paused_until ? ` until ${new Date(s.paused_until * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "";
+  const why = s.logged_in ? `Several Soulseek connection errors in a row; new downloads paused${until}` : `Soulseek is disconnected${since}`;
   banner.textContent = `${why}. ${s.waiting} downloads are waiting and resume on their own when it recovers.`;
 }
 
