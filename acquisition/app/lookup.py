@@ -224,3 +224,34 @@ class Catalog:
                 found('genre', attempt('Last.fm', lambda: lastfm_genres(client, self.lastfm_key, artist)), 'lastfm-artist-tags')
         self.cache[cache_key] = result
         return result
+
+
+def _musicbrainz_get(client, url, params):
+    """MusicBrainz answers 503 when the shared rate limit is hit: wait and try once more."""
+    for attempt in range(3):
+        with _musicbrainz:
+            response = client.get(url, params=params, headers={'User-Agent': USER_AGENT}, timeout=20)
+        if response.status_code != 503:
+            response.raise_for_status()
+            return response.json()
+        time.sleep(2 + 3 * attempt)
+    response.raise_for_status()
+
+
+def album_tracklist(client, artist, album):
+    """The album's official tracklist from MusicBrainz: {title, artist, date, type, tracks: [(title, seconds)]},
+    or None. Evidence for judging whether a downloaded folder is the album, not a fact to copy into tags."""
+    query = f'release:"{album}" AND artist:"{artist}"'.replace("\\", "")
+    found = [r for r in _musicbrainz_get(client, 'https://musicbrainz.org/ws/2/release',
+                                         {'query': query, 'fmt': 'json', 'limit': 5}).get('releases') or [] if int(r.get('score') or 0) >= 90
+             and _identity(r.get('title')) == _identity(album)]
+    if not found:
+        return None
+    # Prefer the official original over bootlegs and later editions.
+    best = min(found, key=lambda r: (r.get('status') != 'Official', r.get('date') or '9999'))
+    data = _musicbrainz_get(client, f'https://musicbrainz.org/ws/2/release/{best["id"]}', {'inc': 'recordings', 'fmt': 'json'})
+    tracks = [(t.get('title'), round((t.get('length') or 0) / 1000) or None)
+              for medium in data.get('media') or [] for t in medium.get('tracks') or []]
+    credit = ''.join(c.get('name', '') + c.get('joinphrase', '') for c in best.get('artist-credit') or [])
+    return {'title': data.get('title'), 'artist': credit, 'date': data.get('date'),
+            'type': (best.get('release-group') or {}).get('primary-type'), 'tracks': tracks}

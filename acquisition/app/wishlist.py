@@ -14,6 +14,7 @@ import time
 import httpx
 
 from . import matching
+from .lookup import album_tracklist
 from .sources import SourceError, SoulseekUnavailable, soulseek_query
 
 log = logging.getLogger("acquisition")
@@ -27,6 +28,7 @@ AHEAD = {"soulseek": 6, "torrent": 4, "youtube": 2}   # jobs waiting per source;
 QUEUE_CAP = 95               # the app refuses more than 100 unfinished jobs per owner
 # Network blips: the same source again. YouTube failures are mostly throttling that passes.
 TRANSIENT = ("wait timed out", "Soulseek is busy", "HTTP 503", "HTTP 502", "yt-dlp download failed")
+PERMANENT = ("Video unavailable", "Private video", "removed by the uploader")   # a retry cannot fix these
 BLOCKING = ("banned this account", "download quota", "human check")
 ACTIVE = ("queued", "downloading", "process_queued", "processing", "publish_queued", "publishing")
 DONE = ("have", "not_found", "gave_up", "skipped")
@@ -49,8 +51,11 @@ def soulseek_queries(album, artist, year=None):
 
 
 class Wishlist:
-    def __init__(self, store, config, sources, enqueue, soulseek_ready=lambda: True, clock=time.time):
+    def __init__(self, store, config, sources, enqueue, soulseek_ready=lambda: True, clock=time.time, judge=None,
+                 tracklist=None):
         self.store, self.config, self.sources, self.enqueue = store, config, sources, enqueue
+        self.judge = judge   # app.llm_match.Judge, or None: the matching rules alone
+        self.tracklist = tracklist or self._musicbrainz_tracklist
         self.soulseek_ready, self.clock = soulseek_ready, clock
         self._playlists_at = 0.0
         self._searches_left = 0
@@ -155,7 +160,7 @@ class Wishlist:
         error = job.get("error") or ""
         retries = int(job.get("retry_count", 0))
         if stage == "failed" and job.get("failed_stage") == "download" and (
-                any(w in error for w in TRANSIENT) and retries < 3 or (job.get("progress") or 0) >= 50 and retries < 2):
+                any(w in error for w in TRANSIENT) and not any(w in error for w in PERMANENT) and retries < 3 or (job.get("progress") or 0) >= 50 and retries < 2):
             # A network blip, or most of the album is here already: same source again.
             if self.store.transition_job(job["id"], {"failed"}, "queued", cancel_requested=False, error=None,
                                          retry_count=retries + 1, detail="Retry queued by the wishlist"):
@@ -179,7 +184,7 @@ class Wishlist:
             current = {matching.provider(c) for c in matching.ranked(item["candidates"], item["album"], item["artist"],
                                                                       limit=len(item["candidates"]))}
             for c in item["candidates"]:
-                if matching.provider(c) not in current:
+                if c.get("judged") != "model" and matching.provider(c) not in current:
                     continue
                 who = matching.provider(c)
                 if who in tried or who in blocked:
@@ -240,8 +245,8 @@ class Wishlist:
                     raise
                 except SourceError:
                     return None
+                results += found   # the model may accept folders the rules would not: keep every step's results
                 if matching.ranked(found, album, artist, avoid):
-                    results += found
                     break
         elif "soulseek" in sources:
             return None
@@ -253,15 +258,66 @@ class Wishlist:
                     found = sources_.search(query, "torrent", "album")
                 except SourceError:
                     break   # tracker down: keep the Soulseek results
+                results += found
                 if any(c.get("source") == "torrent" for c in matching.ranked(found, album, artist, avoid)):
-                    results += found
                     break
         if "youtube" in sources:
             try:
                 results += sources_.search(f"{matching.clean_artist(artist)} {album}".strip(), "youtube", "album")
             except SourceError:
                 return None
-        return matching.ranked(results, album, artist, avoid)
+        return self._rank(item, results, avoid)
+
+    def _rank(self, item, results, avoid):
+        """The model decides which results are the album; code orders them by quality and source.
+        Without a usable answer from the model, the matching rules decide, as before."""
+        album, artist = item["album"], item["artist"]
+        pool = [c for c in results if self._eligible(c, avoid)]
+        pool.sort(key=lambda c: (-matching.quality(c), matching.SOURCE_ORDER.get(c.get("source"), 9), -self._source_score(c)))
+        verdicts = None
+        if self.judge and pool:
+            if "tracklist" not in item:
+                item["tracklist"] = self.tracklist(item) or None
+            verdicts = self.judge.verdicts(artist, album, pool, item.get("year"), item.get("tracklist"))
+        if verdicts is None:
+            return matching.ranked(results, album, artist, avoid)
+        shown = pool[:len(verdicts)]
+        item["rejected"] = [{"source": c.get("source"), "name": c.get("directory") or c.get("title"),
+                             "problem": verdicts[n]["problem"], "reason": verdicts[n]["reason"]}
+                            for n, c in enumerate(shown) if not verdicts[n]["match"]][:8]
+        best, seen = [], set()
+        for n, c in enumerate(shown):
+            who = matching.provider(c)
+            if verdicts[n]["match"] and who not in seen:
+                seen.add(who)
+                best.append({**c, "judged": "model", "reason": verdicts[n]["reason"], "score": round(self._source_score(c), 2)})
+        return best[:8]
+
+    @staticmethod
+    def _eligible(c, avoid):
+        """Facts, not judgement: an album-sized result of acceptable quality from a source we may still try."""
+        if c.get("kind") != "album" or matching.quality(c) is None or matching.provider(c) in avoid:
+            return False
+        if c.get("source") == "soulseek":
+            return not c.get("mixed_formats") and (c.get("file_count") or 0) >= 2
+        if c.get("source") == "torrent":
+            return (c.get("seeders") or 0) > 0
+        return c.get("source") == "youtube" and bool(c.get("official"))
+
+    @staticmethod
+    def _source_score(c):
+        if c.get("source") == "soulseek":
+            return (0.5 if c.get("free_slots") else 0) - min(c.get("queue_length") or 0, 50) / 100
+        if c.get("source") == "torrent":
+            return min(c.get("seeders") or 0, 50) / 50
+        return 0
+
+    def _musicbrainz_tracklist(self, item):
+        try:
+            with httpx.Client() as client:
+                return album_tracklist(client, matching.clean_artist(item["artist"]), item["album"])
+        except Exception:
+            return None   # evidence only: the model judges without it
 
     def _room(self, source, jobs, owner):
         mine = [j for j in jobs.values() if j.get("owner") == owner and j["stage"] in ACTIVE + ("review",)]
@@ -357,8 +413,9 @@ class Wishlist:
                 "position": item.get("position", 0), "star": bool(item.get("star")), "status": item["status"],
                 "note": item.get("note"), "tries": len(item.get("tried", [])),
                 "tried": [{k: t.get(k) for k in ("source", "provider", "outcome", "error", "at")} for t in item.get("tried", [])[-10:]],
+                "rejected": item.get("rejected", [])[:5],
                 "candidates": len(item.get("candidates", [])), "next": [
-                    {k: c.get(k) for k in ("source", "username", "provider", "title", "format", "bitrate", "file_count", "seeders")}
+                    {k: c.get(k) for k in ("source", "username", "provider", "title", "format", "bitrate", "file_count", "seeders", "reason")}
                     for c in item.get("candidates", [])[:5]],
                 "searched_at": item.get("searched_at"), "next_search_at": item.get("next_search_at") or None,
                 "job": {"id": job["id"], "stage": job["stage"], "progress": job.get("progress"), "detail": job.get("detail")} if job else None}

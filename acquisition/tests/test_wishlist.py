@@ -167,3 +167,64 @@ def test_a_discography_must_be_the_same_artist_not_one_sharing_a_word():
                                      "bitrate": 320, "seeders": 3, "torrent_key": t}], "The Hiram Clarke Hamster", "Viper")[1]
              for t in titles]
     assert [bool(f) for f in found] == [False, False, False, True]
+
+
+class FakeJudge:
+    def __init__(self, accept=None, fail=False):
+        self.accept, self.fail, self.seen = accept, fail, []
+
+    def verdicts(self, artist, album, candidates, year=None, tracklist=None):
+        self.seen.append([matching.provider(c) for c in candidates])
+        if self.fail:
+            return None
+        return {n: {"match": matching.provider(c) in self.accept, "problem": "none" if matching.provider(c) in self.accept
+                    else "other_record", "reason": "test"} for n, c in enumerate(candidates)}
+
+
+
+
+def _wishlist(store, sources, judge, queued):
+    def enqueue(candidate, user):
+        id = uid()
+        store.put("jobs", id, {"candidate": candidate, "source": candidate["source"]}, owner=user["username"],
+                  stage="queued", created_at=now())
+        queued.append(candidate)
+        return {"id": id}
+    return Wishlist(store, {"navidrome_db": "/nonexistent"}, lambda: sources, enqueue, judge=judge, tracklist=lambda item: None)
+
+
+def test_the_model_decides_which_results_are_the_album(tmp_path):
+    store, queued = Store(tmp_path / "a.db"), []
+    # A scene folder the rules reject, and a chapter the rules accept: the model's verdict wins.
+    scene = slsk("scene", folder="Moor_Mother-Jazz_Codes-(ANTI123)-WEB-FLAC-2022-DASH")
+    chapter = slsk("chapter", folder="Moor Mother - Jazz Codes Order")
+    judge = FakeJudge(accept={"scene"})
+    w = _wishlist(store, FakeSources({"soulseek": [chapter, scene]}), judge, queued)
+    item = w.add("mateo", "Moor Mother", "Jazz Codes")
+    w.tick()
+    assert [c["username"] for c in queued] == ["scene"]
+    saved = store.get("wishlist", item["id"])
+    assert [c["judged"] for c in saved["candidates"]] == ["model"]
+    assert saved["rejected"][0]["name"].endswith("Jazz Codes Order")
+
+
+def test_without_a_model_answer_the_rules_decide_as_before(tmp_path):
+    store, queued = Store(tmp_path / "a.db"), []
+    w = _wishlist(store, FakeSources({"soulseek": [slsk("a"), slsk("chapter", folder="Moor Mother - Jazz Codes Order")]}),
+                  FakeJudge(fail=True), queued)
+    w.add("mateo", "Moor Mother", "Jazz Codes")
+    w.tick()
+    assert [c["username"] for c in queued] == ["a"]
+    assert "judged" not in queued[0]
+
+
+def test_permanently_unavailable_youtube_videos_are_not_retried(tmp_path):
+    store, queued = Store(tmp_path / "a.db"), []
+    w = _wishlist(store, FakeSources({"soulseek": [slsk("a"), slsk("b")]}), None, queued)
+    item = w.add("mateo", "Moor Mother", "Jazz Codes")
+    w.tick()
+    job = store.get("wishlist", item["id"])["job_id"]
+    store.update_job(job, stage="failed", failed_stage="download", progress=0,
+                     error="yt-dlp download failed ([youtube] x: Video unavailable). Retry or choose another candidate.")
+    w.tick()
+    assert [c["username"] for c in queued] == ["a", "b"]

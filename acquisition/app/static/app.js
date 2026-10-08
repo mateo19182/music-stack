@@ -1529,7 +1529,12 @@ function wishRow(i) {
     : "";
   const next = i.next.length && !["have", "skipped"].includes(i.status)
     ? `<details><summary>${i.candidates} candidate${i.candidates === 1 ? "" : "s"} found</summary>${i.next
-        .map((c) => `<p class="muted">${esc(sourceLabel(c.source))} · ${esc(c.username || c.provider || "")} · ${esc(c.title || "")} · ${esc([c.format, c.bitrate ? `${c.bitrate} kbps` : "", c.file_count ? `${c.file_count} files` : "", c.seeders != null ? `${c.seeders} seeders` : ""].filter(Boolean).join(" · "))}</p>`)
+        .map((c) => `<p class="muted">${esc(sourceLabel(c.source))} · ${esc(c.username || c.provider || "")} · ${esc(c.title || "")} · ${esc([c.format, c.bitrate ? `${c.bitrate} kbps` : "", c.file_count ? `${c.file_count} files` : "", c.seeders != null ? `${c.seeders} seeders` : ""].filter(Boolean).join(" · "))}${c.reason ? ` — ${esc(c.reason)}` : ""}</p>`)
+        .join("")}</details>`
+    : "";
+  const rejected = (i.rejected || []).length && !["have", "skipped"].includes(i.status)
+    ? `<details><summary>${i.rejected.length} rejected by the matcher</summary>${i.rejected
+        .map((r) => `<p class="muted">${esc(sourceLabel(r.source))} · ${esc(String(r.name || "").split(/[\\/]/).pop())} — ${esc(r.reason)}</p>`)
         .join("")}</details>`
     : "";
   const when = i.status === "wanted" && i.next_search_at && i.next_search_at * 1000 > Date.now()
@@ -1539,7 +1544,7 @@ function wishRow(i) {
     !["have", "skipped"].includes(i.status) && !job ? `<button class="quiet" data-wish-skip="${esc(i.id)}">Skip</button>` : "",
     `<button class="quiet" data-wish-remove="${esc(i.id)}">Remove</button>`,
   ].join("");
-  return `<article class="card wish-row"><div class="card-head"><div><span class="badge ${WISH_BADGE[i.status] || ""}">${esc(WISH_LABELS[i.status] || i.status)}</span>${i.star ? ' <span class="badge">★</span>' : ""}<h3>${esc(i.artist)} — ${esc(i.album)}</h3>${meta([i.note, when])}</div></div>${job && job.progress != null && ["downloading", "queued"].includes(job.stage) ? `<progress value="${Math.max(0, Math.min(100, Number(job.progress) || 0))}" max="100"></progress>` : ""}${next}${tried}<div class="actions">${actions}</div></article>`;
+  return `<article class="card wish-row"><div class="card-head"><div><span class="badge ${WISH_BADGE[i.status] || ""}">${esc(WISH_LABELS[i.status] || i.status)}</span>${i.star ? ' <span class="badge">★</span>' : ""}<h3>${esc(i.artist)} — ${esc(i.album)}</h3>${meta([i.note, when])}</div></div>${job && job.progress != null && ["downloading", "queued"].includes(job.stage) ? `<progress value="${Math.max(0, Math.min(100, Number(job.progress) || 0))}" max="100"></progress>` : ""}${next}${rejected}${tried}<div class="actions">${actions}</div></article>`;
 }
 async function loadWishlist() {
   const data = await api("/api/wishlist");
@@ -1562,6 +1567,7 @@ function renderWishlist() {
     counts.have ? `${counts.have} in library` : "", counts.active ? `${counts.active} downloading` : "",
     counts.review ? `${counts.review} in review` : "", counts.open ? `${counts.open} looking` : "",
     counts.stopped ? `${counts.stopped} not found or gave up` : "",
+    data.matching?.model ? `matching by ${data.matching.model}: ${data.matching.calls} calls, $${data.matching.cost_usd} since restart` : "",
   ].filter(Boolean).join(" · ");
   const byList = {};
   for (const i of items) (byList[i.list] ||= []).push(i);

@@ -17,6 +17,7 @@ from mediafile import MediaFile
 from .store import Store, uid, now
 from .sources import Sources, SourceError, SoulseekUnavailable, DownloadCancelled, youtube_url
 from .wishlist import Wishlist
+from .llm_match import Judge
 from typing import List
 from .health import SoulseekHealth, telegram
 from .ingestion import Ingestor, IngestionCancelled
@@ -231,8 +232,9 @@ def soulseek_watcher():
         stop.wait(60)
 
 
+match_judge = Judge(config)
 wishlist = Wishlist(store, config, lambda: Sources(config), lambda candidate, user: enqueue(candidate, user),
-                    soulseek_ready=lambda: soulseek_health.ready())
+                    soulseek_ready=lambda: soulseek_health.ready(), judge=match_judge if match_judge.enabled else None)
 
 
 def wishlist_worker():
@@ -1856,7 +1858,9 @@ def wishlist_list(user=Depends(check_user)):
     jobs = {j["id"]: j for j in store.list("jobs", "owner=? AND stage NOT IN ('failed','cancelled','rejected','published')",
                                            (user["username"],))}
     lists = list(dict.fromkeys(i["list"] for i in items))
-    return {"lists": lists, "items": [wishlist.view(i, jobs) for i in items]}
+    matching = {"model": match_judge.model if match_judge.enabled else None, "calls": match_judge.usage["calls"],
+                "cost_usd": round(match_judge.cost(), 4)}   # since the app started
+    return {"lists": lists, "items": [wishlist.view(i, jobs) for i in items], "matching": matching}
 
 
 @app.post("/api/wishlist")
