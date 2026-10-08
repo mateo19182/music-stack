@@ -133,6 +133,13 @@ def _queue_limited(transfer):
         and not any(word in text for word in ('week', 'today', 'day', 'month'))
 
 
+def _not_accepted(transfer):
+    """slskd gave up asking the uploader to queue this file (no answer within 3 minutes). A busy
+    uploader often accepts the album's other files meanwhile: ask again once those finish."""
+    reason = _detail(_get(transfer, 'exception') or _get(transfer, 'message') or _get(transfer, 'reason'))
+    return _terminal(transfer) and 'enqueue remotely' in reason.casefold()
+
+
 def _choose_transfer(matches):
     succeeded = [transfer for transfer in matches if 'succeeded' in _state(transfer).casefold()]
     active = [transfer for transfer in matches if not _terminal(transfer)]
@@ -699,7 +706,7 @@ class Sources:
             done, transferred, total = 0, 0, sum(int(f["size"] or 0) for f in files)
             ids = []
             states = []
-            limited = []
+            limited, unanswered = [], []
             for file in files:
                 matches = [t for t in transfers if _get(t, "filename") == file["filename"] and _get(t, "size") == file["size"]]
                 if not matches:
@@ -716,9 +723,15 @@ class Sources:
                     done += 1
                 elif _queue_limited(transfer):
                     limited.append(file)
+                elif _not_accepted(transfer):
+                    unanswered.append((file, transfer))
                 elif _terminal(transfer):
                     raise SourceError(_transfer_failure(username, transfer))
             candidate["transfer_ids"] = ids
+            if unanswered:
+                if not done and not limited and not any(not _terminal(t) for t in transfers if _get(t, "id") in ids):
+                    raise SourceError(_transfer_failure(username, unanswered[0][1]))   # accepted nothing: gone
+                limited += [file for file, _ in unanswered]
             if done > best_done or transferred > best_bytes:
                 best_done, best_bytes = max(done, best_done), max(transferred, best_bytes)
                 deadline = time.monotonic() + timeout
@@ -728,7 +741,7 @@ class Sources:
                 stalled_rounds = stalled_rounds + 1 if rounds_done == done else 0
                 if stalled_rounds >= 2:
                     raise SourceError(f'Soulseek peer {username} keeps refusing files (it limits how many files one user '
-                                      f'may queue): {done}/{len(files)} files complete. Completed files are retained; '
+                                      f'may queue, or ignores some requests): {done}/{len(files)} files complete. Completed files are retained; '
                                       'retry to continue with this uploader, or choose another uploader.')
                 rounds_done = done
                 enqueue(limited, transfers)

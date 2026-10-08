@@ -466,6 +466,39 @@ class QueueLimitTests(unittest.TestCase):
                     sources.download(self.candidate(3), Path(destination), lambda _: None, lambda: False)
             self.assertEqual(peer.posts, 3)
 
+    def test_files_the_uploader_did_not_answer_are_requested_again(self):
+        # 2026-10-08: et sent 40 of 42 files while two requests timed out; the job must not fail.
+        with TemporaryDirectory() as root, TemporaryDirectory() as destination:
+            peer = QueueLimitedPeer(root, limit=99)
+            original, asked = peer.slskd, set()
+            def slow(method, path, json=None):
+                response = original(method, path, json)
+                for t in peer.transfers[-len(json):]:
+                    if t['filename'].endswith('01.flac') and t['filename'] not in asked:
+                        asked.add(t['filename'])
+                        t.update(state='Completed, TimedOut', exception='Download failed to enqueue remotely after hard time limit of 180 secs')
+                return response
+            sources = Sources({'slskd_download_root': root, 'slskd_poll_seconds': 0})
+            with patch.object(sources, '_transfers', side_effect=peer.poll), patch.object(sources, '_slskd', side_effect=slow):
+                files = sources.download(self.candidate(3), Path(destination), lambda _: None, lambda: False)
+            self.assertEqual(len(files), 3)
+            self.assertEqual(peer.posts, 2)
+
+    def test_an_uploader_that_answers_nothing_fails_at_once(self):
+        with TemporaryDirectory() as root, TemporaryDirectory() as destination:
+            peer = QueueLimitedPeer(root, limit=99)
+            original = peer.slskd
+            def silent(method, path, json=None):
+                response = original(method, path, json)
+                for t in peer.transfers:
+                    t.update(state='Completed, TimedOut', exception='Download failed to enqueue remotely after hard time limit of 180 secs')
+                return response
+            sources = Sources({'slskd_download_root': root, 'slskd_poll_seconds': 0})
+            with patch.object(sources, '_transfers', side_effect=peer.poll), patch.object(sources, '_slskd', side_effect=silent):
+                with self.assertRaisesRegex(SourceError, 'never accepted the request'):
+                    sources.download(self.candidate(3), Path(destination), lambda _: None, lambda: False)
+            self.assertEqual(peer.posts, 1)
+
     def test_other_refusals_still_fail_at_once(self):
         with TemporaryDirectory() as root, TemporaryDirectory() as destination:
             peer = QueueLimitedPeer(root, limit=0)
