@@ -367,3 +367,25 @@ def test_retire_and_restore_move_a_library_file_and_its_provenance(tmp_path):
         raise AssertionError('retire must refuse files outside the library')
     except ValueError:
         pass
+
+
+def test_album_without_artist_tags_takes_the_requested_artist(tmp_path):
+    paths = []
+    for n in range(2):
+        path = audio(tmp_path, name=f'{n}.mp3', title=f'Song {n}')
+        tags = MediaFile(str(path))
+        tags.artist, tags.album = None, 'Even In Arcadia'
+        tags.save()
+        paths.append(path)
+    request = {'source': 'soulseek', 'requested_artist': 'Sleep Token', 'requested_album': 'Even In Arcadia'}
+    prepared = ingestor(tmp_path).prepare(paths, request, 'arcadia')
+    assert [p['artist'] for p in prepared] == ['Sleep Token', 'Sleep Token']
+    assert any('from your request' in w for w in prepared[0]['warnings'])
+    other = []
+    for n in range(2):   # another album's files keep their blank artist: no guessing
+        path = audio(tmp_path, name=f'o{n}.mp3', title=f'Other {n}')
+        tags = MediaFile(str(path))
+        tags.artist, tags.album = None, 'Something Else'
+        tags.save()
+        other.append(path)
+    assert not any(p['artist'] for p in ingestor(tmp_path).prepare(other, request, 'other'))

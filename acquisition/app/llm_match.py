@@ -84,6 +84,7 @@ class Judge:
         self.key = config.get("anthropic_api_key" if self.provider == "anthropic" else "openrouter_api_key") or ""
         self.model = config.get("match_model") or DEFAULT_MODEL.get(self.provider, "")
         self.enabled = bool(self.key) and config.get("llm_matching", True)
+        self.none_gate = config.get("match_none_option", False)   # tested 2026-10-08: vetoed good albums (144 vs 147 of 151)
         self.post = post
         self.usage = {"calls": 0, "input": 0, "output": 0, "usd": 0.0}
 
@@ -129,6 +130,13 @@ class Judge:
         questions = {f"c{n}": {"type": "noul", "instructions": f"Is candidate c{n} the wanted album, by matching_rules?",
                                "criteria": {"true": "Yes, it is the wanted album.", "false": "No."}}
                      for n in range(count)}
+        if self.none_gate:
+            # One comparison across all candidates, with a way out: a lone or doubtful candidate
+            # is no longer judged in isolation.
+            questions["best"] = {"type": "choice", "instructions": "Which candidate is the wanted album, by matching_rules? "
+                                                                   "Answer none when no candidate is clearly the wanted album.",
+                                 "criteria": {**{f"c{n}": f"Candidate c{n}." for n in range(count)},
+                                              "none": "None of the candidates is the wanted album."}}
         try:
             response = self.post(DECISIONS, timeout=120, headers={"Authorization": f"Bearer {self.key}"}, json={
                 "model": self.model, "state": request, "questions": questions})
@@ -150,6 +158,13 @@ class Judge:
         if len(found) != count:
             log.warning("Album matching model answered %d of %d candidates; using the rules", len(found), count)
             return None
+        best = answers.get("best") if self.none_gate and isinstance(answers, dict) else None
+        if isinstance(best, dict) and best.get("choice") == "none":
+            none = (best.get("probabilities") or {}).get("none")
+            for verdict in found.values():
+                if verdict["match"]:
+                    verdict.update(match=False, problem="none_chosen",
+                                   reason=verdict["reason"] + f", but none of the candidates fits ({round((none or 0) * 100)}%)")
         return found
 
     def _count(self, tokens_in, tokens_out, usd=None):

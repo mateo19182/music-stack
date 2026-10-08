@@ -52,6 +52,13 @@ def _json(path, data):
     os.replace(temporary, path)
 
 
+def _requested_album(album, candidate):
+    """The file's album tag names the album requested for this download (bracketed parts ignored)."""
+    wanted, requested_artist = candidate.get('requested_album'), candidate.get('requested_artist')
+    plain = lambda text: _identity(re.sub(r'\s*[\(\[].*?[\)\]]', '', str(text or '')))
+    return bool(requested_artist and wanted and album and plain(album) and plain(album) == plain(wanted))
+
+
 def _audio_hash(path, cancelled=lambda: False):
     result = _run(['ffmpeg', '-v', 'error', '-i', str(path), '-map', '0:a:0',
                    '-c:a', 'copy', '-f', 'hash', '-hash', 'sha256', '-'], 300, cancelled)
@@ -286,6 +293,10 @@ class Ingestor:
                     media.title = source.stem
                 if not media.artist and len(paths) == 1 and not _preserve_tags:
                     media.artist = candidate.get('artist') or candidate.get('requested_artist') or ''
+                elif not media.artist and not _preserve_tags and _requested_album(media.album, candidate):
+                    # An album folder with blank artist tags, tagged as the album the owner asked for:
+                    # the owner's request names the artist (2026-10-08: Sleep Token "Even In Arcadia").
+                    media.artist = candidate['requested_artist']
                 duration = float(stream.get('duration') or probe['format'].get('duration') or 0)
                 analysis_note = None
                 if not _preserve_tags:
@@ -390,6 +401,8 @@ class Ingestor:
                     embedded = record['existing_tags'].get(field)
                     if requested and embedded and requested.casefold().strip() != embedded.casefold().strip():
                         record['warnings'].append(f'Requested {field} differs from embedded metadata: {requested} / {embedded}. Existing metadata retained.')
+            if len(paths) > 1 and not record['existing_tags'].get('artist') and record.get('artist'):
+                record['warnings'].append(f"The files had no artist tag; {record['artist']} is from your request.")
             if record.get('analysis_skipped') == 'long-recording':
                 record['warnings'].append('Longer than 10 minutes, likely a mix, set or full album: BPM and key were not estimated.')
             embedded_key = record['existing_tags'].get('key')

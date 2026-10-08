@@ -83,3 +83,18 @@ def test_decisions_api_one_yes_no_question_per_candidate():
     assert j.cost() == 0.000025
     response.json.return_value = {"answers": {"c0": {"type": "noul", "noul": 0.9}}, "usage": {}}   # one missing
     assert j.verdicts("A", "B", CANDIDATES) is None
+
+
+def test_jev_can_answer_none_of_these():
+    response = Mock(status_code=200, raise_for_status=lambda: None)
+    response.json.return_value = {"answers": {"c0": {"type": "noul", "noul": 0.6}, "c1": {"type": "noul", "noul": 0.1},
+                                              "best": {"type": "choice", "choice": "none", "probabilities": {"c0": 0.3, "c1": 0, "none": 0.7}}},
+                                  "usage": {"cost": 0.00002}}
+    sent = []
+    j = Judge({"match_provider": "decisions", "openrouter_api_key": "k", "match_none_option": True},
+              post=lambda url, **k: sent.append(k["json"]) or response)
+    found = j.verdicts("A", "B", CANDIDATES)
+    assert not any(v["match"] for v in found.values()) and found[0]["problem"] == "none_chosen"
+    assert set(sent[0]["questions"]["best"]["criteria"]) == {"c0", "c1", "none"}
+    response.json.return_value["answers"]["best"] = {"type": "choice", "choice": "c0"}
+    assert j.verdicts("A", "B", CANDIDATES)[0]["match"] is True
