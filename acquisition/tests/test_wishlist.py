@@ -156,3 +156,14 @@ def test_an_album_split_by_per_track_album_artists_counts_as_one():
                           "artists": {matching.key(f"Machinedrum, Guest {n}")}, "tracks": [f"t{n}a", f"t{n}b"]} for n in range(3)}
     assert len(matching.album_tracks(library, {"artist": "MachineDrum", "album": "3RMX82"})) == 6
     assert matching.library_has(library, {"artist": "MachineDrum", "album": "3RMX82"})
+
+
+def test_a_discography_must_be_the_same_artist_not_one_sharing_a_word():
+    titles = ["(Classic Hard Rock) Blond Viper - Discography - 1990-2000, FLAC (tracks)",
+              "(Drum & Bass) Viper Recordings Discography - 2010-2024, FLAC (tracks)",
+              "(Melodic Rock | AOR) Faith Nation - Дискография - 2010-2020, FLAC (tracks)",
+              "(Rap) Viper - Дискография / Discography - 2008-2024, MP3, 320 kbps"]
+    found = [matching.pick_torrent([{"source": "torrent", "title": t, "format": "flac" if "FLAC" in t else "mp3",
+                                     "bitrate": 320, "seeders": 3, "torrent_key": t}], "The Hiram Clarke Hamster", "Viper")[1]
+             for t in titles]
+    assert [bool(f) for f in found] == [False, False, False, True]

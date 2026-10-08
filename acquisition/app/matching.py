@@ -247,6 +247,8 @@ def pick_torrent(results, album, artist, avoid=()):
             continue
         # Only a real discography: "Collection" also names compilations and unofficial soundtrack bundles.
         discography = bool(re.search(r'discograph|дискограф', title, re.I))
+        if discography and set(words(re.split(r'\s[-–/]\s', name)[0])) - {'the'} != artist_words - {'the'}:
+            continue   # "Blond Viper - Discography" is another band than "Viper"; so is "Viper Recordings"
         if not discography and not set(words(album)) <= name_words:
             continue
         if not discography and name_words - artist_words - set(words(album)) - {'ep', 'lp', 'single', 'album'}:
