@@ -89,6 +89,10 @@ class DownloadCancelled(SourceError):
     pass
 
 
+class SoulseekUnavailable(SourceError):
+    """slskd or its network is down or overloaded: not the uploader's fault, so the job waits."""
+
+
 def _array(value):
     if isinstance(value, list):
         return value
@@ -313,14 +317,26 @@ class Sources:
             except ValueError:
                 detail = _detail(exc.response.text)
             if exc.response.status_code == 429:
-                raise SourceError('Soulseek is busy. Wait for the current operation to finish, then retry; partial files are retained.') from None
+                raise SoulseekUnavailable('Soulseek is busy. Wait for the current operation to finish, then retry; partial files are retained.') from None
+            if exc.response.status_code in (502, 503, 504) or exc.response.status_code == 500 and 'wait timed out' in detail.casefold():
+                # slskd cannot reach the network (last seen when the VPN lost UDP): every request fails alike.
+                raise SoulseekUnavailable(f'Soulseek returned HTTP {exc.response.status_code}' +
+                                          (f': {detail}.' if detail else '.') + ' Retry when the connection recovers.') from None
             if path.startswith('/transfers/downloads/') and detail:
                 username = unquote(path.split('/')[3])
                 raise SourceError(_transfer_failure(username, {'state': 'Errored', 'message': detail})) from None
             raise SourceError(f'Soulseek returned HTTP {exc.response.status_code}' +
                               (f': {detail}.' if detail else '.') + ' Retry or choose another source.') from None
         except (httpx.HTTPError, ValueError):
-            raise SourceError("Soulseek is unavailable; retry when the connection recovers.") from None
+            raise SoulseekUnavailable("Soulseek is unavailable; retry when the connection recovers.") from None
+
+    def soulseek_connected(self):
+        """True while slskd is logged in to the Soulseek server."""
+        try:
+            server = self._slskd('GET', '/server', timeout=10) or {}
+        except SourceError:
+            return False
+        return bool(_get(server, 'isLoggedIn'))
 
     def soulseek_checks(self):
         conversations = []

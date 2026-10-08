@@ -15,7 +15,8 @@ from starlette.background import BackgroundTask
 from mediafile import MediaFile
 
 from .store import Store, uid, now
-from .sources import Sources, SourceError, DownloadCancelled, youtube_url
+from .sources import Sources, SourceError, SoulseekUnavailable, DownloadCancelled, youtube_url
+from .health import SoulseekHealth, telegram
 from .ingestion import Ingestor, IngestionCancelled
 from .keys import camelot, key_fields, sort_key
 from .library_tags import analyze_file, needs_analysis, read_tags, spelling_outdated, update_sidecar, write_tags
@@ -132,6 +133,32 @@ def scan_shares():
 sharing = Sharing(LIBRARY, config.get("share_root", str(STATE / "shared")), STATE,
                   scan=scan_shares if config.get("slskd_api_key") else None,
                   link_library=config.get("sharing_source_root"))
+
+
+soulseek_health = SoulseekHealth(lambda: Sources(config).soulseek_connected())
+
+
+def soulseek_waiting():
+    with store.db() as db:
+        return db.execute("SELECT COUNT(*) FROM jobs WHERE stage='queued' "
+                          "AND json_extract(data, '$.candidate.source')='soulseek'").fetchone()[0]
+
+
+def download_limits(stages):
+    """Per-source download limits; Soulseek gets none while slskd is disconnected or failing."""
+    limits = dict(config.get("source_download_limits", {"soulseek": 1}))
+    if "queued" in stages and soulseek_waiting() and not soulseek_health.ready():
+        limits["soulseek"] = 0
+    return limits
+
+
+def soulseek_watcher():
+    while not stop.is_set():
+        try:
+            soulseek_health.watch(lambda text: telegram(config, text), soulseek_waiting)
+        except Exception:
+            log.exception("Soulseek watchdog failed")
+        stop.wait(60)
 
 
 def sharing_worker():
@@ -598,7 +625,7 @@ def worker(stages=("queued", "process_queued", "publish_queued")):
     sources = Sources(config)
     ingestor = Ingestor(config)
     while not stop.is_set():
-        job = store.claim(stages, source_limits=config.get("source_download_limits", {"soulseek": 1}))
+        job = store.claim(stages, source_limits=download_limits(stages))
         if not job:
             stop.wait(1)
             continue
@@ -709,6 +736,16 @@ def worker(stages=("queued", "process_queued", "publish_queued")):
                     stage={"downloading": "queued", "processing": "process_queued", "publishing": "publish_queued"}[job["stage"]],
                     detail="Interrupted; resumes after restart",
                 )
+                continue
+            if (job["stage"] == "downloading" and job["candidate"].get("source") == "soulseek"
+                    and isinstance(exc, SourceError) and int(job.get("unavailable_retries", 0)) < 5
+                    and (isinstance(exc, SoulseekUnavailable) or not soulseek_health.refresh(force=True))):
+                # The connection, not the uploader: wait and retry instead of failing (a network
+                # outage would otherwise fail the whole queue in minutes).
+                soulseek_health.failed()
+                log.warning("Job %s waits for Soulseek: %s", id, exc)
+                store.update_job(id, stage="queued", unavailable_retries=int(job.get("unavailable_retries", 0)) + 1,
+                                 detail="Soulseek connection problem; retries automatically. " + str(exc)[:300])
                 continue
             log.exception("Job %s failed at %s", id, failed_stage)
             message = (
@@ -824,6 +861,7 @@ async def lifespan(app):
         for name, stages in ingestion_lanes(config.get("ingestion_workers", 1))
     ]
     worker_threads.append(threading.Thread(target=sharing_worker, name="sharing-worker", daemon=True))
+    worker_threads.append(threading.Thread(target=soulseek_watcher, name="soulseek-watcher", daemon=True))
     worker_threads.append(threading.Thread(target=advice_worker, name="advice-worker", daemon=True))
     worker_threads.append(threading.Thread(target=library_index_worker, name="library-index", daemon=True))
     if config.get("analysis_hour", 4) is not None:
@@ -1718,6 +1756,11 @@ def authorized_file(id, user):
 
 
 _checks_cache = {"at": 0.0, "checks": []}
+
+
+@app.get("/api/soulseek/status")
+def soulseek_status(user=Depends(check_user)):
+    return {**soulseek_health.status(), "waiting": soulseek_waiting()}
 
 
 @app.get("/api/soulseek/checks")

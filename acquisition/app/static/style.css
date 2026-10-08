@@ -1329,3 +1329,10 @@ body:has(#player-bar:not([hidden])) .review-bar {
   margin: 6px 0;
   overflow-wrap: anywhere;
 }
+.outage {
+  margin: 0 16px 12px;
+  padding: 10px 12px;
+  border: 1px solid #b0802a;
+  background: #fbf1dc;
+  color: #4a3510;
+}

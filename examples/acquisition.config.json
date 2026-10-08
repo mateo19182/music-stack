@@ -10,6 +10,8 @@
   "ingestion_workers": 1,
   "download_workers": 1,
   "source_download_limits": {"soulseek": 1},
+  "telegram_bot_token": "",
+  "telegram_chat_id": "",
   "analysis_hour": 4,
   "navidrome_url": "http://navidrome:4533",
   "navidrome_db": "/navidrome/navidrome.db",

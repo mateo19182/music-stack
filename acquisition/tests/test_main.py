@@ -809,3 +809,55 @@ def test_human_checks_list_failed_jobs_and_only_admins_reply(backend, monkeypatc
     signin(main, client, monkeypatch, name='paulo', admin=False)
     assert client.get('/api/soulseek/checks').json() == {'checks': []}
     assert client.post('/api/soulseek/checks/peer/reply', json={'message': 'x'}).status_code == 403
+
+
+def test_soulseek_outage_requeues_instead_of_failing(backend, monkeypatch):
+    main, _ = backend
+    connected = [True]
+    monkeypatch.setattr(main, "soulseek_health", main.SoulseekHealth(lambda: connected[0]))
+
+    class FakeSources:
+        def __init__(self, config):
+            pass
+
+        def download(self, candidate, *args):
+            if candidate["username"] == "peer":
+                raise main.SoulseekUnavailable("Soulseek returned HTTP 500: The wait timed out after 5000 milliseconds.")
+            raise main.SourceError("Soulseek peer other refused the download.")
+
+    monkeypatch.setattr(main, "Sources", FakeSources)
+
+    def run_until(done):
+        main.stop.clear()
+        thread = threading.Thread(target=main.worker, args=(("queued",),), daemon=True)
+        thread.start()
+        try:
+            for _ in range(300):
+                if done():
+                    break
+                time.sleep(0.01)
+        finally:
+            main.stop.set()
+            thread.join(timeout=3)
+
+    # An uploader's own refusal still fails while the server is connected.
+    main.store.put("jobs", "refused", {"candidate": {"source": "soulseek", "username": "other"}}, owner="mateo",
+                   stage="queued", created_at="1")
+    run_until(lambda: main.store.get("jobs", "refused")["stage"] == "failed")
+    assert main.store.get("jobs", "refused")["stage"] == "failed"
+    # A connection error puts the job back in the queue and pauses Soulseek downloads.
+    main.store.put("jobs", "outage", {"candidate": {"source": "soulseek", "username": "peer"}}, owner="mateo",
+                   stage="queued", created_at="2")
+    run_until(lambda: main.store.get("jobs", "outage").get("unavailable_retries"))
+    outage = main.store.get("jobs", "outage")
+    assert outage["stage"] == "queued" and outage["unavailable_retries"] == 1
+    assert main.download_limits(("queued",))["soulseek"] == 0
+    main.stop.clear()
+
+
+def test_soulseek_status_endpoint(backend, monkeypatch):
+    main, client = backend
+    monkeypatch.setattr(main, "soulseek_health", main.SoulseekHealth(lambda: False))
+    signin(main, client, monkeypatch)
+    status = client.get("/api/soulseek/status").json()
+    assert status["connected"] is False and status["logged_in"] is False and status["waiting"] == 0

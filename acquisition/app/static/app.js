@@ -734,7 +734,7 @@ async function start() {
   $("#login-view").hidden = true;
   $("#app").hidden = false;
   showTab("search");
-  const results = await Promise.allSettled([loadJobs(), loadReview(), loadAutoAdd(), loadChecks()]);
+  const results = await Promise.allSettled([loadJobs(), loadReview(), loadAutoAdd(), loadChecks(), loadSoulseekStatus()]);
   for (const result of results)
     if (result.status === "rejected") toast(result.reason.message, true);
 }
@@ -753,11 +753,23 @@ setInterval(() => {
         .catch(() => {});
     loadReview().catch(() => {});
     loadChecks().catch(() => {});
+    loadSoulseekStatus().catch(() => {});
     loadJobs().catch((e) => {
       if (state.tab === "activity") toast(e.message, true);
     });
   }
 }, 5000);
+
+// Soulseek outage: downloads wait instead of failing; say so until the connection is back.
+async function loadSoulseekStatus() {
+  const s = await api("/api/soulseek/status");
+  const banner = $("#soulseek-status");
+  banner.hidden = s.connected;
+  if (s.connected) return;
+  const since = s.down_since ? ` since ${new Date(s.down_since * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "";
+  const why = s.logged_in ? "Soulseek connection errors" : `Soulseek is disconnected${since}`;
+  banner.textContent = `${why}. ${s.waiting} downloads are waiting and resume on their own when it recovers.`;
+}
 
 // Uploaders whose anti-leech plugin asks for a human check. The user types the answer.
 async function loadChecks() {
