@@ -1303,7 +1303,19 @@ def jobs(user=Depends(check_user)):
         () if user["isAdmin"] else (user["username"],),
         order="created_at DESC LIMIT 100",
     )
-    return {"jobs": [job_view(j) for j in records]}
+    return {"jobs": [compact_job(job_view(j)) for j in records]}
+
+
+LIST_FILE_FIELDS = ("id", "title", "filename", "artist", "album", "album_id", "format", "bitrate", "duration", "size",
+                    "published", "shared", "navidrome_url")
+
+
+def compact_job(view):
+    """The queue polls this list every 5 s: each file carries only what the list shows (the full
+    record, with fingerprints, analysis and proposed tags, is at /api/jobs/{id})."""
+    request = view.get("request")
+    return {**view, "files": [{k: f.get(k) for k in LIST_FILE_FIELDS if k in f} for f in view.get("files") or []],
+            **({"request": {k: v for k, v in request.items() if k not in ("files", "source_files")}} if isinstance(request, dict) else {})}
 
 
 @app.get("/api/jobs/{id}")

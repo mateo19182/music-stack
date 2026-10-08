@@ -35,6 +35,12 @@ MAX_ANALYSIS_SECONDS = 20 * 60
 # DJ mixes and live sets have no single tempo or key worth tagging.
 BPM_KEY_MAX_SECONDS = 10 * 60
 _audio_index_lock = threading.Lock()
+# Library-wide lookups, rebuilt at most once a minute: publishing a 66-track album used to
+# rescan the whole library (every provenance file twice, every audio file once) per track.
+CACHE_SECONDS = 60
+_provenance_cache = {'at': 0.0, 'root': None, 'records': {}}
+_digest_cache = {'at': 0.0, 'root': None, 'paths': {}}
+_cache_lock = threading.Lock()
 
 
 def _hash(path):
@@ -50,6 +56,26 @@ def _json(path, data):
     temporary = path.with_name(f'.{path.name}.{os.getpid()}.{threading.get_ident()}.tmp')
     temporary.write_text(json.dumps(data, indent=2))
     os.replace(temporary, path)
+
+
+def _forget():
+    with _cache_lock:
+        _provenance_cache['at'] = _digest_cache['at'] = 0.0
+
+
+class _ExistingRecords(dict):
+    """Provenance records whose library file still exists, checked on lookup instead of for all ~2,000."""
+
+    def __init__(self, records):
+        super().__init__()   # the dict itself holds this caller's own additions, never the shared cache
+        self._records = records
+
+    def get(self, key, default=None):
+        record = dict.get(self, key) or self._records.get(key)
+        return record if record and Path(record.get('path', '')).is_file() else default
+
+    def __contains__(self, key):
+        return self.get(key) is not None
 
 
 def _requested_album(album, candidate):
@@ -235,14 +261,9 @@ class Ingestor:
         with open(self.state / 'publish.lock', 'a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
-            known = {}
-            for sidecar in self.library.rglob('*.provenance.json'):
-                try:
-                    record = json.loads(sidecar.read_text())
-                    if Path(record['path']).is_file():
-                        known[record['original_sha256']] = record
-                except (ValueError, KeyError, OSError):
-                    continue
+            if not _preserve_tags:
+                _forget()   # a new download: look at the library as it is now
+            known = self._provenance()
             results = []
             database = Library(str(self.beets_path), directory=str(self.library))
             for number, source in enumerate(paths):
@@ -442,15 +463,10 @@ class Ingestor:
             record['prepared_path'] = record['path']
             record['duplicate'] = False
             record['audio_sha256'] = record.get('audio_sha256') or _audio_hash(Path(record['source_path']), cancelled)
-            for sidecar in self.library.rglob('*.provenance.json'):
-                try:
-                    existing = json.loads(sidecar.read_text())
-                    if existing.get('original_sha256') == record['original_sha256'] and Path(existing['path']).is_file():
-                        record['duplicate'] = True
-                        record['duplicate_path'] = existing['path']
-                        break
-                except (OSError, ValueError, KeyError):
-                    continue
+            existing = self._provenance().get(record['original_sha256'])
+            if existing:
+                record['duplicate'] = True
+                record['duplicate_path'] = existing['path']
             legacy = self._find_existing_audio(record['audio_sha256'], cancelled, progress)
             if legacy:
                 record['duplicate'] = True
@@ -464,6 +480,7 @@ class Ingestor:
 
     def publish(self, prepared, edits, job_id, progress=lambda *args: None, cancelled=lambda: False):
         """Publish prepared records. Edits map prepared paths to explicit tag changes."""
+        _forget()   # one fresh library scan per publication; files it adds are remembered as it goes
         results = []
         for record in prepared:
             path = Path(record.get('prepared_path') or record['path']).resolve(strict=True)
@@ -501,14 +518,9 @@ class Ingestor:
                 continue
             existing_record = None
             if not changes:
-                for sidecar in self.library.rglob('*.provenance.json'):
-                    try:
-                        existing = json.loads(sidecar.read_text())
-                        if existing.get('original_sha256') == record['original_sha256'] and Path(existing['path']).is_file():
-                            existing_record = dict(existing, duplicate=True)
-                            break
-                    except (ValueError, KeyError, OSError):
-                        continue
+                existing = self._provenance().get(record['original_sha256'])
+                if existing:
+                    existing_record = dict(existing, duplicate=True)
             if existing_record:
                 results.append(existing_record)
                 continue
@@ -520,6 +532,7 @@ class Ingestor:
                 if changes[field] != record.get(field):
                     published['analysis_source'].pop(field, None)
             _json(Path(published['path']).with_name(Path(published['path']).name + '.provenance.json'), published)
+            self._remember(published)
             results.append(published)
         return results
 
@@ -577,12 +590,40 @@ class Ingestor:
             self._register(Library(str(self.beets_path), directory=str(self.library)), path)
         return str(path)
 
+    def _provenance(self):
+        """original_sha256 → provenance record of every library file, cached for CACHE_SECONDS."""
+        with _cache_lock:
+            cache = _provenance_cache
+            if cache['root'] != str(self.library) or time.monotonic() - cache['at'] > CACHE_SECONDS:
+                records = {}
+                for sidecar in self.library.rglob('*.provenance.json'):
+                    try:
+                        record = json.loads(sidecar.read_text())
+                        records[record['original_sha256']] = record
+                    except (ValueError, KeyError, OSError, TypeError):
+                        continue
+                cache.update(at=time.monotonic(), root=str(self.library), records=records)
+            return _ExistingRecords(cache['records'])
+
+    def _remember(self, record):
+        """A file just published: visible to the next lookup without waiting for a rescan."""
+        with _cache_lock:
+            if record.get('original_sha256') and _provenance_cache['root'] == str(self.library):
+                _provenance_cache['records'][record['original_sha256']] = record
+            if record.get('audio_sha256') and record.get('path') and _digest_cache['root'] == str(self.library):
+                _digest_cache['paths'][record['audio_sha256']] = record['path']
+
     def _find_existing_audio(self, digest, cancelled, progress=lambda *args: None):
         # Workers share one index file; serialize so their cache updates are not lost.
         with _audio_index_lock:
-            return self._scan_existing_audio(digest, cancelled, progress)
+            cache = _digest_cache
+            if cache['root'] != str(self.library) or time.monotonic() - cache['at'] > CACHE_SECONDS:
+                cache.update(paths=self._scan_existing_audio(cancelled, progress), at=time.monotonic(), root=str(self.library))
+            path = cache['paths'].get(digest)
+            return Path(path) if path and Path(path).is_file() else None
 
-    def _scan_existing_audio(self, digest, cancelled, progress):
+    def _scan_existing_audio(self, cancelled, progress):
+        """Audio digest → path for every library file (hashing only files changed since the last scan)."""
         progress('Checking existing library for duplicates')
         checked = 0
         reported = time.monotonic()
@@ -593,7 +634,7 @@ class Ingestor:
         except (OSError, ValueError):
             index = {}
         supported = {'.mp3', '.flac', '.m4a', '.ogg', '.opus', '.wav', '.aac', '.aiff', '.aif'}
-        match = None
+        found = {}
         for root in dict.fromkeys([self.library, *[Path(p) for p in self.config.get('legacy_roots', [])]]):
             for path in root.rglob('*'):
                 if path.suffix.lower() not in supported or not path.is_file() or path.is_symlink():
@@ -613,13 +654,9 @@ class Ingestor:
                         index[str(path)] = stored
                     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
                         continue
-                if stored['digest'] == digest:
-                    match = path
-                    break
-            if match:
-                break
+                found.setdefault(stored['digest'], str(path))
         _json(index_path, index)
-        return match
+        return found
 
     def _possible_duplicates(self, record):
         index_path = self.state / 'audio-index.json'

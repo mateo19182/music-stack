@@ -389,3 +389,26 @@ def test_album_without_artist_tags_takes_the_requested_artist(tmp_path):
         tags.save()
         other.append(path)
     assert not any(p['artist'] for p in ingestor(tmp_path).prepare(other, request, 'other'))
+
+
+def test_publishing_an_album_scans_the_library_once_not_per_track(tmp_path, monkeypatch):
+    pipeline = ingestor(tmp_path)
+    pipeline.process([audio(tmp_path, name='old.mp3', title='Already here')], {}, 'earlier')
+    sources = []
+    for n in range(4):
+        path = audio(tmp_path, name=f'{n}.mp3', title=f'Track {n}')
+        subprocess.run(['ffmpeg', '-v', 'error', '-y', '-f', 'lavfi', '-i', f'sine=frequency={500 + 50 * n}:duration=2',
+                        '-codec:a', 'libmp3lame', str(path)], check=True)   # distinct audio per track
+        tags = MediaFile(str(path))
+        tags.title, tags.artist, tags.album = f'Track {n}', 'Artist', 'Album'
+        tags.save()
+        sources.append(path)
+    prepared = pipeline.prepare(sources, {}, 'album')
+    scans = []
+    original = Ingestor._scan_existing_audio
+    monkeypatch.setattr(Ingestor, '_scan_existing_audio', lambda self, *a: scans.append(1) or original(self, *a))
+    published = pipeline.publish(prepared, {}, 'album')
+    assert len(scans) == 1 and len(published) == 4 and not any(p.get('duplicate') for p in published)
+    again = pipeline.publish(prepared, {}, 'album')   # a retry sees what the first run added
+    assert all(p.get('duplicate') for p in again)
+    assert len(list((tmp_path / 'library').rglob('*.mp3'))) == 5
