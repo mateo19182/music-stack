@@ -243,26 +243,40 @@ def test_a_timed_out_browse_takes_the_next_copy(tmp_path):
     assert [c["username"] for c in queued] == ["a", "b"]
 
 
+
 def yt(title, channel, url):
     return {"id": f"y-{url}", "source": "youtube", "kind": "album", "title": title, "official": True, "uploader": channel,
             "url": f"https://www.youtube.com/playlist?list={url}", "file_count": 7}
 
 
-def test_an_unsure_youtube_album_with_the_requested_title_goes_to_review_with_a_question(tmp_path):
+class OddsJudge:
+    """Decisions-style verdicts: nothing matches, with a probability per title."""
+    def __init__(self, odds):
+        self.odds = odds
+
+    def verdicts(self, artist, album, candidates, year=None, tracklist=None):
+        return {n: {"match": False, "problem": "unclear", "probability": self.odds[c["title"]], "reason": "x"}
+                for n, c in enumerate(candidates)}
+
+
+def test_an_exact_youtube_title_the_model_finds_plausible_is_the_last_resort(tmp_path):
     store, queued = Store(tmp_path / "a.db"), []
-    sources = FakeSources({"youtube": [yt("BLINDAO", "marquitos", "OLAK5uy_a"), yt("Parallel Movements", "The Rails", "OLAK5uy_b")]})
-    w = _wishlist(store, sources, FakeJudge(accept=set()), queued)
+    sources = FakeSources({"youtube": [yt("Parallel Movement", "BDTom - Topic", "OLAK5uy_b"), yt("BLINDAO", "marquitos", "OLAK5uy_a")]})
+    w = _wishlist(store, sources, OddsJudge({"BLINDAO": 0.4, "Parallel Movement": 0.17}), queued)
     w.add("mateo", "ODDLIQUOR", "BLINDAO")
     w.tick()
     assert [c["title"] for c in queued] == ["BLINDAO"]
-    assert "not sure" in queued[0]["doubt"]
     assert ("BLINDAO", "youtube") in sources.calls   # the title alone is searched too
 
 
-def test_a_youtube_album_missing_a_requested_word_is_not_offered(tmp_path):
+def test_same_titled_youtube_albums_the_model_doubts_are_not_taken(tmp_path):
     store, queued = Store(tmp_path / "a.db"), []
-    w = _wishlist(store, FakeSources({"youtube": [yt("Liquor Store Lime", "Bastiengoat", "OLAK5uy_c")]}),
-                  FakeJudge(accept=set()), queued)
+    # Other artists' records: exact title but under the floor, or the title's words out of order.
+    sources = FakeSources({"youtube": [yt("Liquor Store Run", "LiL'WooFyWooF - Topic", "OLAK5uy_c"),
+                                       yt("Indigo Blue", "Evan Purdy - Topic", "OLAK5uy_d")]})
+    w = _wishlist(store, sources, OddsJudge({"Liquor Store Run": 0.06, "Indigo Blue": 0.5}), queued)
     w.add("mateo", "bastienGOAT", "Liquor Store Run")
+    w.tick()
+    w.add("mateo", "Darius C", "Blue Indigo")
     w.tick()
     assert queued == []

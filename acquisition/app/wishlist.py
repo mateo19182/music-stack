@@ -22,6 +22,7 @@ log = logging.getLogger("acquisition")
 FRESH = 12 * 3600            # search results older than this are stale: older lists sent us to offline uploaders
 NOT_FOUND_WAIT = 24 * 3600   # an album nobody shares today may be shared tomorrow
 RETRY_WAIT = 3600            # after a used-up list, search again this much later
+YOUTUBE_TITLE_FLOOR = 0.2     # 2026-10-09: right albums scored 0.23 and 0.40, same-titled ones by others 0.03-0.18
 MAX_ROUNDS = 2               # used-up or empty searches before giving up
 AHEAD = {"soulseek": 6, "torrent": 4, "youtube": 2}   # jobs waiting per source; more go stale
 QUEUE_CAP = 95               # the app refuses more than 100 unfinished jobs per owner
@@ -294,14 +295,15 @@ class Wishlist:
                 seen.add(who)
                 best.append({**c, "judged": "model", "reason": verdicts[n]["reason"], "score": round(self._source_score(c), 2)})
         if not best:
-            # Last resort: an official YouTube Music album carrying every word of the requested title
-            # goes to Review with a question instead of being dropped ("BLINDAO" listed under a
-            # collaborator's channel). It is never added without the owner's answer.
-            wanted = set(matching.words(album))
+            # Last resort: an official YouTube Music album with the requested title, word for word and
+            # in order, that the model found at least plausible (a misspelled artist, "BLINDAO" under a
+            # collaborator's channel). Same-titled records by other artists score under this floor.
+            wanted = " ".join(matching.words(album))
             for n, c in enumerate(shown):
-                if c.get("source") == "youtube" and wanted and wanted <= set(matching.words(c.get("title"))):
-                    best.append({**c, "judged": "model", "reason": verdicts[n]["reason"],
-                                 "doubt": f"The model was not sure this is {artist} – {album} ({verdicts[n]['reason']})."})
+                p = verdicts[n].get("probability") or 0
+                title = f' {" ".join(matching.words(c.get("title")))} '
+                if c.get("source") == "youtube" and wanted and f" {wanted} " in title and p >= YOUTUBE_TITLE_FLOOR:
+                    best.append({**c, "judged": "model", "reason": verdicts[n]["reason"] + "; exact title on YouTube Music"})
                     break
         return best[:8]
 

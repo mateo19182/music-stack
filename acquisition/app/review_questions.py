@@ -57,8 +57,6 @@ def plan(record, track_count=1):
     if missing:
         found.append({'kind': 'missing', 'fields': missing})
     candidate = record.get('candidate') or {}
-    if candidate.get('doubt'):
-        found.append({'kind': 'doubt', 'reason': str(candidate['doubt'])[:300]})
     if track_count == 1:
         for field in ('artist', 'title'):
             requested = candidate.get('requested_' + field)
