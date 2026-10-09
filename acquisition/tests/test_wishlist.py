@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from app import matching
 from app.store import Store, now, uid
-from app.wishlist import Wishlist, NOT_FOUND_WAIT
+from app.wishlist import Wishlist, NOT_FOUND_WAIT, UPLOADER_REST
 
 
 def slsk(user, fmt="flac", bitrate=None, files=10, folder="Moor Mother - Jazz Codes"):
@@ -128,6 +128,21 @@ class WishlistTests(unittest.TestCase):
         w.add("mateo", "Moor Mother", "Jazz Codes")
         w.tick()
         self.assertEqual(self.queued[-1]["username"], "b")
+
+    def test_an_uploader_that_failed_twice_recently_rests(self):
+        def failed(at):
+            self.store.put("jobs", uid(), {"candidate": {"source": "soulseek", "username": "a"}, "failed_stage": "download",
+                                           "error": "Soulseek peer a never accepted the request", "failed_at": at},
+                           owner="mateo", stage="failed", created_at=now())
+        failed(self.clock[0] - 60)
+        failed(self.clock[0] - 30)
+        sources = FakeSources({"soulseek": [slsk("a"), slsk("b")]})
+        w = self.wishlist(sources)
+        w.add("mateo", "Moor Mother", "Jazz Codes")
+        w.tick()
+        self.assertEqual(self.queued[-1]["username"], "b")
+        self.clock[0] += UPLOADER_REST
+        self.assertNotIn("a", w._blocked(self.store.list("jobs")))   # rested; two old failures alone don't block
 
     def test_an_album_in_the_library_needs_nothing(self):
         sources = FakeSources({"soulseek": [slsk("a")]})

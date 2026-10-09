@@ -2,6 +2,8 @@
 
 On 2026-10-08 the VPN lost UDP for ~90 minutes; every queued Soulseek job failed within
 minutes with the same slskd error. Jobs now wait while slskd is logged out or failing.
+That error ("HTTP 500: the wait timed out") also comes from a busy slskd, so a pause only
+counts as an outage while no Soulseek download is making progress.
 """
 from __future__ import annotations
 
@@ -18,6 +20,7 @@ SHORT_PAUSE = 60          # after one connection error: maybe just that uploader
 LONG_PAUSE = 600          # after several in a row: the network is down
 BURST, BURST_WINDOW = 3, 300
 ALERT_AFTER = 600
+ALIVE_WINDOW = 300        # a download made progress this recently: the network is up
 
 
 class SoulseekHealth:
@@ -28,6 +31,18 @@ class SoulseekHealth:
         self.paused_until, self.down_since, self.alerted = 0.0, None, False
         self.burst = False   # the long pause: several errors in a row, likely the network
         self._errors = []
+        self._alive_at = None
+
+    def alive(self):
+        """A Soulseek download made progress: errors meanwhile are a busy slskd or one uploader."""
+        now = self._clock()
+        with self._lock:
+            self._alive_at = now
+            self._errors, self.burst = [], False
+            self.paused_until = min(self.paused_until, now + SHORT_PAUSE)
+
+    def _recently_alive(self, now):
+        return self._alive_at is not None and now - self._alive_at < ALIVE_WINDOW
 
     def refresh(self, force=False):
         now = self._clock()
@@ -51,7 +66,7 @@ class SoulseekHealth:
         now = self._clock()
         with self._lock:
             self._errors = [t for t in self._errors if now - t < BURST_WINDOW] + [now]
-            self.burst = len(self._errors) >= BURST
+            self.burst = len(self._errors) >= BURST and not self._recently_alive(now)
             pause = LONG_PAUSE if self.burst else SHORT_PAUSE
             self.paused_until = max(self.paused_until, now + pause)
             self._checked_at = 0.0   # check the server again before the next start
@@ -62,14 +77,14 @@ class SoulseekHealth:
         paused = now < self.paused_until
         # One slow uploader ("wait timed out") pauses new downloads for a minute, quietly; only a
         # logout or a run of errors (the network) is an outage worth a banner.
-        outage = not logged_in or paused and self.burst
+        outage = not logged_in or paused and self.burst and not self._recently_alive(now)
         return {"connected": not outage, "logged_in": logged_in, "paused": paused,
                 "paused_until": self.paused_until if paused else None, "down_since": self.down_since}
 
     def watch(self, notify, waiting=lambda: 0):
         """One watchdog tick: track the outage and send one alert after ALERT_AFTER, one on recovery."""
         now = self._clock()
-        healthy = self.refresh(force=True) and now >= self.paused_until
+        healthy = self.refresh(force=True) and (now >= self.paused_until or self._recently_alive(now))
         if not healthy:
             if self.down_since is None:
                 self.down_since = now

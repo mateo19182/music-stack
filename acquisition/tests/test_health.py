@@ -1,4 +1,4 @@
-from app.health import ALERT_AFTER, LONG_PAUSE, SHORT_PAUSE, SoulseekHealth
+from app.health import ALERT_AFTER, ALIVE_WINDOW, LONG_PAUSE, SHORT_PAUSE, SoulseekHealth
 
 
 class Clock:
@@ -76,3 +76,28 @@ def test_one_slow_uploader_pauses_quietly_a_run_of_errors_shows_an_outage():
     health.failed()
     status = health.status()
     assert status["paused"] and not status["connected"]
+
+
+def test_a_busy_slskd_is_not_an_outage_while_downloads_progress():
+    clock, sent = Clock(), []
+    health = SoulseekHealth(lambda: True, clock=clock)
+    for _ in range(int(ALERT_AFTER / 60) + 3):
+        health.alive()                  # bytes keep arriving
+        health.failed(); health.failed(); health.failed()   # while slskd answers "wait timed out"
+        assert health.status()["connected"]
+        health.watch(lambda t: sent.append(t) or True)
+        clock.now += 60
+    assert sent == []
+    assert health.paused_until <= clock.now + SHORT_PAUSE
+
+
+def test_errors_without_progress_still_alert():
+    clock, sent = Clock(), []
+    health = SoulseekHealth(lambda: True, clock=clock)
+    health.alive()
+    clock.now += ALIVE_WINDOW
+    for _ in range(int(ALERT_AFTER / 60) + 2):
+        health.failed(); health.failed(); health.failed()
+        health.watch(lambda t: sent.append(t) or True)
+        clock.now += 60
+    assert len(sent) == 1 and "disconnected" in sent[0]

@@ -29,6 +29,7 @@ QUEUE_CAP = 95               # the app refuses more than 100 unfinished jobs per
 # Errors that say nothing about the uploader; they do not count toward blocking one.
 TRANSIENT = ("wait timed out", "Soulseek is busy", "HTTP 503", "HTTP 502", "yt-dlp download failed")
 BLOCKING = ("banned this account", "download quota", "human check")
+UPLOADER_REST = 6 * 3600
 ACTIVE = ("queued", "downloading", "process_queued", "processing", "publish_queued", "publishing")
 DONE = ("have", "not_found", "gave_up", "skipped")
 
@@ -361,19 +362,25 @@ class Wishlist:
 
     def _blocked(self, jobs):
         """Uploaders avoided for every album: they banned us, have a quota, wait for a human
-        check, or failed 3 downloads (a queue that never moves)."""
-        failures, blocked = {}, set()
+        check, or failed 3 downloads (a queue that never moves). Two failures within
+        UPLOADER_REST also rest an uploader for that long: one that ignores us usually
+        ignores the next request too."""
+        now = self.clock()
+        failures, recent, blocked = {}, {}, set()
         for j in jobs:
             c = j.get("candidate") or {}
             if c.get("source") != "soulseek" or not c.get("username"):
                 continue
-            error = j.get("error") or ""
+            who, error = c["username"], j.get("error") or ""
             if j["stage"] == "failed" and any(w in error for w in BLOCKING):
-                blocked.add(c["username"])
+                blocked.add(who)
             if j["stage"] == "cancelled" or j["stage"] == "failed" and j.get("failed_stage") == "download" \
                     and not any(w in error for w in TRANSIENT):
-                failures[c["username"]] = failures.get(c["username"], 0) + 1
-        return blocked | {u for u, n in failures.items() if n >= 3}
+                failures[who] = failures.get(who, 0) + 1
+                if now - (j.get("failed_at") or 0) < UPLOADER_REST:
+                    recent[who] = recent.get(who, 0) + 1
+        return (blocked | {u for u, n in failures.items() if n >= 3}
+                | {u for u, n in recent.items() if n >= 2})
 
     def _library(self):
         try:

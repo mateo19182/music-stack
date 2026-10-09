@@ -727,6 +727,11 @@ def worker(stages=("queued", "process_queued", "publish_queued")):
 
         def progress(value):
             if isinstance(value, dict):
+                percent = value.get("percent")
+                if (job["stage"] == "downloading" and job["candidate"].get("source") == "soulseek"
+                        and percent and percent > (progress.last or 0)):
+                    soulseek_health.alive()   # bytes are arriving: Soulseek itself is up
+                    progress.last = percent
                 updates = {
                     "detail": value.get("message"),
                     "progress": value.get("percent"),
@@ -738,6 +743,8 @@ def worker(stages=("queued", "process_queued", "publish_queued")):
             else:
                 updates = {"detail": str(value), "progress": None}
             store.update_job(id, **updates)
+
+        progress.last = None
 
         try:
             if job["stage"] == "downloading":
@@ -848,6 +855,7 @@ def worker(stages=("queued", "process_queued", "publish_queued")):
                 failed_stage=failed_stage,
                 resume_stage=job["stage"],
                 error=message,
+                failed_at=time.time(),
                 detail="Files and progress retained",
             )
 
