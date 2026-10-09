@@ -144,6 +144,10 @@ class AgentCredential(BaseModel):
     can_approve: bool = False
 
 
+AGENT_TOKEN_SECONDS = 90 * 86400
+AGENT_REQUEST_SECONDS = 15 * 60
+
+
 def scan_shares():
     response = httpx.put(
         config.get("slskd_url", "http://slskd:5030").rstrip("/") + "/api/v0/shares",
@@ -268,7 +272,7 @@ def check_user(request: Request, bearer_credentials=Depends(HTTPBearer(auto_erro
         if token
         else None
     )
-    if not s or s["expires"] < time.time():
+    if not s or s["expires"] < time.time() or s.get("kind") == "agent_request":
         raise HTTPException(401, "Sign in with your Navidrome account")
     if bearer and s.get("kind") != "agent":
         raise HTTPException(401, "Use a dedicated agent token")
@@ -1059,41 +1063,120 @@ def me(user=Depends(check_user)):
     }
 
 
-@app.post("/api/agents")
-def create_agent(body: AgentCredential, user=Depends(check_user)):
-    require_manual(user)
+def require_admin(user):
     if not user["isAdmin"]:
         raise HTTPException(403, "Administrator access required")
+
+
+def mint_agent(username, name, can_approve, created_by, expires=None):
+    """A new agent token. Only its hash is stored; the token is returned once."""
     token = secrets.token_urlsafe(48)
     id = hashlib.sha256(token.encode()).hexdigest()
-    expires = time.time() + 90 * 86400
-    store.put("sessions", id, {"username": user["username"], "isAdmin": True,
-              "kind": "agent", "name": body.name, "created_at": now(),
-              "can_approve": body.can_approve}, expires=expires)
-    return {"id": id, "name": body.name, "token": token, "expires": expires,
-            "can_approve": body.can_approve, "manual_approval_required": not body.can_approve}
+    expires = min(expires or float("inf"), time.time() + AGENT_TOKEN_SECONDS)
+    store.put("sessions", id, {"username": username, "isAdmin": True, "kind": "agent", "name": name,
+                               "created_at": now(), "created_by": created_by, "can_approve": can_approve}, expires=expires)
+    return {"id": id, "name": name, "token": token, "expires": expires,
+            "can_approve": can_approve, "manual_approval_required": not can_approve}
+
+
+@app.post("/api/agents")
+def create_agent(body: AgentCredential, user=Depends(check_user)):
+    """The owner mints any token. An agent mints tokens with no more than its own rights,
+    expiring no later than its own; approval rights it lacks need the owner (agent requests)."""
+    require_admin(user)
+    if user.get("kind") != "agent":
+        return mint_agent(user["username"], body.name, body.can_approve, "owner")
+    if body.can_approve and not user.get("can_approve"):
+        raise HTTPException(403, "Approval rights need the owner: POST /api/agents/requests, then they allow it in the web app")
+    return mint_agent(user["username"], body.name, body.can_approve, f"agent:{user.get('name')}", user["expires"])
 
 
 @app.get("/api/agents")
 def list_agents(user=Depends(check_user)):
-    require_manual(user)
-    if not user["isAdmin"]:
-        raise HTTPException(403, "Administrator access required")
-    return {"agents": [{key: agent.get(key) for key in ("id", "name", "username", "expires", "created_at", "can_approve")}
+    require_admin(user)
+    return {"agents": [{key: agent.get(key) for key in ("id", "name", "username", "expires", "created_at", "created_by", "can_approve")}
                        for agent in store.list("sessions", "expires>?", (time.time(),)) if agent.get("kind") == "agent"]}
 
 
 @app.delete("/api/agents/{id}")
 def revoke_agent(id: str, user=Depends(check_user)):
-    require_manual(user)
-    if not user["isAdmin"]:
-        raise HTTPException(403, "Administrator access required")
+    """Revoking only takes access away, so agents may do it too (their own token included)."""
+    require_admin(user)
     credential = store.get("sessions", id)
     if not credential or credential.get("kind") != "agent":
         raise HTTPException(404, "Agent credential not found")
     with store.db() as db:
         db.execute("DELETE FROM sessions WHERE id=?", (id,))
     return {"ok": True}
+
+
+def agent_request_view(request):
+    return {key: request.get(key) for key in ("id", "name", "can_approve", "requested_by", "code", "status", "expires", "created_at")}
+
+
+@app.post("/api/agents/requests")
+def request_agent(body: AgentCredential, user=Depends(check_user)):
+    """An agent asks the owner for a token with more rights. The owner allows or denies it in
+    the web app (signed in with Navidrome); the code lets them match it to what the agent said."""
+    require_admin(user)
+    if user.get("kind") != "agent":
+        raise HTTPException(400, "Create the token directly")
+    pending = [r for r in store.list("sessions", "expires>?", (time.time(),))
+               if r.get("kind") == "agent_request" and r.get("status") == "pending"]
+    if len(pending) >= 5:
+        raise HTTPException(429, "Too many open requests; wait for the owner")
+    id, code = uid(), "".join(secrets.choice("ABCDEFGHJKLMNPQRSTUVWXYZ23456789") for _ in range(6))
+    request = {"kind": "agent_request", "name": body.name, "can_approve": body.can_approve, "code": code,
+               "status": "pending", "requested_by": user.get("name"), "requester": user["id"],
+               "username": user["username"], "created_at": now()}
+    store.put("sessions", id, request, expires=time.time() + AGENT_REQUEST_SECONDS)
+    link = config.get("public_url", "").rstrip("/")
+    telegram(config, f"🔑 Agent “{user.get('name')}” asks for a token “{body.name}”"
+                     f"{' that can approve and reject downloads' if body.can_approve else ''}. Code {code}.\n"
+                     f"Allow or deny it in Needs you within 15 minutes." + (f"\n{link}" if link else ""))
+    return agent_request_view({**request, "id": id, "expires": time.time() + AGENT_REQUEST_SECONDS})
+
+
+@app.get("/api/agents/requests")
+def list_agent_requests(user=Depends(check_user)):
+    require_manual(user)
+    require_admin(user)
+    return {"requests": [agent_request_view(r) for r in store.list("sessions", "expires>?", (time.time(),))
+                         if r.get("kind") == "agent_request" and r.get("status") == "pending"]}
+
+
+@app.post("/api/agents/requests/{id}/{decision}")
+def decide_agent_request(id: str, decision: str, user=Depends(check_user)):
+    require_manual(user)
+    require_admin(user)
+    if decision not in {"allow", "deny"}:
+        raise HTTPException(404, "Unknown decision")
+    request = store.get("sessions", id)
+    if not request or request.get("kind") != "agent_request" or request["expires"] < time.time():
+        raise HTTPException(404, "Request not found or expired")
+    if request.get("status") != "pending":
+        raise HTTPException(409, "Request was already decided")
+    store.put("sessions", id, {**{k: v for k, v in request.items() if k not in {"id", "expires"}},
+                               "status": "allowed" if decision == "allow" else "denied", "decided_at": now()},
+              expires=request["expires"])
+    return {"ok": True, "status": "allowed" if decision == "allow" else "denied"}
+
+
+@app.get("/api/agents/requests/{id}")
+def claim_agent_request(id: str, user=Depends(check_user)):
+    """The requesting agent polls; once allowed, the token is minted and returned exactly once."""
+    request = store.get("sessions", id)
+    if not request or request.get("kind") != "agent_request" or request.get("requester") != user.get("id"):
+        raise HTTPException(404, "Request not found")
+    if request["expires"] < time.time():
+        return {"status": "expired"}
+    if request.get("status") != "allowed":
+        return {"status": request.get("status")}
+    with store.db() as db:   # claim once, atomically
+        if not db.execute("DELETE FROM sessions WHERE id=?", (id,)).rowcount:
+            raise HTTPException(404, "Request not found")
+    return {"status": "allowed", **mint_agent(request["username"], request["name"], request["can_approve"],
+                                              f"owner (asked by {request.get('requested_by')})")}
 
 
 @app.post("/api/logout")
@@ -1396,12 +1479,13 @@ def retry(id: str, body: Retry, user=Depends(check_user)):
 
 @app.post("/api/jobs/{id}/reject")
 def reject(id: str, user=Depends(check_user)):
-    require_manual(user)
+    require_approver(user)   # rejecting publishes nothing and keeps the download privately
     job = owned_job(id, user)
     if job["stage"] != "review":
         raise HTTPException(409, "Job is not awaiting review")
     if not store.transition_job(
-        id, {"review"}, "rejected", detail="Rejected; downloaded source retained"
+        id, {"review"}, "rejected", detail="Rejected; downloaded source retained",
+        rejected_by=f"agent:{user.get('name')}" if user.get("kind") == "agent" else user["username"],
     ):
         raise HTTPException(409, "Review was already handled")
     return {"ok": True}

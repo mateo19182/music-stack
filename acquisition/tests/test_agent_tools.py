@@ -47,6 +47,10 @@ def initialize(instance):
     ("import_files", {"paths": ["Album/Sauna.m4a"]}, "POST", "/api/import", {"paths": ["Album/Sauna.m4a"]}),
     ("wishlist", {}, "GET", "/api/wishlist", {}),
     ("add_to_wishlist", {"artist": "Moor Mother", "album": "Jazz Codes"}, "POST", "/api/wishlist", {"artist": "Moor Mother", "album": "Jazz Codes"}),
+    ("reject_review", {"id": "job"}, "POST", "/api/jobs/job/reject", {}),
+    ("request_approval_token", {"name": "reviewer", "can_approve": True}, "POST", "/api/agents/requests", {"name": "reviewer", "can_approve": True}),
+    ("list_agent_tokens", {}, "GET", "/api/agents", {}),
+    ("revoke_agent_token", {"id": "abc"}, "DELETE", "/api/agents/abc", {}),
 ])
 def test_tools_use_exact_api_contract(bridge, name, args, method, path, payload):
     instance, received = bridge
@@ -124,9 +128,9 @@ def test_handshake_registry_notifications_and_invalid_requests(bridge):
     initialize(instance)
     assert instance.handle({"jsonrpc": "2.0", "id": 2, "method": "ping"})["result"] == {}
     registry = instance.handle({"jsonrpc": "2.0", "id": 3, "method": "tools/list"})["result"]["tools"]
-    assert len(registry) == 16
-    assert [item["name"] for item in registry if "approve" in item["name"]] == ["approve_review"]
-    assert not any(any(word in item["name"] for word in ["reject", "publish", "delete", "sharing"]) for item in registry)
+    assert len(registry) == 21
+    assert [item["name"] for item in registry if "approve" in item["name"] or "reject" in item["name"]] == ["approve_review", "reject_review"]
+    assert not any(any(word in item["name"] for word in ["publish", "delete", "sharing"]) for item in registry)
     for item in registry:
         assert "endpoint" not in item and "method" not in item
         assert item["inputSchema"]["additionalProperties"] is False
@@ -185,3 +189,29 @@ def test_protocol_parse_error_does_not_prevent_next_request(bridge):
     results = [json.loads(line) for line in output.getvalue().splitlines()]
     assert results[0]["error"]["code"] == -32700
     assert results[1]["result"] == {}
+
+
+def test_a_claimed_token_is_saved_used_and_never_returned(tmp_path):
+    credentials = tmp_path / "credentials.json"
+    credentials.write_text(json.dumps({"base_url": "https://acquire.example", "token": "old-token"}))
+    os.chmod(credentials, 0o600)
+    received = []
+
+    def responder(request):
+        received.append(request)
+        if request.method == "GET":
+            return httpx.Response(200, json={"status": "allowed", "token": "new-token", "can_approve": True})
+        return httpx.Response(200, json={"ok": True})
+
+    instance = AcquisitionTools("https://acquire.example", "old-token", transport=httpx.MockTransport(responder), credentials=str(credentials))
+    result = instance.call("claim_approval_token", {"id": "request"})
+    assert result["isError"] is False and "new-token" not in json.dumps(result)
+    assert result["structuredContent"]["saved"] is True and result["structuredContent"]["previous_token_revoked"] is True
+    assert json.loads(credentials.read_text())["token"] == "new-token"
+    assert os.stat(credentials).st_mode & 0o777 == 0o600
+    load_credentials(credentials)
+    revoke = received[1]
+    assert revoke.method == "DELETE" and revoke.headers["authorization"] == "Bearer new-token"
+    import hashlib
+    assert revoke.url.path == "/api/agents/" + hashlib.sha256(b"old-token").hexdigest()
+    instance.close()

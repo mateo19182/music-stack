@@ -741,7 +741,7 @@ async function start() {
   $("#login-view").hidden = true;
   $("#app").hidden = false;
   showTab("search");
-  const results = await Promise.allSettled([loadJobs(), loadReview(), loadAutoAdd(), loadChecks(), loadSoulseekStatus()]);
+  const results = await Promise.allSettled([loadJobs(), loadReview(), loadAutoAdd(), loadChecks(), loadAgentRequests(), loadSoulseekStatus()]);
   for (const result of results)
     if (result.status === "rejected") toast(result.reason.message, true);
 }
@@ -760,6 +760,7 @@ setInterval(() => {
         .catch(() => {});
     loadReview().catch(() => {});
     loadChecks().catch(() => {});
+    loadAgentRequests().catch(() => {});
     loadSoulseekStatus().catch(() => {});
     loadJobs().catch((e) => {
       if (state.tab === "activity") toast(e.message, true);
@@ -780,6 +781,29 @@ async function loadSoulseekStatus() {
 }
 
 // Uploaders whose anti-leech plugin asks for a human check. The user types the answer.
+async function loadAgentRequests() {
+  if (!state.isAdmin) return;
+  const data = await api("/api/agents/requests");
+  const signature = JSON.stringify(data.requests || []);
+  if (signature === state.agentRequestsSignature) return;
+  state.agentRequestsSignature = signature;
+  $("#agent-requests").innerHTML = (data.requests || [])
+    .map(
+      (r) =>
+        `<article class="card check"><div class="card-head"><div><span class="badge failed">An agent asks for access</span><h3>${esc(r.requested_by || "Agent")} wants a token “${esc(r.name)}”</h3>${meta([`Code ${r.code}`, r.expires ? `until ${new Date(r.expires * 1000).toLocaleTimeString()}` : ""])}</div></div><p class="muted">${r.can_approve ? "It could add downloads to your library and reject them, without asking you each time." : "Same rights as the agent already has."} Allow only if you asked for this and the code matches what the agent told you.</p><div class="actions"><button data-agent-request="${esc(r.id)}" data-decision="allow">Allow</button><button class="quiet" data-agent-request="${esc(r.id)}" data-decision="deny">Deny</button></div></article>`,
+    )
+    .join("");
+}
+document.addEventListener("click", (e) => {
+  const button = e.target.closest("[data-agent-request]");
+  if (!button) return;
+  busy(button, async () => {
+    await api(`/api/agents/requests/${path(button.dataset.agentRequest)}/${button.dataset.decision}`, {});
+    toast(button.dataset.decision === "allow" ? "Allowed. The agent picks up its token." : "Denied.");
+    state.agentRequestsSignature = null;
+    await loadAgentRequests();
+  });
+});
 async function loadChecks() {
   if (!state.isAdmin) return;
   const data = await api("/api/soulseek/checks");
