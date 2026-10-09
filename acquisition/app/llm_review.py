@@ -218,7 +218,7 @@ class Reviewer:
     def __init__(self, config):
         self._key = config.get('openrouter_api_key') or os.environ.get('OPENROUTER_API_KEY', '')
         self.model = config.get('openrouter_model') or 'meta/muse-spark-1.3-contributor'
-        self.configured = bool(self._key)
+        self.configured = bool(self._key) and config.get('review_advice', True)   # off: Jev already picks the album
 
     def review(self, job_payload):
         if not self.configured:

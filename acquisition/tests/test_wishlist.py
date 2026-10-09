@@ -218,7 +218,7 @@ def test_without_a_model_answer_the_rules_decide_as_before(tmp_path):
     assert "judged" not in queued[0]
 
 
-def test_permanently_unavailable_youtube_videos_are_not_retried(tmp_path):
+def test_failed_downloads_take_the_next_copy_instead_of_retrying(tmp_path):
     store, queued = Store(tmp_path / "a.db"), []
     w = _wishlist(store, FakeSources({"soulseek": [slsk("a"), slsk("b")]}), None, queued)
     item = w.add("mateo", "Moor Mother", "Jazz Codes")
@@ -226,5 +226,17 @@ def test_permanently_unavailable_youtube_videos_are_not_retried(tmp_path):
     job = store.get("wishlist", item["id"])["job_id"]
     store.update_job(job, stage="failed", failed_stage="download", progress=0,
                      error="yt-dlp download failed ([youtube] x: Video unavailable). Retry or choose another candidate.")
+    w.tick()
+    assert [c["username"] for c in queued] == ["a", "b"]
+
+
+def test_a_timed_out_browse_takes_the_next_copy(tmp_path):
+    store, queued = Store(tmp_path / "a.db"), []
+    w = _wishlist(store, FakeSources({"soulseek": [slsk("a"), slsk("b")]}), None, queued)
+    item = w.add("mateo", "Moor Mother", "Jazz Codes")
+    w.tick()
+    job = store.get("wishlist", item["id"])["job_id"]
+    store.update_job(job, stage="failed", failed_stage="download", progress=10,
+                     error="Soulseek returned HTTP 500: The wait timed out after 5000 milliseconds.")
     w.tick()
     assert [c["username"] for c in queued] == ["a", "b"]

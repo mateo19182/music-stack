@@ -19,16 +19,14 @@ from .sources import SourceError, SoulseekUnavailable, soulseek_query
 
 log = logging.getLogger("acquisition")
 
-FRESH = 48 * 3600            # search results older than this are stale; some staleness is fine (owner's call):
-                             # searching ahead lets torrent-only albums start while Soulseek is busy
+FRESH = 12 * 3600            # search results older than this are stale: older lists sent us to offline uploaders
 NOT_FOUND_WAIT = 24 * 3600   # an album nobody shares today may be shared tomorrow
 RETRY_WAIT = 3600            # after a used-up list, search again this much later
 MAX_ROUNDS = 2               # used-up or empty searches before giving up
 AHEAD = {"soulseek": 6, "torrent": 4, "youtube": 2}   # jobs waiting per source; more go stale
 QUEUE_CAP = 95               # the app refuses more than 100 unfinished jobs per owner
-# Network blips: the same source again. YouTube failures are mostly throttling that passes.
+# Errors that say nothing about the uploader; they do not count toward blocking one.
 TRANSIENT = ("wait timed out", "Soulseek is busy", "HTTP 503", "HTTP 502", "yt-dlp download failed")
-PERMANENT = ("Video unavailable", "Private video", "removed by the uploader")   # a retry cannot fix these
 BLOCKING = ("banned this account", "download quota", "human check")
 ACTIVE = ("queued", "downloading", "process_queued", "processing", "publish_queued", "publishing")
 DONE = ("have", "not_found", "gave_up", "skipped")
@@ -159,9 +157,8 @@ class Wishlist:
             return False
         error = job.get("error") or ""
         retries = int(job.get("retry_count", 0))
-        if stage == "failed" and job.get("failed_stage") == "download" and (
-                any(w in error for w in TRANSIENT) and not any(w in error for w in PERMANENT) and retries < 3 or (job.get("progress") or 0) >= 50 and retries < 2):
-            # A network blip, or most of the album is here already: same source again.
+        if stage == "failed" and job.get("failed_stage") == "download" and (job.get("progress") or 0) >= 50 and retries < 2:
+            # Most of the album is here already: same source again. Anything else takes the next copy.
             if self.store.transition_job(job["id"], {"failed"}, "queued", cancel_requested=False, error=None,
                                          retry_count=retries + 1, detail="Retry queued by the wishlist"):
                 item.update(status="queued", note="Retrying the same source")
