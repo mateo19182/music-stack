@@ -84,14 +84,15 @@ class WishlistTests(unittest.TestCase):
         saved = self.store.get("wishlist", item["id"])
         self.assertEqual(saved["status"], "wanted")
         self.assertEqual(saved["next_search_at"], self.clock[0] + NOT_FOUND_WAIT)
-        self.assertEqual(sum(1 for _, s in sources.calls if s == "youtube"), 1)
+        # One YouTube round: artist and title, then the title alone.
+        self.assertEqual([q for q, s in sources.calls if s == "youtube"], ["Moor Mother Jazz Codes", "Jazz Codes"])
         calls = len(sources.calls)
         w.tick()
         self.assertEqual(len(sources.calls), calls)   # waits instead of searching every pass
         self.clock[0] += NOT_FOUND_WAIT
         w.tick()
         self.assertEqual(self.store.get("wishlist", item["id"])["status"], "not_found")
-        self.assertEqual(sum(1 for _, s in sources.calls if s == "youtube"), 2)
+        self.assertEqual(sum(1 for _, s in sources.calls if s == "youtube"), 4)
 
     def test_a_full_soulseek_queue_holds_soulseek_copies_but_not_torrents(self):
         for n in range(6):
@@ -240,3 +241,28 @@ def test_a_timed_out_browse_takes_the_next_copy(tmp_path):
                      error="Soulseek returned HTTP 500: The wait timed out after 5000 milliseconds.")
     w.tick()
     assert [c["username"] for c in queued] == ["a", "b"]
+
+
+def yt(title, channel, url):
+    return {"id": f"y-{url}", "source": "youtube", "kind": "album", "title": title, "official": True, "uploader": channel,
+            "url": f"https://www.youtube.com/playlist?list={url}", "file_count": 7}
+
+
+def test_an_unsure_youtube_album_with_the_requested_title_goes_to_review_with_a_question(tmp_path):
+    store, queued = Store(tmp_path / "a.db"), []
+    sources = FakeSources({"youtube": [yt("BLINDAO", "marquitos", "OLAK5uy_a"), yt("Parallel Movements", "The Rails", "OLAK5uy_b")]})
+    w = _wishlist(store, sources, FakeJudge(accept=set()), queued)
+    w.add("mateo", "ODDLIQUOR", "BLINDAO")
+    w.tick()
+    assert [c["title"] for c in queued] == ["BLINDAO"]
+    assert "not sure" in queued[0]["doubt"]
+    assert ("BLINDAO", "youtube") in sources.calls   # the title alone is searched too
+
+
+def test_a_youtube_album_missing_a_requested_word_is_not_offered(tmp_path):
+    store, queued = Store(tmp_path / "a.db"), []
+    w = _wishlist(store, FakeSources({"youtube": [yt("Liquor Store Lime", "Bastiengoat", "OLAK5uy_c")]}),
+                  FakeJudge(accept=set()), queued)
+    w.add("mateo", "bastienGOAT", "Liquor Store Run")
+    w.tick()
+    assert queued == []

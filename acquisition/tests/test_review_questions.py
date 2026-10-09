@@ -41,3 +41,8 @@ def test_unclear_versions_are_asked():
     assert plan(track(possible_duplicates=[library(duration=240)]))['questions'][0]['kind'] == 'version'
     # Files outside the managed library are never replaced.
     assert plan(track(possible_duplicates=[library(replaceable=False)]))['action'] == 'ask'
+
+
+def test_an_album_the_matcher_doubted_is_asked_even_when_its_tags_are_clean():
+    record = {'artist': 'marquitos', 'title': 'Un Ángel', 'candidate': {'doubt': 'The model was not sure.'}}
+    assert plan(record, track_count=7) == {'action': 'ask', 'questions': [{'kind': 'doubt', 'reason': 'The model was not sure.'}]}

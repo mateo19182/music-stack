@@ -854,6 +854,7 @@ function questionText(q, file) {
     return `This file has no ${q.fields.join(" or ")}. Type ${q.fields.length > 1 ? "them" : "it"} below to add it.`;
   if (q.kind === "mismatch")
     return `You searched for “${q.requested}”, but the file says “${q.found}”.`;
+  if (q.kind === "doubt") return q.reason;
   if (q.kind === "long")
     return `One ${Math.round(q.duration / 60)}-minute recording, probably a whole album or mix.`;
   if (q.kind === "version") {
@@ -867,6 +868,7 @@ function questionAnswers(q) {
   if (q.kind === "missing") return [["add", "Add"]];
   if (q.kind === "mismatch") return [["add", `Add as “${q.found}”`]];
   if (q.kind === "long") return [["add", "Add as one track"]];
+  if (q.kind === "doubt") return [["add", "It's the album, add"]];
   if (q.kind === "version")
     return [
       ...(q.library.every((d) => d.replaceable) ? [["replace", "Replace yours"]] : []),

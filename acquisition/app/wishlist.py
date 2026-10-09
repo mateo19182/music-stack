@@ -259,10 +259,15 @@ class Wishlist:
                 if any(c.get("source") == "torrent" for c in matching.ranked(found, album, artist, avoid)):
                     break
         if "youtube" in sources:
-            try:
-                results += sources_.search(f"{matching.clean_artist(artist)} {album}".strip(), "youtube", "album")
-            except SourceError:
-                return None
+            # The album title alone too: blog lists misspell artists ("Andrea" for Andrae Durden).
+            seen = set()
+            for query in dict.fromkeys((f"{matching.clean_artist(artist)} {album}".strip(), album.strip())):
+                try:
+                    found = sources_.search(query, "youtube", "album")
+                except SourceError:
+                    return None
+                results += [c for c in found if c.get("url") not in seen]
+                seen |= {c.get("url") for c in found}
         return self._rank(item, results, avoid)
 
     def _rank(self, item, results, avoid):
@@ -288,6 +293,16 @@ class Wishlist:
             if verdicts[n]["match"] and who not in seen:
                 seen.add(who)
                 best.append({**c, "judged": "model", "reason": verdicts[n]["reason"], "score": round(self._source_score(c), 2)})
+        if not best:
+            # Last resort: an official YouTube Music album carrying every word of the requested title
+            # goes to Review with a question instead of being dropped ("BLINDAO" listed under a
+            # collaborator's channel). It is never added without the owner's answer.
+            wanted = set(matching.words(album))
+            for n, c in enumerate(shown):
+                if c.get("source") == "youtube" and wanted and wanted <= set(matching.words(c.get("title"))):
+                    best.append({**c, "judged": "model", "reason": verdicts[n]["reason"],
+                                 "doubt": f"The model was not sure this is {artist} – {album} ({verdicts[n]['reason']})."})
+                    break
         return best[:8]
 
     @staticmethod
