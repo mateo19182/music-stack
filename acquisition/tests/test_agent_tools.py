@@ -206,12 +206,11 @@ def test_a_claimed_token_is_saved_used_and_never_returned(tmp_path):
     instance = AcquisitionTools("https://acquire.example", "old-token", transport=httpx.MockTransport(responder), credentials=str(credentials))
     result = instance.call("claim_approval_token", {"id": "request"})
     assert result["isError"] is False and "new-token" not in json.dumps(result)
-    assert result["structuredContent"]["saved"] is True and result["structuredContent"]["previous_token_revoked"] is True
+    import hashlib
+    assert result["structuredContent"]["saved"] is True
+    assert result["structuredContent"]["previous_token_id"] == hashlib.sha256(b"old-token").hexdigest()
+    assert len(received) == 1   # the old token may be shared with another agent: never revoked here
     assert json.loads(credentials.read_text())["token"] == "new-token"
     assert os.stat(credentials).st_mode & 0o777 == 0o600
     load_credentials(credentials)
-    revoke = received[1]
-    assert revoke.method == "DELETE" and revoke.headers["authorization"] == "Bearer new-token"
-    import hashlib
-    assert revoke.url.path == "/api/agents/" + hashlib.sha256(b"old-token").hexdigest()
     instance.close()

@@ -67,7 +67,7 @@ TOOLS = [
     tool("add_to_wishlist", "Add an album the user wants. The server searches Soulseek and RuTracker, tries the ranked copies until one downloads, and falls back to YouTube Music's official album. Downloads still stop at review unless automatic adding is on.", "POST", "/api/wishlist", {"artist": string(200, 1), "album": string(300, 1), "list": string(120, 1)}, ["artist", "album"], external=True),
     tool("reject_review", "Reject a job in review: nothing is published and the download is kept privately. Only on the user's explicit instruction in their own message. Requires an agent token with approval permission.", "POST", "/api/jobs/{id}/reject", {"id": IDENTIFIER}, ["id"], destructive=True),
     tool("request_approval_token", "Ask the owner for a token that can approve and reject reviews. Returns a request id and a code: tell the user the code; they allow it in the web app (Needs you) within 15 minutes.", "POST", "/api/agents/requests", {"name": string(80, 1), "can_approve": {"type": "boolean"}}, ["name", "can_approve"]),
-    tool("claim_approval_token", "Check a token request. Once the owner allowed it, the new token is saved to the credentials file and used from now on, and the previous token is revoked. The token is never shown.", "GET", "/api/agents/requests/{id}", {"id": IDENTIFIER}, ["id"]),
+    tool("claim_approval_token", "Check a token request. Once the owner allowed it, the new token is saved to the credentials file and used from now on. The token is never shown; the previous token stays valid (another agent may use it) and its id is returned for revoke_agent_token.", "GET", "/api/agents/requests/{id}", {"id": IDENTIFIER}, ["id"]),
     tool("list_agent_tokens", "List agent tokens (names, rights, expiry; never the tokens).", "GET", "/api/agents"),
     tool("revoke_agent_token", "Revoke an agent token by id. Revoking only removes access.", "DELETE", "/api/agents/{id}", {"id": IDENTIFIER}, ["id"], destructive=True),
     tool("import_files", "Prepare explicitly selected completed files for review. Requires an authorized admin agent; paths are relative to the acquisition inbox.", "POST", "/api/import", {"paths": {"type": "array", "items": string(2000, 1), "minItems": 1, "maxItems": 100}}, ["paths"]),
@@ -193,15 +193,15 @@ class AcquisitionTools:
             return tool_error("The acquisition API returned an invalid response.")
 
     def _adopt(self, data):
-        """Switch to a newly granted token without ever returning it: save, use, revoke the old one."""
+        """Switch to a newly granted token without ever returning it. The previous token is not
+        revoked here: another agent may share it. Its id is returned for revoke_agent_token."""
         new, old = data.pop("token"), self.token
         if not self.credentials:
             raise ValueError("no credentials file")
         save_token(self.credentials, new)
         self.token = new
         self.client.headers["Authorization"] = "Bearer " + new
-        revoked = self.client.delete(f"/api/agents/{hashlib.sha256(old.encode()).hexdigest()}").is_success
-        return {**data, "saved": True, "previous_token_revoked": revoked}
+        return {**data, "saved": True, "previous_token_id": hashlib.sha256(old.encode()).hexdigest()}
 
     def handle(self, message):
         request_id = message.get("id") if isinstance(message, dict) else None
