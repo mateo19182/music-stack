@@ -27,11 +27,13 @@ soulseek:
   listen_port: 50000
 transfers:
   download:
-    slots: 32
-    speed_limit: 8192
+    # each file waiting in an uploader's queue holds a slot; too few and new requests time out locally
+    slots: 500
+    speed_limit: 1000000   # KB/s, effectively none
   upload:
-    slots: 4
-    speed_limit: 512
+    # home line: ~16 Mbit/s up (2026-10-10); Soulseek + torrents stay near 60% of it
+    slots: 6
+    speed_limit: 800
 retention:
   # minutes; finished downloads stay a week so a retried job finds them, failures go after a day
   transfers:
