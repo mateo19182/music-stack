@@ -844,6 +844,13 @@ def worker(stages=("queued", "process_queued", "publish_queued")):
                                  detail="Soulseek connection problem; retries automatically. " + str(exc)[:300])
                 continue
             log.exception("Job %s failed at %s", id, failed_stage)
+            if job["stage"] == "downloading" and job["candidate"].get("source") == "soulseek":
+                # Requests this job left waiting in slskd would hold up every later download (on
+                # 2026-10-09 some 14,000 piled up). Finished parts stay on disk; a retry asks again.
+                try:
+                    sources.cancel(job["candidate"])
+                except Exception:
+                    log.warning("Job %s: could not cancel its Soulseek transfers", id)
             message = (
                 str(exc)[:600]
                 if isinstance(exc, (SourceError, ValueError, RuntimeError))

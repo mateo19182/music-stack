@@ -32,3 +32,14 @@ transfers:
   upload:
     slots: 4
     speed_limit: 512
+retention:
+  # minutes; finished downloads stay a week so a retried job finds them, failures go after a day
+  transfers:
+    download:
+      succeeded: 10080
+      errored: 1440
+      cancelled: 60
+    upload:
+      succeeded: 1440
+      errored: 1440
+      cancelled: 60

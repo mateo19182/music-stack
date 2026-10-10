@@ -299,6 +299,21 @@ class SourceTests(unittest.TestCase):
                 with patch('app.sources.httpx.request', return_value=response), self.assertRaisesRegex(SourceError, expected):
                     Sources({})._slskd('POST', '/transfers/downloads/peer', json=[])
 
+    def test_a_peer_that_times_out_is_that_peers_failure_not_an_outage(self):
+        import httpx
+        from app.sources import SoulseekUnavailable
+        detail = 'The wait timed out after 5000 milliseconds'
+        for path in ('/users/some%20peer/directory', '/transfers/downloads/some%20peer'):
+            with self.subTest(path=path):
+                response = httpx.Response(500, json=detail, request=httpx.Request('POST', 'http://slskd/api/v0' + path))
+                with patch('app.sources.httpx.request', return_value=response):
+                    with self.assertRaisesRegex(SourceError, 'some peer did not respond in time') as caught:
+                        Sources({})._slskd('POST', path, json={})
+                    self.assertNotIsInstance(caught.exception, SoulseekUnavailable)
+        response = httpx.Response(500, json=detail, request=httpx.Request('GET', 'http://slskd/api/v0/transfers/downloads'))
+        with patch('app.sources.httpx.request', return_value=response), self.assertRaises(SoulseekUnavailable):
+            Sources({})._slskd('GET', '/transfers/downloads')
+
 
     def test_retry_reenqueues_stale_completed_record_with_missing_file(self):
         with TemporaryDirectory() as root, TemporaryDirectory() as destination:

@@ -403,8 +403,15 @@ class Sources:
                 detail = _detail(exc.response.text)
             if exc.response.status_code == 429:
                 raise SoulseekUnavailable('Soulseek is busy. Wait for the current operation to finish, then retry; partial files are retained.') from None
+            parts = path.split('/')
+            peer = (parts[3] if path.startswith('/transfers/downloads/') and len(parts) > 3
+                    else parts[2] if path.startswith('/users/') else '')
+            if exc.response.status_code == 500 and 'wait timed out' in detail.casefold() and peer:
+                # Browsing or asking one peer: that peer did not answer within slskd's 5 s, not an outage
+                # (a real outage also logs slskd out of the server, which the worker checks).
+                raise SourceError(_transfer_failure(unquote(peer), {'state': 'Errored', 'message': detail})) from None
             if exc.response.status_code in (502, 503, 504) or exc.response.status_code == 500 and 'wait timed out' in detail.casefold():
-                # slskd cannot reach the network (last seen when the VPN lost UDP): every request fails alike.
+                # slskd itself is unreachable or stuck: every request fails alike.
                 raise SoulseekUnavailable(f'Soulseek returned HTTP {exc.response.status_code}' +
                                           (f': {detail}.' if detail else '.') + ' Retry when the connection recovers.') from None
             if path.startswith('/transfers/downloads/') and detail:

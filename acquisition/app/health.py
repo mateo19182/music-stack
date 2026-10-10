@@ -2,8 +2,9 @@
 
 On 2026-10-08 the VPN lost UDP for ~90 minutes; every queued Soulseek job failed within
 minutes with the same slskd error. Jobs now wait while slskd is logged out or failing.
-That error ("HTTP 500: the wait timed out") also comes from a busy slskd, so a pause only
-counts as an outage while no Soulseek download is making progress.
+During that outage slskd was logged out of the server, so only a logout (or an unreachable
+slskd) is an outage worth a banner and a Telegram alert. Errors while logged in come from a busy
+slskd or single peers: they only pause new downloads, quietly.
 """
 from __future__ import annotations
 
@@ -29,7 +30,7 @@ class SoulseekHealth:
         self._lock = threading.Lock()
         self._checked_at, self._logged_in = 0.0, True
         self.paused_until, self.down_since, self.alerted = 0.0, None, False
-        self.burst = False   # the long pause: several errors in a row, likely the network
+        self.burst = False   # the long pause: several errors in a row, slskd is struggling
         self._errors = []
         self._alive_at = None
 
@@ -75,16 +76,14 @@ class SoulseekHealth:
         now = self._clock()
         logged_in = self.refresh()
         paused = now < self.paused_until
-        # One slow uploader ("wait timed out") pauses new downloads for a minute, quietly; only a
-        # logout or a run of errors (the network) is an outage worth a banner.
-        outage = not logged_in or paused and self.burst and not self._recently_alive(now)
-        return {"connected": not outage, "logged_in": logged_in, "paused": paused,
+        # Errors while logged in pause new downloads quietly; only a logout is an outage.
+        return {"connected": logged_in, "logged_in": logged_in, "paused": paused,
                 "paused_until": self.paused_until if paused else None, "down_since": self.down_since}
 
     def watch(self, notify, waiting=lambda: 0):
         """One watchdog tick: track the outage and send one alert after ALERT_AFTER, one on recovery."""
         now = self._clock()
-        healthy = self.refresh(force=True) and (now >= self.paused_until or self._recently_alive(now))
+        healthy = self.refresh(force=True)
         if not healthy:
             if self.down_since is None:
                 self.down_since = now

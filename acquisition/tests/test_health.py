@@ -66,16 +66,12 @@ def test_quiet_recovery_when_no_alert_was_sent():
     assert sent == []
 
 
-def test_one_slow_uploader_pauses_quietly_a_run_of_errors_shows_an_outage():
+def test_errors_while_logged_in_pause_quietly():
     clock = Clock()
     health = SoulseekHealth(lambda: True, clock=clock)
-    health.failed()
+    health.failed(); health.failed(); health.failed()
     status = health.status()
     assert status["paused"] and status["connected"] and not health.ready()   # paused, but no banner
-    health.failed()
-    health.failed()
-    status = health.status()
-    assert status["paused"] and not status["connected"]
 
 
 def test_a_busy_slskd_is_not_an_outage_while_downloads_progress():
@@ -91,13 +87,16 @@ def test_a_busy_slskd_is_not_an_outage_while_downloads_progress():
     assert health.paused_until <= clock.now + SHORT_PAUSE
 
 
-def test_errors_without_progress_still_alert():
-    clock, sent = Clock(), []
-    health = SoulseekHealth(lambda: True, clock=clock)
-    health.alive()
-    clock.now += ALIVE_WINDOW
+def test_errors_without_progress_alert_only_once_logged_out():
+    clock, sent, connected = Clock(), [], [True]
+    health = SoulseekHealth(lambda: connected[0], clock=clock)
     for _ in range(int(ALERT_AFTER / 60) + 2):
-        health.failed(); health.failed(); health.failed()
+        health.failed(); health.failed(); health.failed()   # peers or a busy slskd, nothing downloading
+        health.watch(lambda t: sent.append(t) or True)
+        clock.now += 60
+    assert sent == []
+    connected[0] = False
+    for _ in range(int(ALERT_AFTER / 60) + 2):
         health.watch(lambda t: sent.append(t) or True)
         clock.now += 60
     assert len(sent) == 1 and "disconnected" in sent[0]

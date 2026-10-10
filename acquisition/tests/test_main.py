@@ -816,6 +816,8 @@ def test_soulseek_outage_requeues_instead_of_failing(backend, monkeypatch):
     connected = [True]
     monkeypatch.setattr(main, "soulseek_health", main.SoulseekHealth(lambda: connected[0]))
 
+    released = []
+
     class FakeSources:
         def __init__(self, config):
             pass
@@ -823,7 +825,11 @@ def test_soulseek_outage_requeues_instead_of_failing(backend, monkeypatch):
         def download(self, candidate, *args):
             if candidate["username"] == "peer":
                 raise main.SoulseekUnavailable("Soulseek returned HTTP 500: The wait timed out after 5000 milliseconds.")
+            candidate["owned_transfer_ids"] = ["t1"]
             raise main.SourceError("Soulseek peer other refused the download.")
+
+        def cancel(self, candidate):
+            released.append(candidate.get("owned_transfer_ids"))
 
     monkeypatch.setattr(main, "Sources", FakeSources)
 
@@ -845,6 +851,7 @@ def test_soulseek_outage_requeues_instead_of_failing(backend, monkeypatch):
                    stage="queued", created_at="1")
     run_until(lambda: main.store.get("jobs", "refused")["stage"] == "failed")
     assert main.store.get("jobs", "refused")["stage"] == "failed"
+    assert released == [["t1"]]   # its waiting requests leave slskd's queue
     # A connection error puts the job back in the queue and pauses Soulseek downloads.
     main.store.put("jobs", "outage", {"candidate": {"source": "soulseek", "username": "peer"}}, owner="mateo",
                    stage="queued", created_at="2")
@@ -852,6 +859,7 @@ def test_soulseek_outage_requeues_instead_of_failing(backend, monkeypatch):
     outage = main.store.get("jobs", "outage")
     assert outage["stage"] == "queued" and outage["unavailable_retries"] == 1
     assert main.download_limits(("queued",))["soulseek"] == 0
+    assert released == [["t1"]]   # a job that waits keeps its requests
     main.stop.clear()
 
 
