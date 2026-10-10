@@ -300,11 +300,20 @@ def quality(c):
 
 
 SOURCE_ORDER = {'soulseek': 0, 'torrent': 1, 'youtube': 2}
+WELL_SEEDED = 3
+
+
+def source_order(c):
+    """Among copies of one quality: a seeded torrent first (they rarely fail once matched, while
+    Soulseek uploaders often never answer), then Soulseek, then thin torrents, then YouTube."""
+    if c.get('source') == 'torrent':
+        return 0 if (c.get('seeders') or 0) >= WELL_SEEDED else 2
+    return {'soulseek': 1, 'youtube': 3}.get(c.get('source'), 9)
 
 
 def ranked(results, album, artist, avoid=(), limit=8):
-    """Every result that is this album, best first: quality, then Soulseek before torrents
-    before YouTube, then each source's own score (edition, free slot, seeders...)."""
+    """Every result that is this album, best first: quality, then source_order, then each
+    source's own score (edition, free slot, seeders...)."""
     albums = [c for c in results if c.get('kind') == 'album' and c.get('source') == 'soulseek'
               and c.get('username') not in avoid and identity(c, album, artist)]
     exact = [c for c in albums if not extra_words(c, album, artist)] or albums
@@ -327,7 +336,7 @@ def ranked(results, album, artist, avoid=(), limit=8):
             scored.append((s, c))
     scored = [(s, c) for s, c in scored if quality(c) is not None]
     # A folder with an extra word ("Album Order") may be another record: after every exact copy of that quality.
-    scored.sort(key=lambda x: (-quality(x[1]), extra.get(id(x[1]), 0) > 0, SOURCE_ORDER.get(x[1].get('source'), 9), -x[0]))
+    scored.sort(key=lambda x: (-quality(x[1]), extra.get(id(x[1]), 0) > 0, source_order(x[1]), -x[0]))
     best, seen = [], set()
     for s, c in scored:
         who = provider(c)

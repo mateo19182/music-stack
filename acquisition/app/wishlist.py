@@ -277,7 +277,7 @@ class Wishlist:
         Without a usable answer from the model, the matching rules decide, as before."""
         album, artist = item["album"], item["artist"]
         pool = [c for c in results if self._eligible(c, avoid)]
-        pool.sort(key=lambda c: (-matching.quality(c), matching.SOURCE_ORDER.get(c.get("source"), 9), -self._source_score(c)))
+        pool.sort(key=lambda c: (-matching.quality(c), matching.source_order(c), -self._source_score(c)))
         verdicts = None
         if self.judge and pool:
             if "tracklist" not in item:

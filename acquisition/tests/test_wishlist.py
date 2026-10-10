@@ -61,13 +61,13 @@ class WishlistTests(unittest.TestCase):
         item = w.add("mateo", "Moor Mother", "Jazz Codes", "Blog 2025")
         w.tick()
         searches = len(sources.calls)
-        # Quality first, then Soulseek before torrents: FLAC from a, FLAC torrent, then a's 320.
-        self.assertEqual([c["source"] for c in self.store.get("wishlist", item["id"])["candidates"]], ["soulseek", "torrent", "soulseek"])
-        self.assertEqual(self.queued[-1]["username"], "a")
-        self.finish(item["id"], "failed", failed_stage="download", error="Soulseek peer a never accepted the request", progress=0)
-        w.tick()
+        # Quality first, then a seeded torrent before Soulseek: FLAC torrent, FLAC from a, then b's 320.
+        self.assertEqual([c["source"] for c in self.store.get("wishlist", item["id"])["candidates"]], ["torrent", "soulseek", "soulseek"])
         self.assertEqual(self.queued[-1]["source"], "torrent")
         self.finish(item["id"], "failed", failed_stage="download", error="The torrent made no progress for 60 minutes", progress=0)
+        w.tick()
+        self.assertEqual(self.queued[-1]["username"], "a")
+        self.finish(item["id"], "failed", failed_stage="download", error="Soulseek peer a never accepted the request", progress=0)
         w.tick()
         self.assertEqual(self.queued[-1]["username"], "b")
         self.assertEqual(len(sources.calls), searches)   # no new search
@@ -164,7 +164,9 @@ class RankingTests(unittest.TestCase):
                    slsk("chapter", folder="Moor Mother - Jazz Codes Order"), slsk("remix", folder="Moor Mother - Jazz Codes (Remixes)"),
                    torrent("t2", "Moor Mother - Jazz Codes: Order - 2022, FLAC (tracks)"), slsk("low", "mp3", 128)]
         order = [matching.provider(c) for c in matching.ranked(results, "Jazz Codes", "Moor Mother")]
-        self.assertEqual(order, ["flacuser", "t1", "chapter", "mp3user"])   # remixes, chapter torrent, 128 kbps: out
+        self.assertEqual(order, ["t1", "flacuser", "chapter", "mp3user"])   # remixes, chapter torrent, 128 kbps: out
+        thin = matching.ranked([torrent("t1", seeders=1), slsk("flacuser")], "Jazz Codes", "Moor Mother")
+        self.assertEqual([matching.provider(c) for c in thin], ["flacuser", "t1"])   # one seeder: after Soulseek
 
 
 def test_an_album_split_by_per_track_album_artists_counts_as_one():
