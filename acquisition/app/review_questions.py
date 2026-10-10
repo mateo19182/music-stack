@@ -8,8 +8,6 @@ import re
 
 LONG_SECONDS = 20 * 60
 SAME_RECORDING_SECONDS = 3
-# Copies of one album track from different sources differ by silence or a video intro.
-SAME_ALBUM_SECONDS = 20
 LOSSLESS = {'flac', 'alac', 'wav', 'aiff', 'ape', 'wavpack', 'pcm_s16le', 'pcm_s24le', 'pcm_s16be', 'pcm_s24be'}
 
 
@@ -38,20 +36,19 @@ def better(new, old):
 def same_recording(record, versions):
     """The library copies that are this recording, or None when that is unclear.
 
-    A same-titled track on another album with a different length is another
-    recording, so it is ignored and the new track is added alongside it.
+    The same title on the same album is the same recording, whatever the lengths.
+    On another album it is the same recording only when the lengths match; otherwise
+    it is another release of the song and the new track is added alongside it.
     """
-    duration = record.get('duration') or 0
-    if versions and not duration:
-        return None
     album = (record.get('proposed_tags') or record.get('proposed') or {}).get('album') or record.get('album')
+    duration = record.get('duration') or 0
     same = []
     for version in versions:
-        gap = abs((version.get('duration') or 0) - duration)
-        on_album = _same(album, version.get('album'))
-        if gap <= SAME_RECORDING_SECONDS or (on_album and gap <= SAME_ALBUM_SECONDS):
+        if album and _same(album, version.get('album')):
             same.append(version)
-        elif on_album or not (album and version.get('album')):
+        elif duration and abs((version.get('duration') or 0) - duration) <= SAME_RECORDING_SECONDS:
+            same.append(version)
+        elif not (album and version.get('album')):
             return None
     return same
 

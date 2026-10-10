@@ -54,6 +54,8 @@ def test_album_decides_between_another_copy_and_another_recording():
     assert plan(track(album='Hill Climber', possible_duplicates=[other])) == {'action': 'add', 'questions': []}
     # Only the copy on this album is replaced.
     assert plan(track(album='Hill Climber', possible_duplicates=[on_album, other]))['replace'] == [on_album]
-    # Too far apart even on the same album, or no album to compare, is still asked.
-    assert plan(track(album='Hill Climber', possible_duplicates=[library(album='Hill Climber', duration=240)]))['action'] == 'ask'
+    # On the same album the length does not matter.
+    longer = library(album='Hill Climber', duration=240)
+    assert plan(track(album='Hill Climber', possible_duplicates=[longer]))['replace'] == [longer]
+    # With no album to compare, it is still asked.
     assert plan(track(possible_duplicates=[library(album='Hill Climber', duration=260)]))['action'] == 'ask'

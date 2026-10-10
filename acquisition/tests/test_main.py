@@ -723,7 +723,8 @@ def test_the_review_model_decides_open_questions_and_leaves_only_its_doubts(back
     candidate = {"source": "soulseek", "requested_artist": "Overmono", "requested_album": "Good Lies"}
     main.store.put("jobs", "open", {"candidate": candidate, "source": "soulseek", "label": "Good Lies", "prepared": []},
                    owner="mateo", stage="review", created_at="2026-01-01")
-    library = {"artist": "Overmono", "title": "Good Lies", "album": "Good Lies", "format": "MP3", "bitrate": 320,
+    # Library copies without an album tag: whether they are the same recording stays open.
+    library = {"artist": "Overmono", "title": "Good Lies", "album": "", "format": "MP3", "bitrate": 320,
                "duration": 226, "path": str(old)}
     for id, title, duration in (("edit", "Good Lies", 160), ("vague", "Calling Out", 300), ("inst", "Is U (Instrumental)", 200)):
         path = main.STATE / f"{id}.flac"
