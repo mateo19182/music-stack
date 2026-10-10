@@ -1000,12 +1000,13 @@ async def lifespan(app):
     if config.get("wishlist_enabled", True):
         worker_threads.append(threading.Thread(target=wishlist_worker, name="wishlist", daemon=True))
     worker_threads.append(threading.Thread(target=advice_worker, name="advice-worker", daemon=True))
-    worker_threads.append(threading.Thread(target=decide_open_reviews, name="review-model", daemon=True))
     worker_threads.append(threading.Thread(target=library_index_worker, name="library-index", daemon=True))
     if config.get("analysis_hour", 4) is not None:
         worker_threads.append(threading.Thread(target=analysis_scheduler, name="analysis-scheduler", daemon=True))
     for thread in worker_threads:
         thread.start()
+    # A one-off pass, not a worker: health counts only threads that run for good.
+    threading.Thread(target=decide_open_reviews, name="review-model", daemon=True).start()
     yield
     stop.set()
     for thread in worker_threads:
