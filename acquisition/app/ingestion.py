@@ -20,6 +20,7 @@ from mediafile import Image, ImageType, MediaFile
 from .keys import camelot, key_fields
 from .audio_models import SAMPLE_RATE, models_at
 from .descriptors import fill_descriptors
+from .files import link, move
 from .lookup import Catalog, _identity
 from .tags import set_tag, split_values
 
@@ -243,6 +244,8 @@ class Ingestor:
         self.state = Path(config.get('state_root', '/state')) / 'ingestion'
         self.library = Path(config.get('library_root', '/library')).resolve()
         self.beets_path = Path(config.get('state_root', '/state')) / 'beets' / 'library.db'
+        # The library as seen through the mount the work folders share, so files move in by rename.
+        self.library_storage = Path(config.get('library_storage_root') or config.get('sharing_source_root') or self.library)
         self.state.mkdir(parents=True, exist_ok=True)
         self.library.mkdir(parents=True, exist_ok=True)
         self.beets_path.parent.mkdir(parents=True, exist_ok=True)
@@ -251,7 +254,17 @@ class Ingestor:
         self.catalog = Catalog(self.config)
         self.models = models_at(self.config.get('models_root') or str(Path(self.config.get('state_root', '/state')) / 'models'))
 
-    def process(self, paths, candidate, job_id, progress=lambda *args: None, cancelled=lambda: False, _preserve_tags=False, skipped=None):
+    def _on_disk(self, path):
+        """A library path through the shared mount (where renames into it work); other paths as they are."""
+        path = Path(path)
+        try:
+            return self.library_storage / path.resolve().relative_to(self.library)
+        except ValueError:
+            return path
+
+    def process(self, paths, candidate, job_id, progress=lambda *args: None, cancelled=lambda: False, _preserve_tags=False,
+                skipped=None, move_sources=False):
+        """move_sources: the sources are our own prepared copies; they end up as the library files."""
         def check():
             if cancelled():
                 raise IngestionCancelled('Ingestion cancelled; source downloads retained')
@@ -307,7 +320,11 @@ class Ingestor:
                 if not suffix:
                     raise ValueError(f'Unsupported audio container: {container[0]}')
                 work = job / ('working' + suffix)
-                shutil.copy2(source, work)
+                work.unlink(missing_ok=True)
+                if move_sources:
+                    link(source, work)   # a second name, not a copy: the source is removed once published
+                else:
+                    shutil.copy2(source, work)
                 media = MediaFile(str(work))
                 if not media.title and not _preserve_tags:
                     # A request often names the original song, so prefer the downloaded filename.
@@ -361,7 +378,7 @@ class Ingestor:
                 if not destination.parent.resolve().is_relative_to(self.library):
                     raise ValueError('Publication directory escapes the library')
                 temporary = destination.with_name('.' + destination.name + '.publishing')
-                shutil.copy2(work, temporary)
+                move(work, self._on_disk(temporary))
                 record = dict(path=str(destination), source_path=str(source), sha256=_hash(temporary),
                               original_sha256=original, audio_sha256=_audio_hash(source, cancelled), title=item.title, artist=item.artist,
                               album=item.album, album_artist=item.albumartist, track_number=item.track,
@@ -404,7 +421,7 @@ class Ingestor:
         """Prepare tagged copies privately; publication requires publish()."""
         private = self.state / 'prepared' / hashlib.sha256(str(job_id).encode()).hexdigest()
         worker = Ingestor({**self.config, 'state_root': str(private / 'state'), 'library_root': str(private / 'files'),
-                           'models_root': str(self.models.root)})
+                           'library_storage_root': str(private / 'files'), 'models_root': str(self.models.root)})
         records = worker.process(paths, candidate, job_id, progress, cancelled, skipped=skipped)
         fields = ('artist', 'title', 'album', 'genre', 'year', 'mood', 'bpm', 'key')
         catalog_enabled = self.config.get('catalog_matching', True) and len(paths) == 1
@@ -484,7 +501,14 @@ class Ingestor:
         _forget()   # one fresh library scan per publication; files it adds are remembered as it goes
         results = []
         for record in prepared:
-            path = Path(record.get('prepared_path') or record['path']).resolve(strict=True)
+            path = Path(record.get('prepared_path') or record['path'])
+            if not path.exists():
+                # An earlier try moved it into the library before stopping: that copy is the result.
+                done = self._provenance().get(record.get('original_sha256'))
+                if done and Path(done['path']).is_file():
+                    results.append(dict(done, duplicate=True))
+                    continue
+            path = path.resolve(strict=True)
             if not path.is_relative_to((self.state / 'prepared').resolve()):
                 raise ValueError('Approval must reference a privately prepared file')
             changes = edits.get(str(path), {}) if isinstance(edits, dict) else {}
@@ -516,6 +540,7 @@ class Ingestor:
                             existing_record['analysis_source'] = dict(analysis)
                             _json(sidecar, persisted)
                 results.append(existing_record)
+                self._consumed(path)
                 continue
             existing_record = None
             if not changes:
@@ -524,8 +549,10 @@ class Ingestor:
                     existing_record = dict(existing, duplicate=True)
             if existing_record:
                 results.append(existing_record)
+                self._consumed(path)
                 continue
-            published = self.process([path], record.get('candidate', {}), str(job_id) + ':approved:' + record['original_sha256'], progress, cancelled, _preserve_tags=True)[0]
+            published = self.process([path], record.get('candidate', {}), str(job_id) + ':approved:' + record['original_sha256'], progress, cancelled,
+                                     _preserve_tags=True, move_sources=True)[0]
             published['source_path'] = record['source_path']
             published['original_sha256'] = record['original_sha256']
             published['analysis_source'] = dict(record.get('analysis_source', {}))
@@ -535,17 +562,25 @@ class Ingestor:
             _json(Path(published['path']).with_name(Path(published['path']).name + '.provenance.json'), published)
             self._remember(published)
             results.append(published)
+            self._consumed(path)
         return results
 
-    def retire(self, path, trash):
+    @staticmethod
+    def _consumed(path):
+        """The prepared copy is in the library now (or the library already had it): no second copy."""
+        path.with_name(path.name + '.provenance.json').unlink(missing_ok=True)
+        path.unlink(missing_ok=True)
+
+    def retire(self, path, trash, to=None):
         """Move a library file and its provenance to trash, out of beets and the audio index.
 
-        Used by Replace and Undo; restore() puts the file back.
+        Used by Replace and Undo; restore() puts the file back. `to` puts it there instead of
+        in trash: Undo moves a track back to its place in Review.
         """
         path = Path(path).resolve()
         if not path.is_relative_to(self.library) or not path.is_file():
             raise ValueError('Only files inside the library can be removed')
-        target = Path(trash) / path.relative_to(self.library)
+        target = Path(to) if to else Path(trash) / path.relative_to(self.library)
         target.parent.mkdir(parents=True, exist_ok=True)
         with open(self.state / 'publish.lock', 'a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
@@ -553,10 +588,10 @@ class Ingestor:
             for item in database.items():
                 if item.path == os.fsencode(path):
                     item.remove()
-            shutil.move(str(path), str(target))
+            move(self._on_disk(path), target)
             sidecar = path.with_name(path.name + '.provenance.json')
             if sidecar.exists():
-                shutil.move(str(sidecar), str(target.with_name(target.name + '.provenance.json')))
+                move(self._on_disk(sidecar), target.with_name(target.name + '.provenance.json'))
             with _audio_index_lock:
                 index_path = self.state / 'audio-index.json'
                 try:
@@ -586,8 +621,8 @@ class Ingestor:
             path.parent.mkdir(parents=True, exist_ok=True)
             sidecar = target.with_name(target.name + '.provenance.json')
             if sidecar.exists():
-                shutil.move(str(sidecar), str(path.with_name(path.name + '.provenance.json')))
-            shutil.move(str(target), str(path))
+                move(sidecar, self._on_disk(path.with_name(path.name + '.provenance.json')))
+            move(target, self._on_disk(path))
             self._register(Library(str(self.beets_path), directory=str(self.library)), path)
         return str(path)
 

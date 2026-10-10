@@ -17,6 +17,8 @@ import uuid
 import httpx
 import yt_dlp
 
+from .files import take
+
 AUDIO_EXTENSIONS = {"mp3", "flac", "m4a", "aac", "ogg", "opus", "wav", "aiff", "alac", "wma"}
 # Names the Soulseek server drops whole searches for (an empty answer, not an error).
 # A "*name" wildcard does not get through either, so the word is left out of the query.
@@ -1072,14 +1074,16 @@ class Sources:
                       'message': message})
             if done == len(files):
                 for index, file in enumerate(files):
+                    target = destination / f"{index + 1:03d}-{PureWindowsPath(file['filename']).name}"
+                    if target.is_file() and target.stat().st_size == file["size"]:
+                        result.append(target)   # moved here on an earlier try
+                        continue
                     transfer = next(t for t in reversed(transfers) if _get(t, "filename") == file["filename"]
                                     and _get(t, "size") == file["size"] and 'succeeded' in _state(t).casefold())
                     source = self._completed_file(transfer)
-                    target = destination / f"{index + 1:03d}-{source.name}"
-                    if not target.exists() or target.stat().st_size != source.stat().st_size:
-                        temporary = target.with_suffix(target.suffix + ".copying")
-                        shutil.copy2(source, temporary)
-                        temporary.replace(target)
+                    temporary = target.with_suffix(target.suffix + ".copying")
+                    take(source, temporary)   # one copy: slskd's download becomes the staged file
+                    temporary.replace(target)
                     result.append(target)
                 return result
             time.sleep(float(self.config.get("slskd_poll_seconds", 2)))

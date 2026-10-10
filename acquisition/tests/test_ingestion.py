@@ -414,3 +414,19 @@ def test_publishing_an_album_scans_the_library_once_not_per_track(tmp_path, monk
     again = pipeline.publish(prepared, {}, 'album')   # a retry sees what the first run added
     assert all(p.get('duplicate') for p in again)
     assert len(list((tmp_path / 'library').rglob('*.mp3'))) == 5
+
+
+def test_one_copy_per_song_through_review_publish_and_undo(tmp_path):
+    source = audio(tmp_path)
+    pipeline = ingestor(tmp_path)
+    record = pipeline.prepare([source], {}, 'job')[0]
+    prepared = Path(record['path'])
+    assert prepared.is_file()
+    published = Path(pipeline.publish([record], {}, 'job')[0]['path'])
+    # The prepared copy became the library file; the download itself is the caller's to discard.
+    assert not prepared.exists()
+    assert [p for p in tmp_path.rglob('*.mp3') if p != source] == [published]
+    # Undo moves the library file back to its place in Review.
+    pipeline.retire(published, tmp_path / 'trash', to=prepared)
+    assert prepared.is_file() and not published.exists()
+    assert pipeline.publish([record], {}, 'job-again')[0]['path'] == str(published)

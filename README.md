@@ -100,6 +100,16 @@ album releases. Existing album tags are retained and can be corrected in review.
 - `deployment/`: reverse-proxy settings and Cloudflare ingress example.
 - `scripts/init-config.sh`: prepares private config files for a new installation.
 
+One copy per song: a finished Soulseek download is moved into staging, the copy
+prepared for Review becomes the library file, and the staged download is deleted
+once its tracks are in the library. A torrent keeps seeding from its own folder,
+so torrent albums keep that copy too. Moves are renames only within one mount, so
+the work folders and paths that files move between are configured through the
+`/music-storage` mount (`staging_root`, `slskd_download_root`, and
+`sharing_source_root` for the library); `/state/ingestion` and `/state/trash` are
+symlinks to folders on the music disk. Undo moves a track back to Review; tag
+edits made at approval are not restored.
+
 The project and network names (`aurral`, `lidarr`) are historical: this stack
 replaced an earlier Aurral + Lidarr setup. The old Aurral fork remains at
 https://github.com/mateo19182/aurral.

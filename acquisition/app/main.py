@@ -1,7 +1,7 @@
 """Authenticated acquisition with durable download/ingestion workers and review."""
 
 from __future__ import annotations
-import contextlib, hashlib, json, logging, os, re, secrets, sqlite3, threading, time, zipfile
+import contextlib, hashlib, json, logging, os, re, secrets, shutil, sqlite3, threading, time, zipfile
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -830,6 +830,7 @@ def worker(stages=("queued", "process_queued", "publish_queued")):
                     db.execute(
                         "DELETE FROM files WHERE job_id=? AND published=0", (id,)
                     )
+                discard_download(job)
                 store.update_job(
                     id,
                     stage="published",
@@ -1673,12 +1674,15 @@ def undo(id: str, body: FileChoice, user=Depends(check_user)):
     back, trash = [], STATE / "trash" / f"undo-{uid()}"
     with library_lock:
         for record in chosen:
+            entry = prepared.get(record.get("original_sha256"))
+            review_copy = Path(entry.get("prepared_path") or entry["path"]) if entry else None
             if not record.get("duplicate") and Path(record["path"]).is_file():
-                ingestor.retire(record["path"], trash)
+                # Publishing moved the prepared copy into the library: the library file goes back to Review.
+                gone = review_copy is not None and not review_copy.exists()
+                ingestor.retire(record["path"], trash, to=review_copy if gone else None)
                 with store.db() as db:
                     db.execute("DELETE FROM files WHERE id=?", (record["id"],))
-            entry = prepared.get(record.get("original_sha256"))
-            if entry and Path(entry.get("prepared_path") or entry["path"]).is_file():
+            if review_copy and review_copy.is_file():
                 back.append(entry)
     remaining = [r["id"] for r in published if r not in chosen]
     restored = []
@@ -1811,6 +1815,19 @@ def model_decide(id):
     if later_id:
         store.update_job(later_id, detail=unsure)
     return later_id
+
+
+def discard_download(job):
+    """The download's staged files once its tracks are in the library: one copy per song. Kept while
+    another review made from it (tracks left for later) may still need them; a torrent keeps
+    seeding from its own folder."""
+    folder = (STAGING / job["id"]).resolve()
+    if not folder.is_dir() or not folder.is_relative_to(STAGING):
+        return
+    if store.list("jobs", "json_extract(data, '$.split_from')=? AND stage IN "
+                  "('review','process_queued','processing','publish_queued','publishing')", (job["id"],)):
+        return
+    shutil.rmtree(folder, ignore_errors=True)
 
 
 def split_review(job, records):

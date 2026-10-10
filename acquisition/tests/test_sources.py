@@ -58,7 +58,7 @@ class SourceTests(unittest.TestCase):
                 files = sources.download(candidate, Path(destination), events.append, lambda: False)
                 api.assert_not_called()
             self.assertEqual(files[0].read_bytes(), b'audio')
-            self.assertTrue(p.exists())
+            self.assertFalse(p.exists())   # moved, not copied: one copy per song
             self.assertEqual(candidate['transfer_ids'], ['t1'])
             self.assertEqual(events[-1]['percent'], 100)
 

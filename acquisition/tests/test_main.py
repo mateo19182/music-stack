@@ -1006,3 +1006,23 @@ def test_an_expired_youtube_premium_login_alerts_once(backend, monkeypatch):
     assert len(sent) == 1   # checked at most every few hours
     tick()
     assert "works again" in sent[-1]
+
+
+def test_a_published_download_leaves_one_copy_and_undo_moves_it_back(backend, monkeypatch):
+    main, client = backend
+    signin(main, client, monkeypatch)
+    ingestor = main.Ingestor(main.config)
+    staged = tone(main.STAGING / "one" / "001-New.mp3")
+    prepared = ingestor.prepare([staged], {}, "one")
+    main.store.put("jobs", "one", {"candidate": {}, "source": "soulseek", "label": "New", "prepared": prepared},
+                   owner="mateo", stage="publishing", created_at="2026-01-01")
+    job = main.store.get("jobs", "one")
+    main.register_files(ingestor.publish(prepared, {}, "one"), job, True)
+    main.discard_download(job)
+    main.store.update_job("one", stage="published")
+    library = [p for p in main.LIBRARY.rglob("*.mp3")]
+    assert len(library) == 1 and not (main.STAGING / "one").exists() and not Path(prepared[0]["path"]).exists()
+    response = client.post("/api/jobs/one/undo", json={})
+    assert response.status_code == 200
+    assert not library[0].exists() and Path(prepared[0]["path"]).is_file()
+    assert client.get("/api/review").json()["jobs"][0]["id"] == response.json()["review_job_id"]
