@@ -176,6 +176,69 @@ class WishlistTests(unittest.TestCase):
         w.tick()
         self.assertEqual(self.queued[-1]["source"], "youtube")
 
+    def test_a_track_request_finds_the_recording_not_its_remix(self):
+        def file(user, name, fmt="flac", bitrate=None, free=True):
+            return {"id": f"s-{user}", "source": "soulseek", "kind": "track", "username": user, "free_slots": free,
+                    "filename": f"Music\\Vulfpeck\\MSG\\{name}.{fmt}", "title": name, "format": fmt, "bitrate": bitrate}
+        sources = FakeSources({"soulseek": [file("remix", "03 - Sauna (Remix)"), file("mp3", "Vulfpeck - Sauna", "mp3", 320),
+                                            file("flac", "03 - Sauna"), file("other", "03 - Sauna Time")]})
+        w = self.wishlist(sources)
+        item = w.add("mateo", "Vulfpeck", list_name="Requests", kind="track", title="Sauna")
+        w.tick()
+        saved = self.store.get("wishlist", item["id"])
+        self.assertEqual([c["username"] for c in saved["candidates"]], ["flac", "mp3"])   # "Sauna Time" is another song
+        self.assertEqual((self.queued[-1]["username"], self.queued[-1]["requested_title"]), ("flac", "Sauna"))
+        self.assertTrue(self.queued[-1]["premium_only"])
+        self.assertNotIn("torrent", {s for _, s in sources.calls})
+
+    def test_a_link_is_downloaded_as_given_and_retried_daily(self):
+        w = self.wishlist(FakeSources({}))
+        item = w.add("mateo", "", list_name="Requests", kind="link", url="https://youtu.be/dQw4w9WgXcQ", link_kind="track")
+        w.tick()
+        self.assertEqual(self.queued[-1]["url"], "https://youtu.be/dQw4w9WgXcQ")
+        self.assertFalse(self.queued[-1]["premium_only"])
+        self.finish(item["id"], "failed", failed_stage="download", error="Video unavailable")
+        w.tick()
+        self.assertEqual(len(self.queued), 1)   # not again right away
+        self.assertIn("again tomorrow", self.store.get("wishlist", item["id"])["note"])
+        self.clock[0] += SEARCH_AGAIN
+        w.tick()
+        self.assertEqual(len(self.queued), 2)
+
+    def test_youtube_links_wait_while_youtube_is_paused(self):
+        w = self.wishlist(FakeSources({}))
+        w.youtube_enabled = lambda: False
+        item = w.add("mateo", "", list_name="Requests", kind="link", url="https://youtu.be/dQw4w9WgXcQ")
+        w.tick()
+        self.assertEqual(self.queued, [])
+        self.assertIn("YouTube is paused", self.store.get("wishlist", item["id"])["note"])
+        bandcamp = w.add("mateo", "", list_name="Requests", kind="link", url="https://artist.bandcamp.com/album/x", link_kind="album")
+        w.tick()
+        self.assertEqual(self.queued[-1]["url"], "https://artist.bandcamp.com/album/x")
+
+    def test_a_picked_copy_goes_first_and_a_search_follows_if_it_fails(self):
+        sources = FakeSources({"soulseek": [slsk("a")]})
+        w = self.wishlist(sources)
+        item = w.add("mateo", "Moor Mother", "Jazz Codes", "Requests", pick=slsk("mine", "mp3", 320))
+        w.tick()
+        self.assertEqual(self.queued[-1]["username"], "mine")
+        self.assertEqual(sources.calls, [])   # no search for a picked copy
+        self.finish(item["id"], "failed", failed_stage="download", error="did not start sending")
+        w.tick()
+        w.tick()
+        self.assertEqual(self.queued[-1]["username"], "a")
+        self.assertEqual(self.store.get("wishlist", item["id"])["rounds"], 0)   # the pick failing is not a round
+
+    def test_asking_again_restarts_a_request_that_gave_up_but_an_import_does_not(self):
+        w = self.wishlist(FakeSources({}))
+        item = w.add("mateo", "Moor Mother", "Jazz Codes", "Blog")
+        saved = self.store.get("wishlist", item["id"])
+        saved.update(status="gave_up", rounds=7)
+        w.save(saved)
+        self.assertEqual(w.add("mateo", "Moor Mother", "Jazz Codes", "Blog")["status"], "gave_up")
+        again = w.add("mateo", "Moor Mother", "Jazz Codes", "Blog", renew=True)
+        self.assertEqual((again["status"], again["rounds"]), ("wanted", 0))
+
     def test_queueing_waits_while_every_download_worker_has_a_job_waiting(self):
         for n in range(4):
             self.store.put("jobs", uid(), {"candidate": {"source": "soulseek", "username": f"u{n}"}}, owner="mateo",
@@ -338,3 +401,11 @@ def test_same_titled_youtube_albums_the_model_doubts_are_not_taken(tmp_path):
     w.add("mateo", "Darius C", "Blue Indigo")
     w.tick()
     assert queued == []
+
+
+def test_a_track_is_in_the_library_by_artist_and_title_but_not_as_a_remix():
+    library = {"a": {"artists": {matching.key("Vulfpeck")}, "titles": {matching.track_key("Sauna (feat. Antwaun Stanley)"),
+                                                                      matching.track_key("Birds of a Feather (Remix)")}}}
+    assert matching.library_has_track(library, {"artist": "Vulfpeck", "title": "Sauna"})
+    assert not matching.library_has_track(library, {"artist": "Vulfpeck", "title": "Birds of a Feather"})
+    assert not matching.library_has_track(library, {"artist": "Someone Else", "title": "Sauna"})

@@ -1356,7 +1356,11 @@ body:has(#player-bar:not([hidden])) .review-bar {
 .wishlist-filters label {
   flex: 0 1 200px;
 }
+.wishlist-add label:first-child {
+  flex: 0 1 110px;
+}
 .wishlist-add input,
+.wishlist-add select,
 .wishlist-filters select {
   width: 100%;
   padding: 7px 8px;

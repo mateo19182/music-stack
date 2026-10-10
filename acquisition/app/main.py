@@ -16,7 +16,7 @@ from mediafile import MediaFile
 
 from .store import Store, uid, now
 from .sources import Sources, SourceError, SoulseekUnavailable, DownloadCancelled, youtube_url
-from .wishlist import Wishlist
+from .wishlist import KINDS, Wishlist
 from .llm_match import Judge
 from typing import List
 from .health import SoulseekHealth, telegram
@@ -63,19 +63,17 @@ class Search(BaseModel):
     album: str = Field(default="", max_length=200)
 
 
-class Enqueue(BaseModel):
-    candidate_id: str
+class RequestAdd(BaseModel):
+    """What the owner wants: an album or track (artist + album/title), a link (url), or a search
+    result to try first (candidate_id)."""
+    kind: str = "album"
     artist: str = Field(default="", max_length=200)
-    title: str = Field(default="", max_length=200)
-    album: str = Field(default="", max_length=200)
-
-
-class URLInput(BaseModel):
-    url: str = Field(min_length=1, max_length=2000)
-    kind: str = "track"
-    artist: str = Field(default="", max_length=200)
-    title: str = Field(default="", max_length=200)
-    album: str = Field(default="", max_length=200)
+    album: str = Field(default="", max_length=300)
+    title: str = Field(default="", max_length=300)
+    url: str = Field(default="", max_length=2000)
+    link_kind: str = "track"
+    candidate_id: str = Field(default="", max_length=128)
+    list: str = Field(default="Requests", min_length=1, max_length=120)
 
 
 class Retry(BaseModel):
@@ -117,13 +115,7 @@ class Import(BaseModel):
     paths: list[str] = Field(min_length=1, max_length=100)
 
 
-class WishlistAdd(BaseModel):
-    artist: str = Field(min_length=1, max_length=200)
-    album: str = Field(min_length=1, max_length=300)
-    list: str = Field(default="Wishlist", min_length=1, max_length=120)
-
-
-class WishlistEntry(BaseModel):
+class RequestEntry(BaseModel):
     artist: str = Field(default="", max_length=200)
     album: str = Field(default="", max_length=300)
     star: bool = False
@@ -132,8 +124,8 @@ class WishlistEntry(BaseModel):
     wrong_jobs: list[str] = Field(default_factory=list, max_length=20)
 
 
-class WishlistImport(BaseModel):
-    items: List[WishlistEntry] = Field(min_length=1, max_length=500)   # typing.List: the `list` field shadows the builtin
+class RequestImport(BaseModel):
+    items: List[RequestEntry] = Field(min_length=1, max_length=500)   # typing.List: the `list` field shadows the builtin
     list: str = Field(min_length=1, max_length=120)
     playlist: bool = False
     list_order: int = 0
@@ -174,12 +166,11 @@ def soulseek_waiting():
 
 
 def paused_sources(stages):
-    """Soulseek downloads wait while slskd is logged out (they would only fail); YouTube
-    downloads wait while youtube_enabled is off."""
-    paused = () if config.get("youtube_enabled", True) else ("youtube",)
+    """Soulseek downloads wait while slskd is logged out: they would only fail. (Requests decide
+    whether YouTube may be used at all.)"""
     if "queued" in stages and soulseek_waiting() and not soulseek_health.ready():
-        paused += ("soulseek",)
-    return paused
+        return ("soulseek",)
+    return ()
 
 
 _review_sightings = {}
@@ -262,7 +253,8 @@ def soulseek_watcher():
 
 match_judge = Judge(config)
 wishlist = Wishlist(store, config, lambda: Sources(config), lambda candidate, user: enqueue(candidate, user),
-                    soulseek_ready=lambda: soulseek_health.ready(), youtube_ready=lambda: config.get("youtube_enabled", True) and _premium["working"] is True, judge=match_judge if match_judge.enabled else None)
+                    soulseek_ready=lambda: soulseek_health.ready(), youtube_ready=lambda: config.get("youtube_enabled", True) and _premium["working"] is True,
+                    youtube_enabled=lambda: config.get("youtube_enabled", True), judge=match_judge if match_judge.enabled else None)
 
 
 def wishlist_worker():
@@ -456,6 +448,7 @@ def job_view(job):
             "username",
             "filename",
             "uploader",
+            "wishlist_id",
         ]
         if candidate.get(k)
     }
@@ -1376,41 +1369,6 @@ def _enqueue(candidate, user):
     return job_view(store.get("jobs", id))
 
 
-@app.post("/api/jobs")
-def create_job(body: Enqueue, user=Depends(check_user)):
-    candidate = store.get("candidates", body.candidate_id)
-    if not candidate or not visible(user, candidate):
-        raise HTTPException(404, "Search candidate not found")
-    candidate = {k: v for k, v in candidate.items() if k != "owner"}
-    for name in ["artist", "title", "album"]:
-        value = getattr(body, name)
-        if value:
-            candidate["requested_" + name] = value
-    return enqueue(candidate, user)
-
-
-@app.post("/api/url")
-def url_job(body: URLInput, user=Depends(check_user)):
-    if body.kind not in {"track", "album"}:
-        raise HTTPException(400, "Choose track or album / playlist")
-    try:
-        url = youtube_url(body.url)
-    except SourceError as exc:
-        raise HTTPException(400, str(exc)) from None
-    return enqueue(
-        {
-            "id": hashlib.sha256((body.kind + url).encode()).hexdigest(),
-            "source": "youtube",
-            "kind": body.kind,
-            "url": url,
-            "title": url,
-            "files": [],
-            **{"requested_" + field: getattr(body, field) for field in ("artist", "title", "album") if getattr(body, field)},
-        },
-        user,
-    )
-
-
 @app.get("/api/jobs")
 def jobs(user=Depends(check_user)):
     records = store.list(
@@ -1974,15 +1932,15 @@ def authorized_file(id, user):
 _checks_cache = {"at": 0.0, "checks": []}
 
 
-def owned_wish(id, user):
+def owned_request(id, user):
     item = store.get("wishlist", id)
     if not item or item["owner"] != user["username"]:
-        raise HTTPException(404, "Wishlist album not found")
+        raise HTTPException(404, "Request not found")
     return item
 
 
-@app.get("/api/wishlist")
-def wishlist_list(user=Depends(check_user)):
+@app.get("/api/requests")
+def list_requests(user=Depends(check_user)):
     items = wishlist.items(user["username"])
     jobs = {j["id"]: j for j in store.list("jobs", "owner=? AND stage NOT IN ('failed','cancelled','rejected','published')",
                                            (user["username"],))}
@@ -1992,15 +1950,39 @@ def wishlist_list(user=Depends(check_user)):
     return {"lists": lists, "items": [wishlist.view(i, jobs) for i in items], "matching": matching}
 
 
-@app.post("/api/wishlist")
-def wishlist_add(body: WishlistAdd, user=Depends(check_user)):
-    item = wishlist.add(user["username"], body.artist.strip(), body.album.strip(), body.list.strip(),
-                        position=int(time.time()))
+@app.post("/api/requests")
+def add_request(body: RequestAdd, user=Depends(check_user)):
+    """The one way in: everything downloaded starts as a request."""
+    pick = None
+    kind = body.kind
+    if body.candidate_id:
+        candidate = store.get("candidates", body.candidate_id)
+        if not candidate or not visible(user, candidate):
+            raise HTTPException(404, "Search result not found")
+        pick = {k: v for k, v in candidate.items() if k != "owner"}
+        kind = "album" if pick.get("kind") == "album" else "track"
+    if kind not in KINDS or body.link_kind not in {"track", "album"}:
+        raise HTTPException(400, "Choose album, track or link")
+    artist = body.artist or (pick or {}).get("artist") or ""
+    album = body.album or ((pick or {}).get("album") or (pick or {}).get("title") if kind == "album" else "") or ""
+    title = body.title or ((pick or {}).get("title") if kind == "track" else "") or ""
+    if kind == "link":
+        try:
+            url = youtube_url(body.url)
+        except SourceError as exc:
+            raise HTTPException(400, str(exc)) from None
+        item = wishlist.add(user["username"], artist, album, body.list.strip(), kind="link", title=title or url, url=url,
+                            link_kind=body.link_kind, position=int(time.time()), renew=True)
+    else:
+        if not pick and not (artist.strip() and (album if kind == "album" else title).strip()):
+            raise HTTPException(400, "Enter an artist and " + ("an album" if kind == "album" else "a title"))
+        item = wishlist.add(user["username"], artist, album, body.list.strip(), kind=kind, title=title, pick=pick,
+                            position=int(time.time()), renew=True)
     return wishlist.view(item)
 
 
-@app.post("/api/wishlist/import")
-def wishlist_import(body: WishlistImport, user=Depends(check_user)):
+@app.post("/api/requests/import")
+def import_requests(body: RequestImport, user=Depends(check_user)):
     added = [wishlist.add(user["username"], e.artist.strip(), e.album.strip(), body.list.strip(), position=n, star=e.star,
                           playlist=body.playlist, list_order=body.list_order, year=e.year,
                           **({"skip": e.skip} if e.skip else {}), **({"wrong_jobs": e.wrong_jobs} if e.wrong_jobs else {}))
@@ -2008,26 +1990,34 @@ def wishlist_import(body: WishlistImport, user=Depends(check_user)):
     return {"count": len(added)}
 
 
-@app.post("/api/wishlist/{id}/retry")
-def wishlist_retry(id: str, user=Depends(check_user)):
-    item = owned_wish(id, user)
+@app.post("/api/requests/{id}/retry")
+def retry_request(id: str, user=Depends(check_user)):
+    item = owned_request(id, user)
     if item.get("job_id"):
-        raise HTTPException(409, "A download for this album is still running")
+        raise HTTPException(409, "A download for this request is still running")
     wishlist.retry(item)
     return {"ok": True}
 
 
-@app.post("/api/wishlist/{id}/skip")
-def wishlist_skip(id: str, user=Depends(check_user)):
-    item = owned_wish(id, user)
-    item.update(status="skipped", note="Skipped by you")
+def _stop_download(item):
+    job = store.get("jobs", item["job_id"]) if item.get("job_id") else None
+    if job and job["stage"] in ("queued", "downloading"):
+        store.update_job(job["id"], cancel_requested=True)
+        store.transition_job(job["id"], {"queued"}, "cancelled", detail="Request stopped")
+
+
+@app.post("/api/requests/{id}/skip")
+def skip_request(id: str, user=Depends(check_user)):
+    item = owned_request(id, user)
+    _stop_download(item)
+    item.update(status="skipped", note="Stopped by you", job_id=None)
     wishlist.save(item)
     return {"ok": True}
 
 
-@app.post("/api/wishlist/{id}/remove")
-def wishlist_remove(id: str, user=Depends(check_user)):
-    owned_wish(id, user)
+@app.post("/api/requests/{id}/remove")
+def remove_request(id: str, user=Depends(check_user)):
+    _stop_download(owned_request(id, user))
     with store.db() as db:
         db.execute("DELETE FROM wishlist WHERE id=?", (id,))
     return {"ok": True}

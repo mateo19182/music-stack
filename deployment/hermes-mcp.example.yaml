@@ -21,8 +21,8 @@ mcp_servers:
         - request_review_advice
         - approve_review
         - library
-        - enqueue
-        - enqueue_url
+        - request_music
+        - list_requests
         - retry_job
         - cancel_job
         - import_files

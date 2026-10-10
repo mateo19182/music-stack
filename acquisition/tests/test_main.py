@@ -760,13 +760,12 @@ def test_a_better_copy_takes_the_replaced_files_name(backend):
     assert new["path"] == old["path"]   # no " [hash]" added: the name was free
 
 
-def test_youtube_downloads_wait_while_youtube_is_paused(backend, monkeypatch):
+def test_youtube_searches_stop_while_youtube_is_paused(backend, monkeypatch):
     main, _ = backend
     monkeypatch.setitem(main.config, "youtube_enabled", False)
-    main.store.put("jobs", "yt", {"candidate": {"source": "youtube"}}, owner="mateo", stage="queued", created_at="1")
-    assert main.store.claim(("queued",), paused=main.paused_sources(("queued",))) is None
     with pytest.raises(main.SourceError, match="paused"):
         main.Sources(main.config).search("Artist Album", "youtube", "album")
+    assert not main.wishlist.youtube_enabled() and not main.wishlist.youtube_ready()
 
 
 def test_download_lanes_run_in_parallel_within_bounds(backend):
@@ -893,27 +892,49 @@ def test_needs_you_alerts_once_per_check_and_review(backend, monkeypatch):
     assert len(sent) == 3 and "Album Two" in sent[2]
 
 
-def test_wishlist_import_list_retry_skip_and_ownership(backend, monkeypatch):
+def test_requests_import_list_retry_skip_and_ownership(backend, monkeypatch):
     main, client = backend
     signin(main, client, monkeypatch)
     body = {"list": "Blog favorites 2025", "playlist": True, "items": [
         {"artist": "Moor Mother", "album": "Jazz Codes", "star": True}, {"artist": "", "album": "Talk"},
         {"artist": "X", "album": "Y", "skip": "kept only in 2024"}]}
-    assert client.post("/api/wishlist/import", json=body).json() == {"count": 3}
-    assert client.post("/api/wishlist/import", json=body).json() == {"count": 3}   # same entries, no duplicates
-    listed = client.get("/api/wishlist").json()
+    assert client.post("/api/requests/import", json=body).json() == {"count": 3}
+    assert client.post("/api/requests/import", json=body).json() == {"count": 3}   # same entries, no duplicates
+    listed = client.get("/api/requests").json()
     assert listed["lists"] == ["Blog favorites 2025"]
     assert [(i["album"], i["status"]) for i in listed["items"]] == [("Jazz Codes", "wanted"), ("Talk", "skipped"), ("Y", "skipped")]
     first = listed["items"][0]["id"]
-    added = client.post("/api/wishlist", json={"artist": "Puma Blue", "album": "antichamber"}).json()
-    assert added["list"] == "Wishlist" and added["status"] == "wanted"
-    assert client.post(f"/api/wishlist/{first}/skip", json={}).status_code == 200
-    assert client.post(f"/api/wishlist/{first}/retry", json={}).status_code == 200
+    added = client.post("/api/requests", json={"artist": "Puma Blue", "album": "antichamber"}).json()
+    assert added["list"] == "Requests" and added["status"] == "wanted" and added["kind"] == "album"
+    assert client.post(f"/api/requests/{first}/skip", json={}).status_code == 200
+    assert client.post(f"/api/requests/{first}/retry", json={}).status_code == 200
     assert main.store.get("wishlist", first)["status"] == "wanted"
     signin(main, client, monkeypatch, name="other")
-    assert client.post(f"/api/wishlist/{first}/retry", json={}).status_code == 404
-    assert client.post(f"/api/wishlist/{first}/remove", json={}).status_code == 404
-    assert client.get("/api/wishlist").json()["items"] == []
+    assert client.post(f"/api/requests/{first}/retry", json={}).status_code == 404
+    assert client.post(f"/api/requests/{first}/remove", json={}).status_code == 404
+    assert client.get("/api/requests").json()["items"] == []
+
+
+def test_every_download_starts_as_a_request(backend, monkeypatch):
+    main, client = backend
+    signin(main, client, monkeypatch)
+    track = client.post("/api/requests", json={"kind": "track", "artist": "Vulfpeck", "title": "Sauna"}).json()
+    assert (track["kind"], track["name"], track["status"]) == ("track", "Sauna", "wanted")
+    link = client.post("/api/requests", json={"kind": "link", "url": "https://youtu.be/dQw4w9WgXcQ"}).json()
+    assert link["kind"] == "link" and link["url"].startswith("https://")
+    assert client.post("/api/requests", json={"kind": "link", "url": "https://example.com/x"}).status_code == 400
+    assert client.post("/api/requests", json={"kind": "album", "artist": "Vulfpeck"}).status_code == 400
+    # A search result: tried first, under the identity the search asked for.
+    main.store.put("candidates", "c1", {"id": "c1", "source": "soulseek", "kind": "album", "username": "u",
+                                         "title": "MSG II", "files": []}, owner="mateo")
+    picked = client.post("/api/requests", json={"candidate_id": "c1", "artist": "Vulfpeck"}).json()
+    item = main.store.get("wishlist", picked["id"])
+    assert (item["kind"], item["album"], item["pinned"], item["candidates"][0]["username"]) == ("album", "MSG II", True, "u")
+    signin(main, client, monkeypatch, name="other", admin=False)
+    assert client.post("/api/requests", json={"candidate_id": "c1"}).status_code == 404
+    # The old ways in are gone.
+    assert client.post("/api/jobs", json={"candidate_id": "c1"}).status_code in (404, 405)
+    assert client.post("/api/url", json={"url": "https://youtu.be/dQw4w9WgXcQ"}).status_code in (404, 405)
 
 
 def test_an_expired_youtube_premium_login_alerts_once(backend, monkeypatch):

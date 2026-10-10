@@ -45,16 +45,15 @@
         <nav aria-label="Main">
           <button data-tab="search" class="selected">Search</button
           ><button data-tab="activity">
-            Queue <span id="active-count"></span></button
-          ><button data-tab="wishlist">Wishlist</button
+            Requests <span id="active-count"></span></button
           ><button data-tab="library">Library</button>
         </nav>
         <section id="search-view">
           <div class="intro">
             <h1>Add music</h1>
             <p class="muted">
-              Find a track or paste a media link. Review it before adding it to
-              your library.
+              Search and pick a copy, or paste a link. To just say what you
+              want and let the app find the best copy, use Requests.
             </p>
           </div>
           <form id="search-form" class="panel">
@@ -99,8 +98,8 @@
           <details class="panel url-panel">
             <summary>Link options</summary>
             <p class="muted">
-              Paste a YouTube, SoundCloud, Bandcamp or Vimeo URL. Playlists can
-              be queued together.
+              Paste a YouTube, SoundCloud, Bandcamp or Vimeo URL. It is
+              downloaded as given; playlists come in together.
             </p>
             <form id="url-form">
               <label
@@ -116,7 +115,7 @@
                     <option value="track">Single track</option>
                     <option value="album">Album / playlist</option>
                   </select></label
-                ><button type="submit">Queue link</button>
+                ><button type="submit">Get link</button>
               </div>
             </form>
           </details>
@@ -130,12 +129,14 @@
         </section>
         <section id="activity-view" hidden>
           <div class="section-title">
-            <h1>Queue</h1>
+            <h1>Requests</h1>
             <button id="refresh-jobs" class="quiet">Refresh</button>
           </div>
           <p class="muted">
-            Downloads appear here. Check their tags and add them to the library
-            when ready.
+            Everything you asked for. Each album or track is searched on
+            Soulseek, RuTracker and YouTube Music, the copies are ranked by
+            quality, and they are tried one by one until it is in your library.
+            Lossy arrivals are checked weekly for a lossless copy.
           </p>
           <div class="section-title">
             <h2>Needs you <span id="review-count"></span></h2>
@@ -145,8 +146,7 @@
           <div class="auto-add">
             <span>Add to the library automatically when nothing needs you:</span>
             <label class="checkbox"
-              ><input type="checkbox" data-auto-add="search" />Searches and
-              links</label
+              ><input type="checkbox" data-auto-add="search" />Requests</label
             >
             <label class="checkbox"
               ><input type="checkbox" data-auto-add="import" />Inbox
@@ -158,9 +158,33 @@
             for you. Answer what's left here, or click a track to edit it.
           </p>
           <div id="reviews"></div>
+          <div class="section-title"><h2>Your requests</h2></div>
+          <form id="wishlist-form" class="wishlist-add">
+            <label>What<select id="wish-kind"><option value="album">Album</option><option value="track">Track</option></select></label>
+            <label>Artist<input name="artist" id="wish-artist" required maxlength="200" autocomplete="off" /></label>
+            <label><span id="wish-name-label">Album</span><input name="album" id="wish-album" required maxlength="300" autocomplete="off" /></label>
+            <label>List<input name="list" id="wish-list" list="wish-lists" value="Requests" required maxlength="120" /></label>
+            <datalist id="wish-lists"></datalist>
+            <button type="submit">Request</button>
+          </form>
+          <div class="wishlist-filters">
+            <label>List<select id="wish-filter-list"><option value="">All lists</option></select></label>
+            <label>Status<select id="wish-filter-status">
+              <option value="">All</option>
+              <option value="open">Still looking</option>
+              <option value="active">Downloading</option>
+              <option value="review">In review</option>
+              <option value="have">In library</option>
+              <option value="stopped">Not found or gave up</option>
+              <option value="skipped">Skipped</option>
+            </select></label>
+            <span id="wishlist-summary" class="muted"></span>
+          </div>
+          <div id="wishlist"></div>
           <div class="section-title"><h2>Recently added</h2></div>
           <div id="recent"></div>
-          <div class="section-title"><h2>Downloads</h2></div>
+          <div class="section-title"><h2>Other downloads</h2></div>
+          <p class="muted">Inbox imports and downloads from before requests.</p>
           <label class="checkbox history-toggle"
             ><input type="checkbox" id="show-history" />Show completed and
             rejected downloads</label
@@ -188,39 +212,6 @@
               </div>
             </form>
           </details>
-        </section>
-        <section id="wishlist-view" hidden>
-          <div class="section-title">
-            <h1>Wishlist</h1>
-            <button id="refresh-wishlist" class="quiet">Refresh</button>
-          </div>
-          <p class="muted">
-            Albums you want. Each one is searched on Soulseek and RuTracker,
-            the copies are ranked by quality, and they are tried one by one
-            until the album is in your library. YouTube Music's official album
-            is the last resort.
-          </p>
-          <form id="wishlist-form" class="wishlist-add">
-            <label>Artist<input name="artist" id="wish-artist" required maxlength="200" autocomplete="off" /></label>
-            <label>Album<input name="album" id="wish-album" required maxlength="300" autocomplete="off" /></label>
-            <label>List<input name="list" id="wish-list" list="wish-lists" value="Wishlist" required maxlength="120" /></label>
-            <datalist id="wish-lists"></datalist>
-            <button type="submit">Add album</button>
-          </form>
-          <div class="wishlist-filters">
-            <label>List<select id="wish-filter-list"><option value="">All lists</option></select></label>
-            <label>Status<select id="wish-filter-status">
-              <option value="">All</option>
-              <option value="open">Still looking</option>
-              <option value="active">Downloading</option>
-              <option value="review">In review</option>
-              <option value="have">In library</option>
-              <option value="stopped">Not found or gave up</option>
-              <option value="skipped">Skipped</option>
-            </select></label>
-            <span id="wishlist-summary" class="muted"></span>
-          </div>
-          <div id="wishlist"></div>
         </section>
         <section id="library-view" hidden>
           <div class="section-title">

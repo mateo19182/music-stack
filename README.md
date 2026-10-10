@@ -27,12 +27,19 @@ SoundCloud, Bandcamp and Vimeo URLs are supported.
 
 ## Acquisition workflow
 
-1. Search for a track or album. Filter results by file type and quality. Library
-   hints mark existing tracks or possible matches, with playback of the existing
-   copy. YouTube results link to the original video.
-2. Choose a source and queue it. Independent workers download, prepare private
-   copies, and hold them for review. Remote Soulseek queues and failures explain
-   what is happening. Retries retain completed downloads and partial files.
+1. Ask for music on the Requests page (or through an agent): an album or track
+   by artist and name, or an exact link. Everything downloaded starts as a
+   request. An album or track is searched on Soulseek, RuTracker and YouTube
+   Music at once; the copies that are that record are ranked by quality
+   (lossless first; ties go to whoever can send now) and tried one by one. A copy
+   that sends nothing for 10 minutes is dropped for the next one. A list that runs
+   out is searched again daily for a week. Lossy arrivals are searched weekly for
+   a lossless copy for four weeks. YouTube is used only with a Premium login
+   (256 kbps), and can be switched off (`youtube_enabled`).
+2. To pick a copy yourself, search, filter results by file type and quality, and
+   choose **Get this**: that copy is tried first, then others if it fails.
+   Library hints mark existing tracks or possible matches. A few downloads run at
+   a time (`download_workers`); the rest wait their turn.
 3. Preparation fills what it can: BPM, key, genre, year and mood, plus a missing
    album and cover art from MusicBrainz and the Cover Art Archive. A strong
    MusicBrainz match renames the track only when the recording length agrees
@@ -40,7 +47,7 @@ SoundCloud, Bandcamp and Vimeo URLs are supported.
    of library tracks are skipped. A copy of the same recording that is clearly
    better (lossless over lossy, or at least 25% higher bitrate) replaces the
    library version, which moves to a trash folder; an equal or worse copy is skipped.
-4. With automatic adding on (Queue, separately for searches/links and inbox
+4. With automatic adding on (Requests, separately for requests and inbox
    imports), tracks with nothing to decide go straight into the library.
    **Needs you** then holds only questions, each with one-click answers:
    - a missing artist or title
@@ -167,14 +174,14 @@ local targets; tunnel credentials and account configuration are not in this repo
 
 ## Agent access
 
-See [acquisition/AGENTS.md](acquisition/AGENTS.md) for the 14 stdio MCP tools and
+See [acquisition/AGENTS.md](acquisition/AGENTS.md) for the stdio MCP tools and
 [acquisition/mcp-config.example.json](acquisition/mcp-config.example.json) for
 client configuration. The same authenticated REST API is described by
 `/openapi.json` with Bearer authentication.
 
 A signed-in admin creates a dedicated token with `POST /api/agents` and a JSON
 `name`, optionally `"can_approve": true`. Tokens expire after 90 days and can be revoked with `DELETE /api/agents/{id}`.
-Store the token in a mode-`0600` credentials file. Agents may search, enqueue,
+Store the token in a mode-`0600` credentials file. Agents may search, request music,
 import completed files, request advice, inspect reviews, cancel and retry jobs.
 They cannot reject reviews, edit tags, change sharing, or mint tokens. They can approve publication (without editing tags) only if the token was minted with `can_approve`; the approval is recorded as `approved_by: agent:<name>`.
 A publication retry only resumes an existing human approval.

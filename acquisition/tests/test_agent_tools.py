@@ -40,13 +40,13 @@ def initialize(instance):
     ("list_reviews", {}, "GET", "/api/review", {}),
     ("request_review_advice", {"id": "job"}, "POST", "/api/jobs/job/advice", {}),
     ("library", {"q": "Sauna", "genre": "Funk", "key": "Cm", "bpm_min": 90, "bpm_max": 110, "page": 2, "sort": "album"}, "GET", "/api/library", {"q": "Sauna", "genre": "Funk", "key": "Cm", "bpm_min": "90", "bpm_max": "110", "page": "2", "sort": "album"}),
-    ("enqueue", {"candidate_id": "candidate", "artist": "Vulfpeck", "title": "Sauna", "album": "MSG II"}, "POST", "/api/jobs", {"candidate_id": "candidate", "artist": "Vulfpeck", "title": "Sauna", "album": "MSG II"}),
-    ("enqueue_url", {"url": "https://youtu.be/example", "kind": "album"}, "POST", "/api/url", {"url": "https://youtu.be/example", "kind": "album"}),
+    ("request_music", {"candidate_id": "candidate", "artist": "Vulfpeck", "title": "Sauna"}, "POST", "/api/requests", {"candidate_id": "candidate", "artist": "Vulfpeck", "title": "Sauna"}),
+    ("request_music", {"kind": "link", "url": "https://youtu.be/example", "link_kind": "album"}, "POST", "/api/requests", {"kind": "link", "url": "https://youtu.be/example", "link_kind": "album"}),
+    ("request_music", {"kind": "album", "artist": "Moor Mother", "album": "Jazz Codes"}, "POST", "/api/requests", {"kind": "album", "artist": "Moor Mother", "album": "Jazz Codes"}),
     ("retry_job", {"id": "job", "stage": "processing"}, "POST", "/api/jobs/job/retry", {"stage": "processing"}),
     ("cancel_job", {"id": "job"}, "POST", "/api/jobs/job/cancel", {}),
     ("import_files", {"paths": ["Album/Sauna.m4a"]}, "POST", "/api/import", {"paths": ["Album/Sauna.m4a"]}),
-    ("wishlist", {}, "GET", "/api/wishlist", {}),
-    ("add_to_wishlist", {"artist": "Moor Mother", "album": "Jazz Codes"}, "POST", "/api/wishlist", {"artist": "Moor Mother", "album": "Jazz Codes"}),
+    ("list_requests", {}, "GET", "/api/requests", {}),
     ("reject_review", {"id": "job"}, "POST", "/api/jobs/job/reject", {}),
     ("request_approval_token", {"name": "reviewer", "can_approve": True}, "POST", "/api/agents/requests", {"name": "reviewer", "can_approve": True}),
     ("list_agent_tokens", {}, "GET", "/api/agents", {}),
@@ -68,7 +68,8 @@ def test_tools_use_exact_api_contract(bridge, name, args, method, path, payload)
 
 
 @pytest.mark.parametrize("name,args", [
-    ("enqueue", {}), ("enqueue", {"candidate_id": 5}), ("enqueue", {"candidate_id": "x", "approve": True}),
+    ("enqueue", {"candidate_id": "x"}), ("request_music", {"candidate_id": 5}), ("request_music", {"candidate_id": "x", "approve": True}),
+    ("request_music", {"kind": "playlist"}),
     ("retry_job", {"id": "x", "stage": "publish"}), ("search_music", {"source": "unsupported"}),
     ("library", {"page": True}), ("library", {"bpm_min": float("inf")}), ("library", {"page": 0}),
     ("import_files", {"paths": []}), ("import_files", {"paths": [1]}), ("import_files", {"paths": ["x"] * 101}),
@@ -128,7 +129,7 @@ def test_handshake_registry_notifications_and_invalid_requests(bridge):
     initialize(instance)
     assert instance.handle({"jsonrpc": "2.0", "id": 2, "method": "ping"})["result"] == {}
     registry = instance.handle({"jsonrpc": "2.0", "id": 3, "method": "tools/list"})["result"]["tools"]
-    assert len(registry) == 21
+    assert len(registry) == 19
     assert [item["name"] for item in registry if "approve" in item["name"] or "reject" in item["name"]] == ["approve_review", "reject_review"]
     assert not any(any(word in item["name"] for word in ["publish", "delete", "sharing"]) for item in registry)
     for item in registry:

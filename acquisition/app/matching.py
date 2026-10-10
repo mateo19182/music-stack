@@ -40,17 +40,76 @@ def numbers(name):
 
 
 def in_library(navidrome_db):
-    """Navidrome's present tracks per album: album_id → keys of title (with and without brackets), artists, track ids."""
+    """Navidrome's present tracks per album: album_id → keys of title (with and without brackets),
+    artists, track ids, and track titles (artist key, title key) for single-track requests."""
     db = sqlite3.connect(f'file:{navidrome_db}?mode=ro', uri=True)
     albums = {}
-    for id, album_id, album, artist, album_artist in db.execute(
-            'select id, album_id, album, artist, album_artist from media_file '
+    for id, album_id, album, artist, album_artist, title in db.execute(
+            'select id, album_id, album, artist, album_artist, title from media_file '
             'where missing = 0 order by album_id, disc_number, track_number, path'):
         a = albums.setdefault(album_id, {'keys': {album_key(album), album_key(re.sub(r'\s*[\(\[].*?[\)\]]', '', album))} - {''},
-                                         'numbers': numbers(album), 'artists': set(), 'tracks': []})
+                                         'numbers': numbers(album), 'artists': set(), 'tracks': [], 'titles': set()})
         a['artists'].update({key(artist), key(album_artist)} - {''})
         a['tracks'].append(id)
+        a['titles'].add(track_key(title))
     return albums
+
+
+def track_key(title):
+    """A track title without "(feat. X)" and other bracketed credits, but with a version that
+    makes it another recording ("(Remix)", "(Live)")."""
+    title = str(title or '')
+    kept = [m for m in re.findall(r'[\(\[](.*?)[\)\]]', title) if re.search('|'.join(UNWANTED + ('edit', 'mix', 'version', 'vip')), m, re.I)]
+    return key(re.sub(r'\s*[\(\[].*?[\)\]]', '', title) + ' '.join(kept))
+
+
+def library_has_track(library, item):
+    artist, wanted = key(clean_artist(item['artist'])), track_key(item.get('title'))
+    return bool(wanted) and any(wanted in a.get('titles', ()) and artist_matches(artist, a['artists']) for a in library.values())
+
+
+def ranked_tracks(results, artist, title, avoid=(), limit=8):
+    """Search results that are this recording, best first: quality, then availability. A file
+    must carry every word of the title and the artist (in its path or tags), and no version
+    word ("remix", "live", "instrumental"...) the request does not have."""
+    title_words = [w for w in words(re.sub(r'\s*[\(\[]\s*(feat|ft|with)\b.*?[\)\]]', '', title, flags=re.I)) if w not in FILLER] or words(title)
+    artist_words = [w for w in words(clean_artist(artist)) if w not in FILLER]
+    best, seen = [], set()
+    scored = []
+    for c in results:
+        if c.get('kind') != 'track' or quality(c) is None or provider(c) in avoid:
+            continue
+        name = PATH_STEM.sub('', str(c.get('filename') or '').replace('\\', '/').rsplit('/', 1)[-1]) if c.get('source') == 'soulseek' else str(c.get('title') or '')
+        context = ' '.join(str(c.get(k) or '') for k in ('filename', 'artist', 'uploader', 'title', 'album'))
+        named, around = words(name), words(context)
+        if not all(any(close(t, w) for w in named) for t in title_words):
+            continue
+        if artist_words and not all(any(close(a, w) for w in around) for a in artist_words):
+            continue
+        if any(re.search(r'\b' + re.escape(u) + r'(?:e?s)?\b', name.casefold()) and u not in title.casefold() for u in UNWANTED):
+            continue
+        # Brackets ("(feat. X)", "[320]") and the track number aside, the name is the title and
+        # perhaps the artist: "Sauna Time" is another song.
+        bare = words(re.sub(r'\s*[\(\[].*?[\)\]]', '', name))
+        extra = [w for w in bare if not w.isdigit() and w not in FILLER and not any(close(w, t) for t in title_words + artist_words)]
+        if len(extra) > (1 if len(title_words) >= 4 else 0):
+            continue
+        scored.append((len(extra), c))
+    scored.sort(key=lambda x: (-quality(x[1]), availability(x[1])[0], x[0], availability(x[1])[1]))
+    for _, c in scored:
+        who = provider(c)
+        if who not in seen:
+            seen.add(who)
+            best.append(c)
+    return best[:limit]
+
+
+def is_youtube(c):
+    """A copy that comes from YouTube (yt-dlp also fetches Bandcamp, SoundCloud and Vimeo links)."""
+    if c.get('source') != 'youtube':
+        return False
+    host = re.sub(r'^https?://', '', str(c.get('url') or '')).split('/', 1)[0].lower()
+    return not host or host.endswith(('youtube.com', 'youtu.be'))
 
 
 def artist_matches(wanted, credited):
@@ -119,6 +178,7 @@ def superseded(item, everything):
     return False
 
 
+PATH_STEM = re.compile(r'\.[a-z0-9]{2,4}$', re.I)
 NOISE = re.compile(r"\b(?:19|20)\d\d\b|\b(?:flac|mp3|aac|m4a|alac|wav|aiff|ogg|opus|web|cd|vinyl|lp|ep|"
                    r"\d+\s*bit|\d+(?:\.\d+)?\s*khz|\d{3}\s*(?:kbps|k)|kbps|lossless|hi\s*res|24bit|16bit|deluxe edition|"
                    r"remaster(?:ed)?|album|ost|pmedia|dash)\b|[\(\[\{][^\)\]\}]*[\)\]\}]|⭐️", re.I)

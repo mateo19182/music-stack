@@ -151,17 +151,16 @@ async function busy(button, fn) {
 function showTab(tab) {
   if (["review", "inbox"].includes(tab)) tab = "activity";
   state.tab = tab;
-  for (const name of ["search", "activity", "wishlist", "library"]) {
+  for (const name of ["search", "activity", "library"]) {
     $(`#${name}-view`).hidden = name !== tab;
     const navButton = $(`nav [data-tab="${name}"]`);
     navButton.classList.toggle("selected", name === tab);
     navButton.setAttribute("aria-current", name === tab ? "page" : "false");
   }
   if (tab === "activity")
-    Promise.all([loadJobs(), loadReview()]).catch((e) =>
+    Promise.all([loadJobs(), loadReview(), loadWishlist()]).catch((e) =>
       toast(e.message, true),
     );
-  if (tab === "wishlist") loadWishlist().catch((e) => toast(e.message, true));
   if (tab === "library") {
     loadLibrary().catch((e) => toast(e.message, true));
     if (state.isAdmin) {
@@ -270,7 +269,7 @@ function renderResults(data) {
       results
         .map(
           (r) =>
-            `<article class="result-row"><div class="track-info"><h3>${esc(r.title || r.filename || r.album || "Untitled")}</h3>${meta([r.artist, r.album])}${searchLibraryHint(r)}${resultSourceLink(r)}<details class="source-details"><summary>${esc(sourceLabel(r.source))} · ${esc(r.username || r.uploader || r.provider || "Source details")}</summary>${meta([r.provider, r.seeders != null ? `${r.seeders} seeders` : "", r.queue_length != null ? `Queue ${r.queue_length}` : "", r.free_slots != null ? `${r.free_slots} free slots` : "", bytes(r.size)])}${r.folder_complete === false ? '<p class="muted">The full album folder is checked when queued.</p>' : ""}${r.files?.length ? `<ul class="file-list">${r.files.map((f) => `<li>${esc(f.filename)} ${esc(bytes(f.size))}</li>`).join("")}</ul>` : ""}</details></div><div class="quality">${meta([r.format, r.bitrate ? `${r.bitrate} kbps` : "", duration(r.duration)])}${r.files?.length ? `<span class="muted">${esc(r.file_count || r.files.length)} files</span>` : ""}</div><button class="quiet" data-enqueue="${esc(r.id)}" ${state.queuedCandidates.has(r.id) ? 'disabled data-queued="true"' : ""}>${state.queuedCandidates.has(r.id) ? "Queued" : "Queue"}</button></article>`,
+            `<article class="result-row"><div class="track-info"><h3>${esc(r.title || r.filename || r.album || "Untitled")}</h3>${meta([r.artist, r.album])}${searchLibraryHint(r)}${resultSourceLink(r)}<details class="source-details"><summary>${esc(sourceLabel(r.source))} · ${esc(r.username || r.uploader || r.provider || "Source details")}</summary>${meta([r.provider, r.seeders != null ? `${r.seeders} seeders` : "", r.queue_length != null ? `Queue ${r.queue_length}` : "", r.free_slots != null ? `${r.free_slots} free slots` : "", bytes(r.size)])}${r.folder_complete === false ? '<p class="muted">The full album folder is checked when queued.</p>' : ""}${r.files?.length ? `<ul class="file-list">${r.files.map((f) => `<li>${esc(f.filename)} ${esc(bytes(f.size))}</li>`).join("")}</ul>` : ""}</details></div><div class="quality">${meta([r.format, r.bitrate ? `${r.bitrate} kbps` : "", duration(r.duration)])}${r.files?.length ? `<span class="muted">${esc(r.file_count || r.files.length)} files</span>` : ""}</div><button class="quiet" data-enqueue="${esc(r.id)}" ${state.queuedCandidates.has(r.id) ? 'disabled data-queued="true"' : ""}>${state.queuedCandidates.has(r.id) ? "Requested" : "Get this"}</button></article>`,
         )
         .join("") +
       "</div>"
@@ -317,6 +316,7 @@ async function loadJobs() {
   const visibleJobs = state.jobs.filter(
     (j) =>
       j.stage !== "review" &&
+      !j.request?.wishlist_id &&
       ($("#show-history").checked ||
         !["published", "rejected", "cancelled"].includes(j.stage)),
   );
@@ -328,7 +328,7 @@ async function loadJobs() {
             `<article class="card"><div class="card-head"><div><span class="badge ${esc(j.stage)}">${esc({ process_queued: "Waiting to process", publish_queued: "Waiting to publish", review: "Ready for review", published: "In library", queued: "Queued", undone: "Taken back" }[j.stage] || j.stage.replaceAll("_", " "))}</span><h3>${esc(jobTitle(j))}</h3>${meta([sourceLabel(j.source), j.created_at ? new Date(j.created_at).toLocaleString() : ""])}</div></div>${["queued", "downloading", "process_queued", "processing", "publish_queued", "publishing"].includes(j.stage) ? `<progress ${Number.isFinite(Number(j.progress)) && j.progress != null ? `value="${Math.max(0, Math.min(100, Number(j.progress)))}" max="100"` : ""}></progress>` : ""}${j.detail ? `<p class="muted">${esc(typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail))}</p>` : ""}${j.error ? `<p class="error">${esc(j.error)}</p><p class="muted">${esc(j.resume_stage === "publishing" ? "Retry adding to the library. Your approved edits are saved." : j.failed_stage === "processing" || j.source === "existing" ? "The download is saved. Retry processing without downloading again." : "Retry this source to resume. If the uploader is unavailable, search for another copy.")}</p>` : ""}<div class="actions">${j.stage === "review" ? `<button data-tab="review">Review download</button>` : ["failed", "cancelled"].includes(j.stage) ? `<button data-retry="${esc(j.id)}" data-stage="${j.resume_stage === "publishing" ? "publishing" : j.failed_stage === "processing" || j.source === "existing" ? "processing" : "download"}">Retry ${j.resume_stage === "publishing" ? "publishing" : j.failed_stage === "processing" || j.source === "existing" ? "processing" : "download"}</button>` : ""}${["queued", "downloading", "process_queued", "processing"].includes(j.stage) ? `<button class="quiet" data-cancel="${esc(j.id)}">Cancel</button>` : ""}</div>${j.stage === "published" && j.skipped_count ? `<p class="muted">${j.skipped_count} unselected track${j.skipped_count === 1 ? "" : "s"} kept privately.</p>` : ""}${j.stage === "published" && (j.files || []).length ? `<details><summary>${j.files.length} published file${j.files.length === 1 ? "" : "s"}</summary>${j.files.map((f) => `<p class="muted">${esc(f.title || f.filename || "Track")}</p><div class="actions">${downloads(f)}</div>`).join("")}</details>` : ""}</article>`,
         )
         .join("")
-    : '<div class="empty">No downloads in progress.</div>';
+    : '<div class="empty">Nothing here.</div>';
 }
 const RECENT_DAYS = 7;
 function renderRecent() {
@@ -482,8 +482,8 @@ $("#search-form").addEventListener("submit", (e) => {
   busy(e.submitter, async () => {
     const input = formData(e.target);
     if (/^https?:\/\//i.test(input.query.trim())) {
-      await api("/api/url", { url: input.query.trim(), kind: input.kind });
-      toast("Link queued.");
+      await api("/api/requests", { kind: "link", url: input.query.trim(), link_kind: input.kind });
+      toast("Link requested.");
       showTab("activity");
       return;
     }
@@ -502,8 +502,9 @@ $("#search-form").addEventListener("submit", (e) => {
 $("#url-form").addEventListener("submit", (e) => {
   e.preventDefault();
   busy(e.submitter, async () => {
-    await api("/api/url", formData(e.target));
-    toast("URL queued.");
+    const form = formData(e.target);
+    await api("/api/requests", { kind: "link", url: form.url, link_kind: form.kind });
+    toast("Link requested.");
     showTab("activity");
   });
 });
@@ -573,7 +574,7 @@ document.addEventListener("change", (e) => {
   }
 });
 $("#refresh-jobs").addEventListener("click", (e) =>
-  busy(e.target, () => Promise.all([loadJobs(), loadReview()])),
+  busy(e.target, () => Promise.all([loadJobs(), loadReview(), loadWishlist()])),
 );
 document.addEventListener("click", (e) => {
   document.querySelectorAll(".more-actions[open]").forEach((menu) => {
@@ -591,7 +592,7 @@ document.addEventListener("click", (e) => {
     !state.queuedCandidates.has(button.dataset.enqueue)
   )
     busy(button, async () => {
-      await api("/api/jobs", {
+      await api("/api/requests", {
         candidate_id: button.dataset.enqueue,
         ...Object.fromEntries(
           ["artist", "title", "album"].map((name) => [
@@ -600,11 +601,10 @@ document.addEventListener("click", (e) => {
           ]),
         ),
       });
-      toast("Download queued.");
-      button.textContent = "Queued";
+      toast("Requested. This copy is tried first; if it fails, others are searched.");
+      button.textContent = "Requested";
       button.dataset.queued = "true";
       state.queuedCandidates.add(button.dataset.enqueue);
-      await loadJobs();
     });
   else if (button.dataset.retry)
     busy(button, async () => {
@@ -624,7 +624,7 @@ document.addEventListener("click", (e) => {
   else if (button.dataset.cancel)
     busy(button, async () => {
       await api(`/api/jobs/${path(button.dataset.cancel)}/cancel`, {});
-      await loadJobs();
+      await Promise.all([loadJobs(), loadWishlist()]);
     });
   else if (button.dataset.editTags) {
     const row = button.closest(".library-row");
@@ -1564,15 +1564,20 @@ function wishRow(i) {
     : "";
   const when = i.status === "wanted" && i.next_search_at && i.next_search_at * 1000 > Date.now()
     ? `Next search ${relativeTime(i.next_search_at)}` : i.searched_at ? `Searched ${relativeTime(i.searched_at)}` : "";
+  const downloading = job && ["queued", "downloading"].includes(job.stage);
   const actions = [
-    ["not_found", "gave_up", "skipped", "wanted"].includes(i.status) && !job ? `<button class="quiet" data-wish-retry="${esc(i.id)}">Search again</button>` : "",
-    !["have", "skipped"].includes(i.status) && !job ? `<button class="quiet" data-wish-skip="${esc(i.id)}">Skip</button>` : "",
+    job && job.stage === "review" ? `<button data-tab="review">Review</button>` : "",
+    downloading ? `<button class="quiet" data-cancel="${esc(job.id)}" title="Stop this copy; the next one is tried">Try another copy</button>` : "",
+    ["not_found", "gave_up", "skipped", "wanted"].includes(i.status) && !job ? `<button class="quiet" data-wish-retry="${esc(i.id)}">${i.kind === "link" ? "Try again" : "Search again"}</button>` : "",
+    !["have", "skipped"].includes(i.status) ? `<button class="quiet" data-wish-skip="${esc(i.id)}">Stop</button>` : "",
     `<button class="quiet" data-wish-remove="${esc(i.id)}">Remove</button>`,
   ].join("");
-  return `<article class="card wish-row"><div class="card-head"><div><span class="badge ${WISH_BADGE[i.status] || ""}">${esc(WISH_LABELS[i.status] || i.status)}</span>${i.star ? ' <span class="badge">★</span>' : ""}<h3>${esc(i.artist)} — ${esc(i.album)}</h3>${meta([i.note, when])}</div></div>${job && job.progress != null && ["downloading", "queued"].includes(job.stage) ? `<progress value="${Math.max(0, Math.min(100, Number(job.progress) || 0))}" max="100"></progress>` : ""}${next}${rejected}${tried}<div class="actions">${actions}</div></article>`;
+  const kind = { album: "Album", track: "Track", link: "Link" }[i.kind] || "";
+  const title = i.kind === "link" ? i.name : `${i.artist ? `${i.artist} — ` : ""}${i.name}`;
+  return `<article class="card wish-row"><div class="card-head"><div><span class="badge ${WISH_BADGE[i.status] || ""}">${esc(WISH_LABELS[i.status] || i.status)}</span>${i.star ? ' <span class="badge">★</span>' : ""}<h3>${esc(title)}</h3>${meta([kind, i.upgrading ? "looking for lossless weekly" : "", i.note, when])}</div></div>${downloading && job.progress != null ? `<progress value="${Math.max(0, Math.min(100, Number(job.progress) || 0))}" max="100"></progress>` : ""}${next}${rejected}${tried}<div class="actions">${actions}</div></article>`;
 }
 async function loadWishlist() {
-  const data = await api("/api/wishlist");
+  const data = await api("/api/requests");
   state.wishlist = data;
   const lists = $("#wish-filter-list");
   const chosen = lists.value;
@@ -1598,17 +1603,20 @@ function renderWishlist() {
   for (const i of items) (byList[i.list] ||= []).push(i);
   $("#wishlist").innerHTML = Object.keys(byList).length
     ? Object.entries(byList).map(([name, rows]) => `<div class="section-title"><h2>${esc(name)} <span class="muted">${rows.length}</span></h2></div>${rows.map(wishRow).join("")}`).join("")
-    : `<p class="muted">${data.items.length ? "Nothing matches these filters." : "No albums yet. Add one above."}</p>`;
+    : `<p class="muted">${data.items.length ? "Nothing matches these filters." : "No requests yet. Add one above, or pick a copy in Search."}</p>`;
 }
 $("#wish-filter-list").addEventListener("change", renderWishlist);
 $("#wish-filter-status").addEventListener("change", renderWishlist);
-$("#refresh-wishlist").addEventListener("click", (e) => busy(e.currentTarget, loadWishlist));
+$("#wish-kind").addEventListener("change", (e) => {
+  $("#wish-name-label").textContent = e.target.value === "album" ? "Album" : "Title";
+});
 $("#wishlist-form").addEventListener("submit", (e) => {
   e.preventDefault();
   const form = e.currentTarget;
   busy(form.querySelector("button"), async () => {
-    const item = await api("/api/wishlist", { artist: $("#wish-artist").value, album: $("#wish-album").value, list: $("#wish-list").value });
-    toast(`Added ${item.album}. It will be searched shortly.`);
+    const kind = $("#wish-kind").value;
+    const item = await api("/api/requests", { kind, artist: $("#wish-artist").value, [kind === "album" ? "album" : "title"]: $("#wish-album").value, list: $("#wish-list").value });
+    toast(`Requested ${item.name}. It will be searched shortly.`);
     $("#wish-artist").value = "";
     $("#wish-album").value = "";
     await loadWishlist();
@@ -1621,10 +1629,10 @@ document.addEventListener("click", (e) => {
     : button.dataset.wishSkip ? ["skip", button.dataset.wishSkip] : ["remove", button.dataset.wishRemove];
   busy(button, async () => {
     await api(`/api/wishlist/${path(id)}/${action}`, {});
-    toast({ retry: "Searching again shortly.", skip: "Skipped.", remove: "Removed from the wishlist." }[action]);
+    toast({ retry: "Trying again shortly.", skip: "Stopped.", remove: "Request removed." }[action]);
     await loadWishlist();
   });
 });
 setInterval(() => {
-  if (state.tab === "wishlist" && !document.hidden) loadWishlist().catch(() => {});
+  if (state.tab === "activity" && !document.hidden) loadWishlist().catch(() => {});
 }, 20000);
