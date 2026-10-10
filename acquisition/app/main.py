@@ -29,6 +29,7 @@ from .sharing import Sharing
 from .llm_review import Reviewer, ReviewError
 from .review_summary import summarize
 from .review_questions import plan as review_plan
+from .review_decider import Decider
 
 log = logging.getLogger("acquisition")
 CONFIG_PATH = Path(os.environ.get("ACQUISITION_CONFIG", "/state/config.json"))
@@ -183,6 +184,15 @@ def paused_sources(stages):
 _review_sightings = {}
 
 
+def decide_open_reviews():
+    """At start: reviews from before the review model, or left while it was unreachable."""
+    for job in store.list("jobs", "stage='review'"):
+        try:
+            model_decide(job["id"])
+        except Exception:
+            log.exception("Review model failed for job %s; it stays in Review", job["id"])
+
+
 def needs_you_alerts(send=None):
     """Telegram, once each: uploaders asking for a human check, and downloads waiting for review."""
     send = send or (lambda text: telegram(config, text))
@@ -259,6 +269,7 @@ def soulseek_watcher():
 
 
 match_judge = Judge(config)
+review_decider = Decider(config)
 wishlist = Wishlist(store, config, lambda: Sources(config), lambda candidate, user: enqueue(candidate, user),
                     soulseek_ready=lambda: soulseek_health.ready(), youtube_ready=lambda: config.get("youtube_enabled", True) and _premium["working"] is True,
                     youtube_enabled=lambda: config.get("youtube_enabled", True), judge=match_judge if match_judge.enabled else None)
@@ -797,7 +808,8 @@ def worker(stages=("queued", "process_queued", "publish_queued")):
                     progress=100,
                 )
                 try:
-                    auto_add(id)
+                    later = auto_add(id)
+                    model_decide(later or id)
                 except Exception:
                     log.exception("Automatic adding failed for job %s; it stays in Review", id)
             else:
@@ -987,6 +999,7 @@ async def lifespan(app):
     if config.get("wishlist_enabled", True):
         worker_threads.append(threading.Thread(target=wishlist_worker, name="wishlist", daemon=True))
     worker_threads.append(threading.Thread(target=advice_worker, name="advice-worker", daemon=True))
+    worker_threads.append(threading.Thread(target=decide_open_reviews, name="review-model", daemon=True))
     worker_threads.append(threading.Thread(target=library_index_worker, name="library-index", daemon=True))
     if config.get("analysis_hour", 4) is not None:
         worker_threads.append(threading.Thread(target=analysis_scheduler, name="analysis-scheduler", daemon=True))
@@ -1735,9 +1748,7 @@ def auto_add(id):
     if not auto_add_settings(job["owner"])["import" if job.get("source") == "existing" else "search"]:
         return None
     records = store.list("files", "job_id=? AND published=0", (id,))
-    plans = {r["id"]: review_plan({**r, "possible_duplicates": [
-        {**v, "replaceable": Path(v["path"]).resolve().is_relative_to(LIBRARY)} if v.get("path") else v
-        for v in r.get("possible_duplicates", [])]}, len(records)) for r in records}
+    plans = review_plans(records)
     selected = {i for i, p in plans.items() if p["action"] in {"add", "replace"}}
     later = {i for i, p in plans.items() if p["action"] == "ask"}
     if not selected:
@@ -1748,6 +1759,58 @@ def auto_add(id):
                for r in records if plans[r["id"]]["action"] == "replace"}
     return publish_selection(job, records, selected, later, {}, "auto", replace,
                              detail="Added automatically; nothing needed checking")
+
+
+def review_plans(records):
+    return {r["id"]: review_plan({**r, "possible_duplicates": [
+        {**v, "replaceable": Path(v["path"]).resolve().is_relative_to(LIBRARY)} if v.get("path") else v
+        for v in r.get("possible_duplicates", [])]}, len(records)) for r in records}
+
+
+def model_decide(id):
+    """The review model answers what automatic adding left open; only what it is unsure of stays
+    in Review. Same owner setting as automatic adding; each job is asked once."""
+    job = store.get("jobs", id)
+    if not job or job["stage"] != "review" or job.get("model_decisions") is not None or not review_decider.enabled:
+        return None
+    if not auto_add_settings(job["owner"])["import" if job.get("source") == "existing" else "search"]:
+        return None
+    records = store.list("files", "job_id=? AND published=0", (id,))
+    plans = review_plans(records)
+    if not records or any(p["action"] != "ask" for p in plans.values()):
+        return None   # automatic adding settles those first
+    decisions = review_decider.decide(job, records, plans)
+    if decisions is None:
+        return None   # the model could not be asked: the owner decides
+    by_id = {r["id"]: r for r in records}
+    replace = {}
+    for file_id, decision in decisions.items():
+        if decision["action"] == "replace":
+            paths = [v["path"] for v in decision["replace"]
+                     if v.get("path") and Path(v["path"]).resolve().is_relative_to(LIBRARY)]
+            if paths:
+                replace[by_id[file_id]["path"]] = paths
+            else:
+                decision.update(action="unsure", reason="Only library copies can be replaced. " + decision["reason"])
+    job["model_decisions"] = {i: {"action": d["action"], "reason": d["reason"]} for i, d in decisions.items()}
+    store.update_job(id, model_decisions=job["model_decisions"])
+    selected = {i for i, d in decisions.items() if d["action"] in {"add", "replace"}}
+    later = {i for i, d in decisions.items() if d["action"] == "unsure"}
+    said = lambda ids: "; ".join(f"{by_id[i].get('title') or Path(by_id[i]['path']).name}: {decisions[i]['reason']}"
+                                 for i in ids)[:600]
+    unsure = "The review model was unsure: " + said(later)
+    if not selected:
+        if later:
+            store.update_job(id, detail=unsure)
+        else:
+            store.transition_job(id, {"review"}, "rejected", detail="Skipped by the review model: " + said(decisions),
+                                 auto_skipped=True)
+        return None
+    later_id = publish_selection(job, records, selected, later, {}, f"model:{review_decider.model}", replace,
+                                 detail="Decided by the review model: " + said(selected))
+    if later_id:
+        store.update_job(later_id, detail=unsure)
+    return later_id
 
 
 def split_review(job, records):

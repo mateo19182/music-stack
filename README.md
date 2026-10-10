@@ -53,8 +53,12 @@ SoundCloud, Bandcamp and Vimeo URLs are supported.
    same album; a same-titled track on another album with another length is added
    alongside it.
 4. With automatic adding on (Requests, separately for requests and inbox
-   imports), tracks with nothing to decide go straight into the library.
-   **Needs you** then holds only questions, each with one-click answers:
+   imports), tracks with nothing to decide go straight into the library. The
+   open questions below go to a strong model first (`review_model`, default
+   `openai/gpt-6-luna` at high effort, through OpenRouter); it adds, replaces or
+   skips each track from the metadata and your rules (best copy only, skip
+   instrumentals, keep other versions), and its reason is kept on the job.
+   **Needs you** then holds only what the model was unsure of, each with one-click answers:
    - a missing artist or title
    - a file that names a different song than the one searched for
    - one recording over 20 minutes

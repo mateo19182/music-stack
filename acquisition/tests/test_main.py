@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 import hashlib, importlib, json, threading, time
 from pathlib import Path
 from unittest.mock import Mock
@@ -710,6 +711,46 @@ def test_auto_add_publishes_only_tracks_without_questions(backend, monkeypatch):
     assert review[0]["files"][0]["plan"]["questions"] == [{"kind": "missing", "fields": ["title"]}]
     assert client.post(f"/api/jobs/{later}/skip", json={"file_ids": ["unnamed"]}).json() == {"ok": True}
     assert main.store.get("jobs", later)["stage"] == "rejected"
+
+
+def test_the_review_model_decides_open_questions_and_leaves_only_its_doubts(backend, monkeypatch):
+    main, client = backend
+    signin(main, client, monkeypatch)
+    client.post("/api/settings/auto-add", json={"search": True, "import": False})
+    old = main.LIBRARY / "Overmono" / "Good Lies" / "Good Lies.mp3"
+    old.parent.mkdir(parents=True, exist_ok=True)
+    old.write_bytes(b"old")
+    candidate = {"source": "soulseek", "requested_artist": "Overmono", "requested_album": "Good Lies"}
+    main.store.put("jobs", "open", {"candidate": candidate, "source": "soulseek", "label": "Good Lies", "prepared": []},
+                   owner="mateo", stage="review", created_at="2026-01-01")
+    library = {"artist": "Overmono", "title": "Good Lies", "album": "Good Lies", "format": "MP3", "bitrate": 320,
+               "duration": 226, "path": str(old)}
+    for id, title, duration in (("edit", "Good Lies", 160), ("vague", "Calling Out", 300), ("inst", "Is U (Instrumental)", 200)):
+        path = main.STATE / f"{id}.flac"
+        path.write_bytes(b"audio")
+        main.store.put("files", id, {"artist": "Overmono", "title": title, "album": "Good Lies", "format": "FLAC",
+                                     "bitrate": 900, "duration": duration, "candidate": candidate,
+                                     "possible_duplicates": [{**library, "title": title}]},
+                       job_id="open", owner="mateo", published=0, path=str(path))
+    asked = []
+
+    def decide(job, records, plans):
+        asked.append(sorted(r["id"] for r in records))
+        return {"edit": {"action": "replace", "replace": [library], "reason": "same recording, lossless"},
+                "vague": {"action": "unsure", "replace": [], "reason": "two versions fit"},
+                "inst": {"action": "skip", "replace": [], "reason": "an instrumental"}}
+
+    monkeypatch.setattr(main, "review_decider", SimpleNamespace(enabled=True, model="test-model", decide=decide))
+    later = main.model_decide("open")
+    job = main.store.get("jobs", "open")
+    assert job["stage"] == "publish_queued" and job["approved_by"] == "model:test-model"
+    assert job["selected_paths"] == [str(main.STATE / "edit.flac")]
+    assert job["replace"] == {str(main.STATE / "edit.flac"): [str(old)]}
+    left = main.store.get("jobs", later)
+    assert left["stage"] == "review" and "two versions fit" in left["detail"]
+    assert [r["id"] for r in main.store.list("files", "job_id=?", (later,))] == ["vague"]
+    # Each review is asked once: what the model was unsure of is the owner's.
+    assert main.model_decide(later) is None and asked == [["edit", "inst", "vague"]]
 
 
 def test_undo_returns_tracks_to_review_and_restores_replaced_versions(backend, monkeypatch):
