@@ -8,6 +8,8 @@ import re
 
 LONG_SECONDS = 20 * 60
 SAME_RECORDING_SECONDS = 3
+# Copies of one album track from different sources differ by silence or a video intro.
+SAME_ALBUM_SECONDS = 20
 LOSSLESS = {'flac', 'alac', 'wav', 'aiff', 'ape', 'wavpack', 'pcm_s16le', 'pcm_s24le', 'pcm_s16be', 'pcm_s24be'}
 
 
@@ -33,16 +35,38 @@ def better(new, old):
     return not new_lossless and new_rate >= old_rate * 1.25 and new_rate > 0
 
 
-def version_plan(record, versions):
-    """'replace' or 'skip' when the library copies are the same recording, else 'ask'."""
+def same_recording(record, versions):
+    """The library copies that are this recording, or None when that is unclear.
+
+    A same-titled track on another album with a different length is another
+    recording, so it is ignored and the new track is added alongside it.
+    """
     duration = record.get('duration') or 0
-    if not versions or not duration or any(
-            abs((v.get('duration') or 0) - duration) > SAME_RECORDING_SECONDS for v in versions):
-        return 'ask' if versions else None
+    if versions and not duration:
+        return None
+    album = (record.get('proposed_tags') or record.get('proposed') or {}).get('album') or record.get('album')
+    same = []
+    for version in versions:
+        gap = abs((version.get('duration') or 0) - duration)
+        on_album = _same(album, version.get('album'))
+        if gap <= SAME_RECORDING_SECONDS or (on_album and gap <= SAME_ALBUM_SECONDS):
+            same.append(version)
+        elif on_album or not (album and version.get('album')):
+            return None
+    return same
+
+
+def version_plan(record, versions):
+    """'replace' or 'skip' when library copies are the same recording, 'ask' when unclear."""
+    same = same_recording(record, versions)
+    if same is None:
+        return 'ask'
+    if not same:
+        return None
     bitrate = record.get('bitrate') or 0
     new = _quality(record.get('format'), bitrate / 1000 if bitrate > 10000 else bitrate)
-    if all(better(new, _quality(v.get('format'), v.get('bitrate'))) for v in versions):
-        return 'replace' if all(v.get('replaceable') for v in versions) else 'ask'
+    if all(better(new, _quality(v.get('format'), v.get('bitrate'))) for v in same):
+        return 'replace' if all(v.get('replaceable') for v in same) else 'ask'
     return 'skip'
 
 
@@ -72,4 +96,6 @@ def plan(record, track_count=1):
         return {'action': 'ask', 'questions': found}
     if action == 'skip':
         return {'action': 'skip', 'reason': 'not-better', 'questions': []}
+    if action == 'replace':
+        return {'action': 'replace', 'replace': same_recording(record, versions), 'questions': []}
     return {'action': action or 'add', 'questions': []}

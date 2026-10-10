@@ -1737,7 +1737,7 @@ def auto_add(id):
         if not later:
             store.transition_job(id, {"review"}, "rejected", detail="Nothing new: every track is already in your library", auto_skipped=True)
         return None
-    replace = {r["path"]: [v["path"] for v in r.get("possible_duplicates", []) if v.get("path")]
+    replace = {r["path"]: [v["path"] for v in plans[r["id"]]["replace"] if v.get("path")]
                for r in records if plans[r["id"]]["action"] == "replace"}
     return publish_selection(job, records, selected, later, {}, "auto", replace,
                              detail="Added automatically; nothing needed checking")

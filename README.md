@@ -47,6 +47,9 @@ SoundCloud, Bandcamp and Vimeo URLs are supported.
    of library tracks are skipped. A copy of the same recording that is clearly
    better (lossless over lossy, or at least 25% higher bitrate) replaces the
    library version, which moves to a trash folder; an equal or worse copy is skipped.
+   It counts as the same recording within 3 seconds, or within 20 seconds on the
+   same album; a same-titled track on another album with another length is added
+   alongside it.
 4. With automatic adding on (Requests, separately for requests and inbox
    imports), tracks with nothing to decide go straight into the library.
    **Needs you** then holds only questions, each with one-click answers:

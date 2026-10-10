@@ -42,3 +42,18 @@ def test_unclear_versions_are_asked():
     # Files outside the managed library are never replaced.
     assert plan(track(possible_duplicates=[library(replaceable=False)]))['action'] == 'ask'
 
+
+
+def test_album_decides_between_another_copy_and_another_recording():
+    on_album = library(album='Hill Climber', duration=180)
+    # The same album track a few seconds longer, e.g. from a video with an intro.
+    decided = plan(track(album='Hill Climber (Remastered)', possible_duplicates=[on_album]))
+    assert decided['action'] == 'replace' and decided['replace'] == [on_album]
+    # A same-titled track on another album with another length is added alongside.
+    other = library(album='Live at Madison Square Garden', duration=260)
+    assert plan(track(album='Hill Climber', possible_duplicates=[other])) == {'action': 'add', 'questions': []}
+    # Only the copy on this album is replaced.
+    assert plan(track(album='Hill Climber', possible_duplicates=[on_album, other]))['replace'] == [on_album]
+    # Too far apart even on the same album, or no album to compare, is still asked.
+    assert plan(track(album='Hill Climber', possible_duplicates=[library(album='Hill Climber', duration=240)]))['action'] == 'ask'
+    assert plan(track(possible_duplicates=[library(album='Hill Climber', duration=260)]))['action'] == 'ask'
