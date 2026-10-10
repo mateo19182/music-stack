@@ -39,6 +39,8 @@ def test_publish_preserves_sources_tags_and_retry(tmp_path):
     assert pipeline.process([source], {}, 'job')[0]['duplicate']
     assert pipeline.process([source], {}, 'different-job')[0]['duplicate']
     assert len(list((tmp_path / 'library').rglob('*.mp3'))) == 1
+    # Only the library keeps the audio: no working copy is left behind.
+    assert [p.name for p in (tmp_path / 'state' / 'ingestion').rglob('working*')] == []
 
 
 def test_missing_analysis_tags_are_written(tmp_path):

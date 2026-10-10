@@ -377,6 +377,7 @@ class Ingestor:
                 # Provenance first allows a retry to recover after atomic audio publication.
                 _json(sidecar, record)
                 os.replace(temporary, destination)
+                work.unlink(missing_ok=True)   # the file is in place: the working copy is only a duplicate now
                 self._register(database, destination)
                 manifest[original] = record
                 known[original] = record
