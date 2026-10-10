@@ -299,21 +299,24 @@ def quality(c):
     return 2 if bitrate >= 256 else 1 if bitrate >= 192 else None
 
 
-SOURCE_ORDER = {'soulseek': 0, 'torrent': 1, 'youtube': 2}
 WELL_SEEDED = 3
 
 
-def source_order(c):
-    """Among copies of one quality: a seeded torrent first (they rarely fail once matched, while
-    Soulseek uploaders often never answer), then Soulseek, then thin torrents, then YouTube."""
-    if c.get('source') == 'torrent':
-        return 0 if (c.get('seeders') or 0) >= WELL_SEEDED else 2
-    return {'soulseek': 1, 'youtube': 3}.get(c.get('source'), 9)
+def availability(c):
+    """Among copies of one quality, who can deliver now goes first: a Soulseek uploader with a
+    free slot or a torrent with a few seeders, then queued uploaders, thin torrents, YouTube."""
+    source = c.get('source')
+    if source == 'torrent':
+        seeders = c.get('seeders') or 0
+        return (0 if seeders >= WELL_SEEDED else 2, -min(seeders, 50) / 50)
+    if source == 'soulseek':
+        return (0 if c.get('free_slots') else 1, min(c.get('queue_length') or 0, 50) / 50)
+    return (3 if source == 'youtube' else 9, 0)
 
 
 def ranked(results, album, artist, avoid=(), limit=8):
-    """Every result that is this album, best first: quality, then source_order, then each
-    source's own score (edition, free slot, seeders...)."""
+    """Every result that is this album, best first: quality, then availability, then each
+    source's own match score (edition, track count...)."""
     albums = [c for c in results if c.get('kind') == 'album' and c.get('source') == 'soulseek'
               and c.get('username') not in avoid and identity(c, album, artist)]
     exact = [c for c in albums if not extra_words(c, album, artist)] or albums
@@ -336,7 +339,7 @@ def ranked(results, album, artist, avoid=(), limit=8):
             scored.append((s, c))
     scored = [(s, c) for s, c in scored if quality(c) is not None]
     # A folder with an extra word ("Album Order") may be another record: after every exact copy of that quality.
-    scored.sort(key=lambda x: (-quality(x[1]), extra.get(id(x[1]), 0) > 0, source_order(x[1]), -x[0]))
+    scored.sort(key=lambda x: (-quality(x[1]), extra.get(id(x[1]), 0) > 0, availability(x[1])[0], -x[0]))
     best, seen = [], set()
     for s, c in scored:
         who = provider(c)

@@ -89,27 +89,18 @@ class Store:
                 (stage, json.dumps(data), id),
             )
 
-    def claim(self, stages=("queued", "process_queued", "publish_queued"), source_limits=None):
-        """Take the oldest job in these stages. A download from a limited source waits while
-        that many downloads from the source run, or while a download from the same uploader runs (one
-        slow uploader must not hold every slot); jobs behind it go ahead."""
-        limits = list((source_limits or {}).items())
-        limited = "".join(
-            " AND NOT (stage='queued' AND json_extract(data, '$.candidate.source')=? AND (("
-            "SELECT COUNT(*) FROM jobs AS running WHERE running.stage='downloading' "
-            "AND json_extract(running.data, '$.candidate.source')=?) >= ? OR EXISTS ("
-            "SELECT 1 FROM jobs AS running WHERE running.stage='downloading' "
-            "AND json_extract(running.data, '$.candidate.source')=? "
-            "AND json_extract(running.data, '$.candidate.username')=json_extract(jobs.data, '$.candidate.username'))))"
-            for _ in limits)
-        params = list(stages) + [value for source, limit in limits for value in (source, source, limit, source)]
+    def claim(self, stages=("queued", "process_queued", "publish_queued"), paused=()):
+        """Take the oldest job in these stages; downloads from a paused source wait."""
+        paused = list(paused)
+        skip = (" AND NOT (stage='queued' AND json_extract(data, '$.candidate.source') IN ("
+                + ",".join("?" for _ in paused) + "))") if paused else ""
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute(
                 "SELECT * FROM jobs WHERE stage IN ("
                 + ",".join("?" for _ in stages)
-                + ")" + limited + " ORDER BY created_at LIMIT 1",
-                params,
+                + ")" + skip + " ORDER BY created_at LIMIT 1",
+                list(stages) + paused,
             ).fetchone()
             if not row:
                 return None

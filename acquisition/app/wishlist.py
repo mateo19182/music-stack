@@ -1,11 +1,12 @@
-"""Albums the owner wants: search once, try the ranked candidates one by one, stop when it's in the library.
+"""Albums the owner wants. When one is added: search every source at once, sort what is the
+album by quality, try the best copy, and take the next one when a download fails.
 
-One rule replaces the blog batch's counters: when a download fails, take the next candidate
-from the list the last search produced. Search again only when the list is used up or older
-than FRESH (48 h). Two rounds without a successful download give up; an empty search waits a day.
+A list that runs out is searched again a day later, for a week. An album that came in lossy
+is searched once a week for a lossless copy, for four weeks; review replaces the lossy tracks.
 """
 from __future__ import annotations
 
+import concurrent.futures
 import hashlib
 import logging
 import secrets
@@ -19,19 +20,15 @@ from .sources import SourceError, SoulseekUnavailable, soulseek_query
 
 log = logging.getLogger("acquisition")
 
-FRESH = 12 * 3600            # search results older than this are stale: older lists sent us to offline uploaders
-NOT_FOUND_WAIT = 24 * 3600   # an album nobody shares today may be shared tomorrow
-RETRY_WAIT = 3600            # after a used-up list, search again this much later
-YOUTUBE_TITLE_FLOOR = 0.2     # 2026-10-09: right albums scored 0.23 and 0.40, same-titled ones by others 0.03-0.18
-MAX_ROUNDS = 2               # used-up or empty searches before giving up
-AHEAD = {"soulseek": 6, "torrent": 4, "youtube": 2}   # jobs waiting per source; more go stale
-QUEUE_CAP = 95               # the app refuses more than 100 unfinished jobs per owner
-# Errors that say nothing about the uploader; they do not count toward blocking one.
-TRANSIENT = ("wait timed out", "Soulseek is busy", "HTTP 503", "HTTP 502", "yt-dlp download failed")
-BLOCKING = ("banned this account", "download quota", "human check")
-UPLOADER_REST = 6 * 3600
+DAY = 24 * 3600
+SEARCH_AGAIN = DAY             # after a list runs out, or nothing was found
+SEARCHES = 7                   # a week of daily searches, then give up
+UPGRADE_EVERY = 7 * DAY        # an album that came in lossy: look for lossless this often
+UPGRADE_FOR = 28 * DAY         # ...for this long after it arrived
+LOSSLESS = 3                   # matching.quality of a lossless copy
+YOUTUBE_TITLE_FLOOR = 0.2      # 2026-10-09: right albums scored 0.23 and 0.40, same-titled ones by others 0.03-0.18
 ACTIVE = ("queued", "downloading", "process_queued", "processing", "publish_queued", "publishing")
-DONE = ("have", "not_found", "gave_up", "skipped")
+DONE = ("not_found", "gave_up", "skipped")
 
 
 def item_id(owner, list_name, artist, album):
@@ -81,8 +78,8 @@ class Wishlist:
             return existing
         item = {"id": id, "owner": owner, "artist": artist or "", "album": album or "", "list": list_name,
                 "status": "wanted", "note": "Waiting to search", "candidates": [], "tried": [], "rounds": 0,
-                "searched_at": None, "next_search_at": 0, "youtube_searched": False, "job_id": None,
-                "wrong_jobs": [], "added_at": self.clock(), **extra}
+                "searched_at": None, "next_search_at": 0, "job_id": None, "wrong_jobs": [],
+                "added_at": self.clock(), **extra}
         if not item["artist"] or not item["album"]:
             item.update(status="skipped", note="Not an album (needs an artist and an album)")
         elif item.get("skip"):
@@ -92,22 +89,21 @@ class Wishlist:
 
     def retry(self, item):
         item.update(status="wanted", rounds=0, next_search_at=0, candidates=[], searched_at=None,
-                    youtube_searched=False, note="Retry requested; searching again")
+                    note="Retry requested; searching again")
         self.save(item)
 
     # ---- the loop ------------------------------------------------------------------------
     def tick(self):
-        items = [i for i in self.items() if i.get("status") not in ("skipped",)]
+        items = [i for i in self.items() if i.get("status") != "skipped"]
         if not items:
             return
         library = self._library()
         jobs = {j["id"]: j for j in self.store.list("jobs")}
-        blocked = self._blocked(jobs.values())
         # A few searches per tick (each can take a minute): job updates for other albums stay prompt.
         self._searches_left = int(self.config.get("wishlist_searches_per_tick", 3))
         for item in items:
             try:
-                self._advance(item, library, jobs, blocked, items)
+                self._advance(item, library, jobs, items)
             except SoulseekUnavailable:
                 return   # the whole network is down: the health watchdog pauses downloads; try next tick
             except Exception:
@@ -119,11 +115,17 @@ class Wishlist:
             except Exception as exc:
                 log.warning("Wishlist playlist sync failed: %s", str(exc)[:200])
 
-    def _advance(self, item, library, jobs, blocked, everything):
-        if library is not None and matching.library_has(library, item):
-            if item["status"] != "have":
-                item.update(status="have", note="In the library", job_id=None, candidates=[])
-                self.save(item)
+    def _advance(self, item, library, jobs, everything):
+        if item.get("job_id") and not self._follow_job(item, jobs.get(item["job_id"])):
+            return   # still running, or waiting for review
+        if item["status"] != "have" and library is not None and matching.library_has(library, item):
+            item.update(status="have", note="In the library", candidates=[])
+            self.save(item)
+        if item["status"] == "have":
+            if "quality" not in item:
+                self._backfill_quality(item, jobs)
+            if self._upgrading(item):
+                self._next(item, jobs, upgrade=True)
             return
         if item["status"] in DONE:
             return
@@ -131,145 +133,169 @@ class Wishlist:
             item.update(status="skipped", note="Covered by an expanded edition in the same list")
             self.save(item)
             return
-        if item.get("job_id"):
-            if not self._follow_job(item, jobs.get(item["job_id"])):
-                return   # still running, or waiting for review
-        self._next(item, jobs, blocked)
+        self._next(item, jobs)
+
+    def _backfill_quality(self, item, jobs):
+        """Albums that arrived before quality was recorded: read it from the job that published them."""
+        published = [j for j in jobs.values() if j["stage"] == "published"
+                     and (j.get("candidate") or {}).get("wishlist_id") == item["id"] and j["id"] not in item.get("wrong_jobs", [])]
+        quality = matching.quality(max(published, key=lambda j: j.get("created_at") or "")["candidate"]) if published else None
+        item["quality"] = quality
+        if quality is not None and quality < LOSSLESS:
+            item.update(upgrade_until=self.clock() + UPGRADE_FOR, next_search_at=0, rounds=0,
+                        note="In the library (lossy); looking for lossless weekly")
+        self.save(item)
+
+    def _upgrading(self, item):
+        """A lossy copy arrived through the Wishlist less than UPGRADE_FOR ago: keep looking for lossless."""
+        if item.get("quality") is None or item["quality"] >= LOSSLESS or not item.get("upgrade_until"):
+            return False
+        if self.clock() < item["upgrade_until"]:
+            return True
+        item.update(upgrade_until=None, candidates=[], note="In the library (lossy; no lossless copy turned up in 4 weeks)")
+        self.save(item)
+        return False
 
     def _follow_job(self, item, job):
         """Update the item from its job. True when the item needs its next candidate."""
+        upgrade = item["status"] == "have"
         if not job:
             item.update(job_id=None)
             return True
         stage = job["stage"]
-        if stage in ACTIVE:
-            status = "downloading" if stage in ("downloading",) else "queued" if stage == "queued" else "processing"
-            if item["status"] != status:
-                item.update(status=status, note=job.get("detail") or stage)
-                self.save(item)
-            return False
-        if stage == "review":
-            if item["status"] != "review":
-                item.update(status="review", note="Waiting for your review")
+        if stage in ACTIVE + ("review",):
+            if upgrade:
+                note = "Lossless copy waiting for review" if stage == "review" else f"Getting a lossless copy: {job.get('detail') or stage}"
+                if item.get("note") != note:
+                    item.update(note=note)
+                    self.save(item)
+                return False
+            status = ("review" if stage == "review" else "downloading" if stage == "downloading"
+                      else "queued" if stage == "queued" else "processing")
+            note = "Waiting for your review" if stage == "review" else job.get("detail") or stage
+            if item["status"] != status or item.get("note") != note:
+                item.update(status=status, note=note)
                 self.save(item)
             return False
         if stage == "published" and job["id"] not in item.get("wrong_jobs", []):
-            item.update(status="have", note="Added to the library", job_id=None, candidates=[])
+            quality = matching.quality(job.get("candidate") or {})
+            item.update(status="have", job_id=None, candidates=[], quality=quality, rounds=0)
+            if quality is not None and quality < LOSSLESS:
+                if not upgrade:
+                    item.update(upgrade_until=self.clock() + UPGRADE_FOR, next_search_at=self.clock() + UPGRADE_EVERY)
+                item["note"] = "Added to the library (lossy); looking for lossless weekly"
+            else:
+                item.update(upgrade_until=None, note="Added to the library")
             self.save(item)
             return False
-        error = job.get("error") or ""
-        retries = int(job.get("retry_count", 0))
-        if stage == "failed" and job.get("failed_stage") == "download" and (job.get("progress") or 0) >= 50 and retries < 2:
-            # Most of the album is here already: same source again. Anything else takes the next copy.
-            if self.store.transition_job(job["id"], {"failed"}, "queued", cancel_requested=False, error=None,
-                                         retry_count=retries + 1, detail="Retry queued by the wishlist"):
-                item.update(status="queued", note="Retrying the same source")
-                self.save(item)
-                return False
         outcome = {"published": "wrong record", "rejected": "rejected in review", "cancelled": "cancelled"}.get(stage, "failed")
+        error = job.get("error") or ""
         candidate = job.get("candidate") or {}
         item["tried"].append({"provider": matching.provider(candidate), "source": candidate.get("source"),
                               "job": job["id"], "outcome": outcome, "error": error[:300], "at": self.clock()})
-        item.update(job_id=None, status="wanted", note=f"{outcome.capitalize()}: {error[:160]}" if error else outcome.capitalize())
+        item["job_id"] = None
+        if not upgrade:
+            item.update(status="wanted", note=f"{outcome.capitalize()}: {error[:160]}" if error else outcome.capitalize())
         self.save(item)
         return True
 
-    def _next(self, item, jobs, blocked):
+    def _next(self, item, jobs, upgrade=False):
+        """Try the best untried copy; when the list runs out, search again later."""
         now = self.clock()
         tried = {t["provider"] for t in item["tried"]}
-        fresh = item.get("searched_at") and now - item["searched_at"] < FRESH
-        if fresh:
-            # Re-check cached candidates against today's rules: a fix should not wait 48 h to apply.
-            current = {matching.provider(c) for c in matching.ranked(item["candidates"], item["album"], item["artist"],
-                                                                      limit=len(item["candidates"]))}
-            for c in item["candidates"]:
-                if c.get("judged") != "model" and matching.provider(c) not in current:
-                    continue
-                who = matching.provider(c)
-                if who in tried or who in blocked:
-                    continue
-                if not self._room(c["source"], jobs, item["owner"]):
-                    if item["note"] != "Waiting for queue room":
-                        item.update(status="wanted", note="Waiting for queue room")
-                        self.save(item)
-                    return
-                self._queue(item, c, jobs)
-                return
-            if not item.get("youtube_searched"):
-                # The list is used up: YouTube Music's official album is the last resort.
-                item["youtube_searched"] = True
-                found = self._search(item, sources=("youtube",))
-                if found is None:
-                    item["youtube_searched"] = False   # an error, not "not found": try next tick
-                    return
-                item["candidates"] += found
+        untried = [c for c in item["candidates"] if matching.provider(c) not in tried]
+        if untried:
+            if self._room(jobs):
+                self._queue(item, untried[0], jobs, upgrade)
+            elif not upgrade and item.get("note") != "Waiting for a download slot":
+                item.update(note="Waiting for a download slot")
                 self.save(item)
-                if found:
-                    return self._next(item, jobs, blocked)
-            item["rounds"] = item.get("rounds", 0) + 1
-            if item["rounds"] >= MAX_ROUNDS:
-                gave = "not_found" if not any(t for t in item["tried"]) else "gave_up"
-                item.update(status=gave, candidates=[], note=(
-                    "Not found on Soulseek, RuTracker or YouTube Music" if gave == "not_found"
-                    else f"Gave up after {len(item['tried'])} tries"))
-            else:
-                wait = RETRY_WAIT if item["candidates"] else NOT_FOUND_WAIT
-                item.update(status="wanted", candidates=[], searched_at=None, next_search_at=now + wait,
-                            note=("All candidates failed" if item["candidates"] else "Not found") + f"; searching again in {wait // 3600} h")
-            self.save(item)
             return
-        mine = sum(1 for j in jobs.values() if j.get("owner") == item["owner"] and j["stage"] in ACTIVE + ("review",))
-        if now < item.get("next_search_at", 0) or mine >= QUEUE_CAP or self._searches_left <= 0:
+        if item["candidates"]:
+            # Every copy from the last search failed.
+            self._exhausted(item, upgrade, "All copies failed")
+            return
+        if now < item.get("next_search_at", 0) or self._searches_left <= 0:
             return
         self._searches_left -= 1
         found = self._search(item)
         if found is None:
-            return   # search error, not "not found"
-        item.update(candidates=found, searched_at=now, youtube_searched=False, status="wanted",
-                    note=f"Found {len(found)} candidates" if found else "Nothing on Soulseek or RuTracker")
+            return   # a search error, not "not found": try next tick
+        if upgrade:
+            found = [c for c in found if matching.quality(c) == LOSSLESS]
+        item.update(candidates=found, searched_at=now)
+        if not found:
+            self._exhausted(item, upgrade, "No lossless copy found" if upgrade else "Not found")
+            return
+        if not upgrade:
+            item.update(status="wanted", note=f"Found {len(found)} copies")
         self.save(item)
-        self._next(item, jobs, blocked)
+        self._next(item, jobs, upgrade)
 
-    def _search(self, item, sources=("soulseek", "torrent")):
-        """Ranked candidates, or None when a search failed (not the same as found nothing)."""
-        album, artist = item["album"], item["artist"]
+    def _exhausted(self, item, upgrade, why):
+        now = self.clock()
+        item.update(candidates=[], rounds=item.get("rounds", 0) + 1)
+        if upgrade:
+            item.update(next_search_at=now + UPGRADE_EVERY, note=f"In the library (lossy); {why.lower()} yet, looking again in a week")
+        elif item["rounds"] >= SEARCHES:
+            gave = "gave_up" if item["tried"] else "not_found"
+            item.update(status=gave, note=(f"Gave up after {len(item['tried'])} tries in a week" if item["tried"]
+                                           else "Not found on Soulseek, RuTracker or YouTube Music in a week"))
+        else:
+            item.update(status="wanted", next_search_at=now + SEARCH_AGAIN, note=f"{why}; searching again tomorrow")
+        self.save(item)
+
+    def _search(self, item):
+        """Every source at once, then one ranked list. None when Soulseek could not be searched
+        (an error is not "not found"); a tracker or YouTube error only leaves their copies out."""
+        if not self.soulseek_ready():
+            return None
+        album, artist, year = item["album"], item["artist"], item.get("year")
         avoid = {t["provider"] for t in item["tried"]}
-        sources_ = self.sources()
-        results = []
-        if "soulseek" in sources and self.soulseek_ready():
-            for query in soulseek_queries(album, artist, item.get("year")):
-                try:
-                    found = sources_.search(query, "soulseek", "album")
-                except SoulseekUnavailable:
-                    raise
-                except SourceError:
-                    return None
+        first = matching.clean_artist(artist)
+
+        def soulseek():
+            results = []
+            for query in soulseek_queries(album, artist, year):
+                found = self.sources().search(query, "soulseek", "album")
                 results += found   # the model may accept folders the rules would not: keep every step's results
                 if matching.ranked(found, album, artist, avoid):
                     break
-        elif "soulseek" in sources:
-            return None
-        if "torrent" in sources and sources_.torrents_configured():
-            first = matching.clean_artist(artist)
+            return results
+
+        def torrent():
+            if not self.sources().torrents_configured():
+                return []
             name = matching.re.sub(r"\s*[\(\[].*?[\)\]]", "", album).strip() or album
+            results = []
             for query in dict.fromkeys(q for q in (f"{first} {name}".strip(), first) if q):
-                try:
-                    found = sources_.search(query, "torrent", "album")
-                except SourceError:
-                    break   # tracker down: keep the Soulseek results
+                found = self.sources().search(query, "torrent", "album")
                 results += found
                 if any(c.get("source") == "torrent" for c in matching.ranked(found, album, artist, avoid)):
                     break
-        if "youtube" in sources:
+            return results
+
+        def youtube():
             # The album title alone too: blog lists misspell artists ("Andrea" for Andrae Durden).
-            seen = set()
-            for query in dict.fromkeys((f"{matching.clean_artist(artist)} {album}".strip(), album.strip())):
-                try:
-                    found = sources_.search(query, "youtube", "album")
-                except SourceError:
-                    return None
+            results, seen = [], set()
+            for query in dict.fromkeys((f"{first} {album}".strip(), album.strip())):
+                found = self.sources().search(query, "youtube", "album")
                 results += [c for c in found if c.get("url") not in seen]
                 seen |= {c.get("url") for c in found}
+            return results
+
+        with concurrent.futures.ThreadPoolExecutor(3) as pool:
+            futures = {name: pool.submit(fn) for name, fn in (("soulseek", soulseek), ("torrent", torrent), ("youtube", youtube))}
+        results = []
+        for name, future in futures.items():
+            try:
+                results += future.result()
+            except SoulseekUnavailable:
+                raise
+            except SourceError as exc:
+                if name == "soulseek":
+                    return None
+                log.info("Wishlist: %s search failed for %s: %s", name, item["id"], str(exc)[:200])
         return self._rank(item, results, avoid)
 
     def _rank(self, item, results, avoid):
@@ -277,7 +303,7 @@ class Wishlist:
         Without a usable answer from the model, the matching rules decide, as before."""
         album, artist = item["album"], item["artist"]
         pool = [c for c in results if self._eligible(c, avoid)]
-        pool.sort(key=lambda c: (-matching.quality(c), matching.source_order(c), -self._source_score(c)))
+        pool.sort(key=lambda c: (-matching.quality(c),) + matching.availability(c))
         verdicts = None
         if self.judge and pool:
             if "tracklist" not in item:
@@ -294,7 +320,7 @@ class Wishlist:
             who = matching.provider(c)
             if verdicts[n]["match"] and who not in seen:
                 seen.add(who)
-                best.append({**c, "judged": "model", "reason": verdicts[n]["reason"], "score": round(self._source_score(c), 2)})
+                best.append({**c, "judged": "model", "reason": verdicts[n]["reason"]})
         if not best:
             # Last resort: an official YouTube Music album with the requested title, word for word and
             # in order, that the model found at least plausible (a misspelled artist, "BLINDAO" under a
@@ -319,14 +345,6 @@ class Wishlist:
             return (c.get("seeders") or 0) > 0
         return c.get("source") == "youtube" and bool(c.get("official"))
 
-    @staticmethod
-    def _source_score(c):
-        if c.get("source") == "soulseek":
-            return (0.5 if c.get("free_slots") else 0) - min(c.get("queue_length") or 0, 50) / 100
-        if c.get("source") == "torrent":
-            return min(c.get("seeders") or 0, 50) / 50
-        return 0
-
     def _musicbrainz_tracklist(self, item):
         try:
             with httpx.Client() as client:
@@ -334,53 +352,30 @@ class Wishlist:
         except Exception:
             return None   # evidence only: the model judges without it
 
-    def _room(self, source, jobs, owner):
-        mine = [j for j in jobs.values() if j.get("owner") == owner and j["stage"] in ACTIVE + ("review",)]
-        if len(mine) >= QUEUE_CAP:
-            return False
-        if source == "soulseek":
-            busy = [j for j in mine if j["stage"] == "queued" and (j.get("candidate") or {}).get("source") == "soulseek"]
-        else:
-            busy = [j for j in mine if j["stage"] in ("queued", "downloading") and (j.get("candidate") or {}).get("source") == source]
-        return len(busy) < AHEAD.get(source, 2)
+    def _room(self, jobs):
+        """Queue another download only while every download worker is busy at most: a long
+        waiting line goes stale (uploaders go offline) before its turn comes."""
+        waiting = sum(1 for j in jobs.values() if j["stage"] == "queued")
+        return waiting < int(self.config.get("download_workers", 4))
 
-    def _queue(self, item, candidate, jobs):
+    def _queue(self, item, candidate, jobs, upgrade=False):
         candidate = {k: v for k, v in candidate.items() if k not in ("score", "typical", "owner")}
         candidate.update(requested_artist=matching.clean_artist(item["artist"]) or None, requested_album=item["album"],
                          wishlist_id=item["id"])
         try:
             job = self.enqueue(candidate, {"username": item["owner"]})
         except Exception as exc:   # the app's queue is full: wait
-            item.update(status="wanted", note="Waiting for queue room")
-            self.save(item)
             log.info("Wishlist could not queue %s: %s", item["id"], getattr(exc, "detail", exc))
             return
         # Count it now, so the next item in this tick sees the room it took.
         jobs[job["id"]] = {"id": job["id"], "owner": item["owner"], "stage": "queued", "candidate": candidate}
-        item.update(job_id=job["id"], status="queued", note=f"Queued from {candidate['source']}: {candidate.get('username') or candidate.get('title')}")
+        source = candidate.get("username") or candidate.get("title")
+        item["job_id"] = job["id"]
+        if upgrade:
+            item["note"] = f"Getting a lossless copy from {candidate['source']}: {source}"
+        else:
+            item.update(status="queued", note=f"Queued from {candidate['source']}: {source}")
         self.save(item)
-
-    def _blocked(self, jobs):
-        """Uploaders avoided for every album: they banned us, have a quota, wait for a human
-        check, or failed 3 downloads (a queue that never moves). Two failures within
-        UPLOADER_REST also rest an uploader for that long: one that ignores us usually
-        ignores the next request too."""
-        now = self.clock()
-        failures, recent, blocked = {}, {}, set()
-        for j in jobs:
-            c = j.get("candidate") or {}
-            if c.get("source") != "soulseek" or not c.get("username"):
-                continue
-            who, error = c["username"], j.get("error") or ""
-            if j["stage"] == "failed" and any(w in error for w in BLOCKING):
-                blocked.add(who)
-            if j["stage"] == "cancelled" or j["stage"] == "failed" and j.get("failed_stage") == "download" \
-                    and not any(w in error for w in TRANSIENT):
-                failures[who] = failures.get(who, 0) + 1
-                if now - (j.get("failed_at") or 0) < UPLOADER_REST:
-                    recent[who] = recent.get(who, 0) + 1
-        return (blocked | {u for u, n in failures.items() if n >= 3}
-                | {u for u, n in recent.items() if n >= 2})
 
     def _library(self):
         try:

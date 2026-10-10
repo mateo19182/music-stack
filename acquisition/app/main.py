@@ -173,12 +173,11 @@ def soulseek_waiting():
                           "AND json_extract(data, '$.candidate.source')='soulseek'").fetchone()[0]
 
 
-def download_limits(stages):
-    """Per-source download limits; Soulseek gets none while slskd is disconnected or failing."""
-    limits = dict(config.get("source_download_limits", {"soulseek": 1}))
+def paused_sources(stages):
+    """Soulseek downloads wait while slskd is disconnected or failing: they would only fail."""
     if "queued" in stages and soulseek_waiting() and not soulseek_health.ready():
-        limits["soulseek"] = 0
-    return limits
+        return ("soulseek",)
+    return ()
 
 
 _review_sightings = {}
@@ -714,7 +713,7 @@ def worker(stages=("queued", "process_queued", "publish_queued")):
     sources = Sources(config)
     ingestor = Ingestor(config)
     while not stop.is_set():
-        job = store.claim(stages, source_limits=download_limits(stages))
+        job = store.claim(stages, paused=paused_sources(stages))
         if not job:
             stop.wait(1)
             continue
@@ -941,8 +940,9 @@ def ingestion_lanes(count):
 
 
 def download_lanes(count):
-    """Parallel downloads: one slow uploader's remote queue no longer holds up every other job."""
-    count = max(1, min(int(count or 1), 8))
+    """Parallel downloads. A download that waits in an uploader's queue holds its lane at most
+    download_stall_seconds before it fails, so lanes mostly count downloads that move."""
+    count = max(1, min(int(count or 1), 16))
     return [("download-worker" if n == 1 else f"download-worker-{n}", ("queued",)) for n in range(1, count + 1)]
 
 

@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from app import matching
 from app.store import Store, now, uid
-from app.wishlist import Wishlist, NOT_FOUND_WAIT, UPLOADER_REST
+from app.wishlist import Wishlist, SEARCH_AGAIN, SEARCHES, UPGRADE_EVERY, UPGRADE_FOR
 
 
 def slsk(user, fmt="flac", bitrate=None, files=10, folder="Moor Mother - Jazz Codes"):
@@ -16,6 +16,11 @@ def slsk(user, fmt="flac", bitrate=None, files=10, folder="Moor Mother - Jazz Co
 def torrent(key, title="Moor Mother - Jazz Codes - 2022, FLAC (tracks)", fmt="flac", bitrate=None, seeders=5):
     return {"id": f"t-{key}", "torrent_key": key, "source": "torrent", "kind": "album", "username": "RuTracker",
             "title": title, "format": fmt, "bitrate": bitrate, "seeders": seeders}
+
+
+def yt(title, channel, url, artist=None):
+    return {"id": f"y-{url}", "source": "youtube", "kind": "album", "title": title, "official": True, "uploader": channel,
+            "artist": artist, "url": f"https://www.youtube.com/playlist?list={url}", "file_count": 7}
 
 
 class FakeSources:
@@ -47,7 +52,8 @@ class WishlistTests(unittest.TestCase):
                            owner=user["username"], stage="queued", created_at=now())
             self.queued.append(candidate)
             return {"id": id}
-        w = Wishlist(self.store, {"navidrome_db": "/nonexistent"}, lambda: sources, enqueue, clock=lambda: self.clock[0])
+        w = Wishlist(self.store, {"navidrome_db": "/nonexistent", "download_workers": 4}, lambda: sources, enqueue,
+                     clock=lambda: self.clock[0])
         return w
 
     def finish(self, item_id, stage, **data):
@@ -55,94 +61,116 @@ class WishlistTests(unittest.TestCase):
         job = self.store.get("jobs", item["job_id"])
         self.store.update_job(job["id"], stage=stage, **data)
 
-    def test_failures_walk_the_ranked_list_without_searching_again(self):
-        sources = FakeSources({"soulseek": [slsk("a"), slsk("b", "mp3", 320)], "torrent": [torrent("t1")]})
+    def test_every_source_is_searched_at_once_and_failures_take_the_next_copy(self):
+        sources = FakeSources({"soulseek": [slsk("a"), slsk("b", "mp3", 320)], "torrent": [torrent("t1")],
+                               "youtube": [yt("Jazz Codes", "Moor Mother - Topic", "OLAK5uy_j", "Moor Mother")]})
         w = self.wishlist(sources)
         item = w.add("mateo", "Moor Mother", "Jazz Codes", "Blog 2025")
         w.tick()
+        self.assertEqual({s for _, s in sources.calls}, {"soulseek", "torrent", "youtube"})
         searches = len(sources.calls)
-        # Quality first, then a seeded torrent before Soulseek: FLAC torrent, FLAC from a, then b's 320.
-        self.assertEqual([c["source"] for c in self.store.get("wishlist", item["id"])["candidates"]], ["torrent", "soulseek", "soulseek"])
-        self.assertEqual(self.queued[-1]["source"], "torrent")
-        self.finish(item["id"], "failed", failed_stage="download", error="The torrent made no progress for 60 minutes", progress=0)
+        # Lossless first, then 320, YouTube last.
+        self.assertEqual([c.get("format") or c["source"] for c in self.store.get("wishlist", item["id"])["candidates"]][-2:],
+                         ["mp3", "youtube"])
+        first = self.queued[-1]
+        self.assertEqual(first["format"], "flac")
+        self.finish(item["id"], "failed", failed_stage="download", error="did not start sending within 10 minutes", progress=60)
         w.tick()
-        self.assertEqual(self.queued[-1]["username"], "a")
-        self.finish(item["id"], "failed", failed_stage="download", error="Soulseek peer a never accepted the request", progress=0)
+        self.assertNotEqual(matching.provider(self.queued[-1]), matching.provider(first))   # no retry of the same copy
+        self.assertEqual(self.queued[-1]["format"], "flac")
+        self.finish(item["id"], "failed", failed_stage="download", error="x", progress=0)
         w.tick()
         self.assertEqual(self.queued[-1]["username"], "b")
         self.assertEqual(len(sources.calls), searches)   # no new search
         self.assertEqual(self.queued[-1]["requested_album"], "Jazz Codes")
-        self.finish(item["id"], "published")
-        w.tick()
-        self.assertEqual(self.store.get("wishlist", item["id"])["status"], "have")
 
-    def test_not_found_waits_a_day_tries_youtube_once_per_round_then_stops(self):
+    def test_a_used_up_list_is_searched_again_daily_for_a_week_then_given_up(self):
         sources = FakeSources({})
         w = self.wishlist(sources)
         item = w.add("mateo", "Moor Mother", "Jazz Codes")
         w.tick()
         saved = self.store.get("wishlist", item["id"])
         self.assertEqual(saved["status"], "wanted")
-        self.assertEqual(saved["next_search_at"], self.clock[0] + NOT_FOUND_WAIT)
-        # One YouTube round: artist and title, then the title alone.
-        self.assertEqual([q for q, s in sources.calls if s == "youtube"], ["Moor Mother Jazz Codes", "Jazz Codes"])
+        self.assertEqual(saved["next_search_at"], self.clock[0] + SEARCH_AGAIN)
         calls = len(sources.calls)
         w.tick()
         self.assertEqual(len(sources.calls), calls)   # waits instead of searching every pass
-        self.clock[0] += NOT_FOUND_WAIT
-        w.tick()
+        for _ in range(SEARCHES - 1):
+            self.clock[0] += SEARCH_AGAIN
+            w.tick()
         self.assertEqual(self.store.get("wishlist", item["id"])["status"], "not_found")
-        self.assertEqual(sum(1 for _, s in sources.calls if s == "youtube"), 4)
 
-    def test_a_full_soulseek_queue_holds_soulseek_copies_but_not_torrents(self):
-        for n in range(6):
+    def test_a_lossy_album_is_upgraded_weekly_for_four_weeks(self):
+        sources = FakeSources({"youtube": [yt("Jazz Codes", "Moor Mother - Topic", "OLAK5uy_j", "Moor Mother")]})
+        w = self.wishlist(sources)
+        item = w.add("mateo", "Moor Mother", "Jazz Codes")
+        w.tick()
+        self.assertEqual(self.queued[-1]["source"], "youtube")   # the best there is today: take it now
+        self.finish(item["id"], "published")
+        w.tick()
+        saved = self.store.get("wishlist", item["id"])
+        self.assertEqual((saved["status"], saved["quality"]), ("have", 0))
+        calls = len(sources.calls)
+        self.clock[0] += UPGRADE_EVERY - 60
+        w.tick()
+        self.assertEqual(len(sources.calls), calls)   # not before a week
+        # A week later a 320 shows up: not lossless, so nothing is queued.
+        sources.results["soulseek"] = [slsk("b", "mp3", 320)]
+        self.clock[0] += 60
+        w.tick()
+        self.assertEqual(len(self.queued), 1)
+        self.assertEqual(self.store.get("wishlist", item["id"])["status"], "have")
+        # The next week a FLAC: queued, and once published the album is lossless.
+        sources.results["soulseek"] = [slsk("a")]
+        self.clock[0] += UPGRADE_EVERY
+        w.tick()
+        self.assertEqual(self.queued[-1]["username"], "a")
+        self.assertEqual(self.store.get("wishlist", item["id"])["status"], "have")
+        self.finish(item["id"], "published")
+        w.tick()
+        saved = self.store.get("wishlist", item["id"])
+        self.assertEqual((saved["quality"], saved["upgrade_until"]), (3, None))
+
+    def test_the_upgrade_search_stops_after_four_weeks(self):
+        sources = FakeSources({"youtube": [yt("Jazz Codes", "Moor Mother - Topic", "OLAK5uy_j", "Moor Mother")]})
+        w = self.wishlist(sources)
+        item = w.add("mateo", "Moor Mother", "Jazz Codes")
+        w.tick()
+        self.finish(item["id"], "published")
+        w.tick()
+        self.clock[0] += UPGRADE_FOR
+        w.tick()
+        calls = len(sources.calls)
+        sources.results["soulseek"] = [slsk("a")]
+        self.clock[0] += UPGRADE_EVERY
+        w.tick()
+        self.assertEqual(len(sources.calls), calls)
+        self.assertIn("no lossless copy", self.store.get("wishlist", item["id"])["note"])
+
+    def test_lossy_albums_from_before_join_the_upgrade_search(self):
+        sources = FakeSources({"soulseek": [slsk("a")]})
+        w = self.wishlist(sources)
+        item = w.add("mateo", "Moor Mother", "Jazz Codes")
+        saved = self.store.get("wishlist", item["id"])
+        saved.update(status="have")
+        w.save(saved)
+        self.store.put("jobs", uid(), {"candidate": {"source": "youtube", "wishlist_id": item["id"]}}, owner="mateo",
+                       stage="published", created_at=now())
+        w.tick()
+        saved = self.store.get("wishlist", item["id"])
+        self.assertEqual(saved["quality"], 0)
+        self.assertEqual(self.queued[-1]["username"], "a")
+        self.assertEqual(saved["status"], "have")
+
+    def test_queueing_waits_while_every_download_worker_has_a_job_waiting(self):
+        for n in range(4):
             self.store.put("jobs", uid(), {"candidate": {"source": "soulseek", "username": f"u{n}"}}, owner="mateo",
                            stage="queued", created_at=now())
         w = self.wishlist(FakeSources({"soulseek": [slsk("a")]}))
         waiting = w.add("mateo", "Moor Mother", "Jazz Codes")
         w.tick()
-        self.assertEqual(self.store.get("wishlist", waiting["id"])["note"], "Waiting for queue room")
-        self.assertEqual(self.queued, [])   # searched ahead, but the FLAC from Soulseek waits for its slot
-        w = self.wishlist(FakeSources({"torrent": [torrent("t1")]}))
-        w.add("mateo", "Moor Mother", "Jazz Codes", "Other list")
-        w.tick()
-        self.assertEqual([c["source"] for c in self.queued], ["torrent"])
-
-    def test_half_downloaded_jobs_resume_with_the_same_source(self):
-        sources = FakeSources({"soulseek": [slsk("a"), slsk("b")]})
-        w = self.wishlist(sources)
-        item = w.add("mateo", "Moor Mother", "Jazz Codes")
-        w.tick()
-        job_id = self.store.get("wishlist", item["id"])["job_id"]
-        self.finish(item["id"], "failed", failed_stage="download", error="Download from a exceeded the job time limit", progress=60)
-        w.tick()
-        self.assertEqual(self.store.get("jobs", job_id)["stage"], "queued")
-        self.assertEqual(self.store.get("wishlist", item["id"])["job_id"], job_id)
-        self.assertEqual(len(self.queued), 1)
-
-    def test_uploaders_that_banned_us_are_skipped_for_every_album(self):
-        self.store.put("jobs", uid(), {"candidate": {"source": "soulseek", "username": "a"}, "error": "a banned this account",
-                                       "failed_stage": "download"}, owner="mateo", stage="failed", created_at=now())
-        sources = FakeSources({"soulseek": [slsk("a"), slsk("b")]})
-        w = self.wishlist(sources)
-        w.add("mateo", "Moor Mother", "Jazz Codes")
-        w.tick()
-        self.assertEqual(self.queued[-1]["username"], "b")
-
-    def test_an_uploader_that_failed_twice_recently_rests(self):
-        def failed(at):
-            self.store.put("jobs", uid(), {"candidate": {"source": "soulseek", "username": "a"}, "failed_stage": "download",
-                                           "error": "Soulseek peer a never accepted the request", "failed_at": at},
-                           owner="mateo", stage="failed", created_at=now())
-        failed(self.clock[0] - 60)
-        failed(self.clock[0] - 30)
-        sources = FakeSources({"soulseek": [slsk("a"), slsk("b")]})
-        w = self.wishlist(sources)
-        w.add("mateo", "Moor Mother", "Jazz Codes")
-        w.tick()
-        self.assertEqual(self.queued[-1]["username"], "b")
-        self.clock[0] += UPLOADER_REST
-        self.assertNotIn("a", w._blocked(self.store.list("jobs")))   # rested; two old failures alone don't block
+        self.assertEqual(self.store.get("wishlist", waiting["id"])["note"], "Waiting for a download slot")
+        self.assertEqual(self.queued, [])
 
     def test_an_album_in_the_library_needs_nothing(self):
         sources = FakeSources({"soulseek": [slsk("a")]})
@@ -164,9 +192,11 @@ class RankingTests(unittest.TestCase):
                    slsk("chapter", folder="Moor Mother - Jazz Codes Order"), slsk("remix", folder="Moor Mother - Jazz Codes (Remixes)"),
                    torrent("t2", "Moor Mother - Jazz Codes: Order - 2022, FLAC (tracks)"), slsk("low", "mp3", 128)]
         order = [matching.provider(c) for c in matching.ranked(results, "Jazz Codes", "Moor Mother")]
-        self.assertEqual(order, ["t1", "flacuser", "chapter", "mp3user"])   # remixes, chapter torrent, 128 kbps: out
-        thin = matching.ranked([torrent("t1", seeders=1), slsk("flacuser")], "Jazz Codes", "Moor Mother")
-        self.assertEqual([matching.provider(c) for c in thin], ["flacuser", "t1"])   # one seeder: after Soulseek
+        self.assertEqual(order, ["flacuser", "t1", "chapter", "mp3user"])   # remixes, chapter torrent, 128 kbps: out
+        # Who can deliver now goes first: a seeded torrent before a queued uploader, a thin torrent after it.
+        queued = {**slsk("queueduser"), "free_slots": False, "queue_length": 20}
+        order = matching.ranked([queued, torrent("t1"), torrent("t2", seeders=1)], "Jazz Codes", "Moor Mother")
+        self.assertEqual([matching.provider(c) for c in order], ["t1", "queueduser", "t2"])
 
 
 def test_an_album_split_by_per_track_album_artists_counts_as_one():
@@ -261,9 +291,6 @@ def test_a_timed_out_browse_takes_the_next_copy(tmp_path):
 
 
 
-def yt(title, channel, url):
-    return {"id": f"y-{url}", "source": "youtube", "kind": "album", "title": title, "official": True, "uploader": channel,
-            "url": f"https://www.youtube.com/playlist?list={url}", "file_count": 7}
 
 
 class OddsJudge:

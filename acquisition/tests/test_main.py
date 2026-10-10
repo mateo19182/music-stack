@@ -754,41 +754,19 @@ def test_download_lanes_run_in_parallel_within_bounds(backend):
     assert main.download_lanes(None) == [("download-worker", ("queued",))]
     assert [name for name, _ in main.download_lanes(4)] == ["download-worker", "download-worker-2", "download-worker-3", "download-worker-4"]
     assert all(stages == ("queued",) for _, stages in main.download_lanes(4))
-    assert len(main.download_lanes(50)) == 8
+    assert len(main.download_lanes(50)) == 16
 
 
-def test_soulseek_downloads_up_to_the_source_limit_while_other_sources_proceed(backend):
+def test_downloads_are_claimed_oldest_first_and_a_paused_source_waits(backend):
     main, _ = backend
-    for id, source in [("slsk-1", "soulseek"), ("slsk-2", "soulseek"), ("slsk-3", "soulseek"), ("yt-1", "youtube")]:
-        main.store.put("jobs", id, {"candidate": {"source": source}}, owner="mateo", stage="queued", created_at=id)
-    main.store.put("jobs", "slsk-processing", {"candidate": {"source": "soulseek"}}, owner="mateo",
-                   stage="process_queued", created_at="0")
-    limits = {"soulseek": 2}
-    assert main.store.claim(("queued",), source_limits=limits)["id"] == "slsk-1"
-    assert main.store.claim(("queued",), source_limits=limits)["id"] == "slsk-2"
-    # slsk-3 is older than yt-1 but waits for a Soulseek slot; the YouTube job goes ahead.
-    assert main.store.claim(("queued",), source_limits=limits)["id"] == "yt-1"
-    assert main.store.claim(("queued",), source_limits=limits) is None
-    # Processing a Soulseek download is not held back by running Soulseek downloads.
-    assert main.store.claim(("process_queued",), source_limits=limits)["id"] == "slsk-processing"
-    main.store.update_job("slsk-1", stage="process_queued")
-    assert main.store.claim(("queued",), source_limits=limits)["id"] == "slsk-3"
-
-
-def test_one_soulseek_download_per_uploader(backend):
-    main, _ = backend
-    for id, user in [("a-1", "slow"), ("a-2", "slow"), ("b-1", "fast")]:
-        main.store.put("jobs", id, {"candidate": {"source": "soulseek", "username": user}}, owner="mateo",
+    for id, source in [("slsk-1", "soulseek"), ("slsk-2", "soulseek"), ("yt-1", "youtube")]:
+        main.store.put("jobs", id, {"candidate": {"source": source, "username": "same"}}, owner="mateo",
                        stage="queued", created_at=id)
-    limits = {"soulseek": 2}
-    assert main.store.claim(("queued",), source_limits=limits)["id"] == "a-1"
-    # a-2 is older but its uploader is busy with a-1: the second slot goes to another uploader.
-    assert main.store.claim(("queued",), source_limits=limits)["id"] == "b-1"
-    assert main.store.claim(("queued",), source_limits=limits) is None
-    main.store.update_job("b-1", stage="process_queued")
-    assert main.store.claim(("queued",), source_limits=limits) is None
-    main.store.update_job("a-1", stage="process_queued")
-    assert main.store.claim(("queued",), source_limits=limits)["id"] == "a-2"
+    # Two downloads from one uploader run side by side: a busy one fails its stall time and moves on.
+    assert main.store.claim(("queued",))["id"] == "slsk-1"
+    assert main.store.claim(("queued",), paused=("soulseek",))["id"] == "yt-1"
+    assert main.store.claim(("queued",), paused=("soulseek",)) is None
+    assert main.store.claim(("queued",))["id"] == "slsk-2"
 
 
 def test_human_checks_list_failed_jobs_and_only_admins_reply(backend, monkeypatch):
@@ -858,7 +836,7 @@ def test_soulseek_outage_requeues_instead_of_failing(backend, monkeypatch):
     run_until(lambda: main.store.get("jobs", "outage").get("unavailable_retries"))
     outage = main.store.get("jobs", "outage")
     assert outage["stage"] == "queued" and outage["unavailable_retries"] == 1
-    assert main.download_limits(("queued",))["soulseek"] == 0
+    assert main.paused_sources(("queued",)) == ("soulseek",)
     assert released == [["t1"]]   # a job that waits keeps its requests
     main.stop.clear()
 

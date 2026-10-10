@@ -692,7 +692,8 @@ class Sources:
         if added:
             self._add_torrent(candidate, tag)
             progress({"message": "Added to qBittorrent; fetching the torrent's file list"})
-        deadline = time.monotonic() + float(self.config.get("torrent_metadata_seconds", 900))
+        stall = float(self.config.get("download_stall_seconds", 600))
+        deadline = time.monotonic() + stall
         while True:
             info = self._torrent_info(tag)
             files = self._qbit("GET", "/torrents/files", params={"hash": info["hash"]}) if info else []
@@ -703,7 +704,7 @@ class Sources:
             if time.monotonic() >= deadline:
                 if info:
                     self._qbit("POST", "/torrents/delete", data={"hashes": info["hash"], "deleteFiles": "true"})
-                raise SourceError("No peer sent the torrent's file list within 15 minutes (no seeders). Choose another release.")
+                raise SourceError(f"No peer sent the torrent's file list within {round(stall / 60)} minutes (no seeders). Choose another release.")
             time.sleep(float(self.config.get("torrent_poll_seconds", 5)))
         hash = info["hash"]
         if not candidate.get("torrent_files"):
@@ -719,7 +720,6 @@ class Sources:
             progress({"candidate": candidate, "message": f"Downloading {len(wanted)} of the torrent's {len(files)} files"})
         self._start_torrent(hash)
         wanted = set(candidate["torrent_files"])
-        stall = float(self.config.get("torrent_stall_seconds", 3600))
         best, stalled_since = -1, time.monotonic()
         while True:
             if cancelled():
@@ -970,13 +970,12 @@ class Sources:
         if missing:
             enqueue(missing, transfers)
             progress({"candidate": candidate, "message": "Downloads enqueued", "percent": 0})
-        # The time limit counts from the start or the last progress (bytes or a completed file), so a
-        # slow uploader that keeps delivering finishes; one that stalls is dropped after the limit.
-        timeout = float(self.config.get("download_timeout_seconds", 3600))
-        deadline = time.monotonic() + timeout
+        # No bytes and no finished file for download_stall_seconds, from the start or the last
+        # progress, and the uploader is dropped: waiting in a queue that does not move is a failure.
+        stall = float(self.config.get("download_stall_seconds", 600))
+        deadline = time.monotonic() + stall
         result = []
-        states = []
-        best_done, best_bytes, rounds_done, stalled_rounds = 0, 0, None, 0
+        best_done, best_bytes = 0, 0
         while time.monotonic() < deadline:
             if cancelled():
                 self.cancel(candidate)
@@ -1013,16 +1012,9 @@ class Sources:
                 limited += [file for file, _ in unanswered]
             if done > best_done or transferred > best_bytes:
                 best_done, best_bytes = max(done, best_done), max(transferred, best_bytes)
-                deadline = time.monotonic() + timeout
+                deadline = time.monotonic() + stall
             if limited and not any(not _terminal(t) for t in transfers if _get(t, "id") in ids):
                 # Everything the uploader accepted has finished: ask for the refused files again.
-                # Two rounds in a row with no newly completed file means it keeps refusing.
-                stalled_rounds = stalled_rounds + 1 if rounds_done == done else 0
-                if stalled_rounds >= 2:
-                    raise SourceError(f'Soulseek peer {username} keeps refusing files (it limits how many files one user '
-                                      f'may queue, or ignores some requests): {done}/{len(files)} files complete. Completed files are retained; '
-                                      'retry to continue with this uploader, or choose another uploader.')
-                rounds_done = done
                 enqueue(limited, transfers)
                 progress({'candidate': candidate, 'message': f'{done}/{len(files)} files complete. {username} limits queued '
                           f'files; requested the remaining {len(limited)} again.'})
@@ -1032,7 +1024,7 @@ class Sources:
             positions = [_get(t, 'placeInQueue') for t in transfers if _get(t, 'id') in ids and _get(t, 'placeInQueue') is not None]
             message = f'{done}/{len(files)} files complete. '
             if waiting:
-                message += f'Waiting in {username} remote queue' + (f' (position {min(positions)})' if positions else '') + '; download starts when an upload slot opens.'
+                message += f'Waiting in {username} remote queue' + (f' (position {min(positions)})' if positions else '') + '.'
             elif limited:
                 message += f'{username} limits queued files; {len(limited)} more will be requested when these finish.'
             else:
@@ -1052,9 +1044,12 @@ class Sources:
                     result.append(target)
                 return result
             time.sleep(float(self.config.get("slskd_poll_seconds", 2)))
-        if any('queued' in state.casefold() and 'remotely' in state.casefold() for state in states):
-            raise SourceError(f'Still waiting in {username} remote queue when the job time limit was reached. The existing transfer and partial files are retained; retry continues waiting without adding another transfer, or choose another uploader.')
-        raise SourceError(f'Download from {username} exceeded the job time limit. Existing transfers and partial files are retained; retry to continue or choose another uploader.')
+        self.cancel(candidate)
+        minutes = round(stall / 60)
+        if best_done or best_bytes:
+            raise SourceError(f'{username} stopped sending for {minutes} minutes ({best_done}/{len(files)} files complete); '
+                              'trying another copy.')
+        raise SourceError(f'{username} did not start sending within {minutes} minutes (busy or queued); trying another copy.')
 
     def cancel(self, candidate):
         if candidate.get("source") == "torrent":

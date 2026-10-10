@@ -231,7 +231,7 @@ class SourceTests(unittest.TestCase):
                 self.assertEqual(candidate['owned_transfer_ids'], ['new'])
 
     def test_remote_queue_progress_and_timeout_reuse_existing_transfer(self):
-        sources = Sources({'download_timeout_seconds': 0.02, 'slskd_poll_seconds': 0.001})
+        sources = Sources({'download_stall_seconds': 0.02, 'slskd_poll_seconds': 0.001})
         queued = {'id': 'queued', 'filename': 'Music\\Song.mp3', 'size': 5,
                   'state': 'Queued, Remotely', 'placeInQueue': 7, 'bytesTransferred': 2}
         old = {**queued, 'id': 'old', 'state': 'Completed, Errored'}
@@ -239,7 +239,7 @@ class SourceTests(unittest.TestCase):
         events = []
         with TemporaryDirectory() as destination, patch.object(sources, '_transfers', return_value=[queued, old]), \
              patch.object(sources, '_slskd') as api:
-            with self.assertRaisesRegex(SourceError, 'remote queue.*without adding another transfer'):
+            with self.assertRaisesRegex(SourceError, 'peer stopped sending.*trying another copy'):
                 sources.download(candidate, destination, events.append, lambda: False)
             api.assert_not_called()
         self.assertTrue(any('position 7' in event['message'] for event in events))
@@ -434,7 +434,9 @@ class QueueLimitedPeer:
     def __init__(self, root, limit):
         self.root, self.limit, self.transfers, self.posts = Path(root), limit, [], 0
 
-    def slskd(self, method, path, json=None):
+    def slskd(self, method, path, json=None, **kwargs):
+        if method != 'POST':
+            return None   # cancelling a transfer
         self.posts += 1
         for file in json:
             active = sum(t['state'] == 'Queued, Remotely' for t in self.transfers)
@@ -472,14 +474,13 @@ class QueueLimitTests(unittest.TestCase):
             self.assertTrue(any('limits queued files' in str(event.get('message')) for event in events))
             self.assertEqual(len(candidate['owned_transfer_ids']), 9)
 
-    def test_an_uploader_that_keeps_refusing_is_dropped_after_two_futile_rounds(self):
+    def test_an_uploader_that_keeps_refusing_is_dropped_when_nothing_arrives(self):
         with TemporaryDirectory() as root, TemporaryDirectory() as destination:
             peer = QueueLimitedPeer(root, limit=0)
-            sources = Sources({'slskd_download_root': root, 'slskd_poll_seconds': 0})
+            sources = Sources({'slskd_download_root': root, 'slskd_poll_seconds': 0.01, 'download_stall_seconds': 0.1})
             with patch.object(sources, '_transfers', side_effect=peer.poll), patch.object(sources, '_slskd', side_effect=peer.slskd):
-                with self.assertRaisesRegex(SourceError, 'keeps refusing files.*0/3 files complete'):
+                with self.assertRaisesRegex(SourceError, 'did not start sending'):
                     sources.download(self.candidate(3), Path(destination), lambda _: None, lambda: False)
-            self.assertEqual(peer.posts, 3)
 
     def test_files_the_uploader_did_not_answer_are_requested_again(self):
         # 2026-10-08: et sent 40 of 42 files while two requests timed out; the job must not fail.
@@ -531,7 +532,7 @@ class QueueLimitTests(unittest.TestCase):
 
     def test_time_limit_counts_from_the_last_progress(self):
         with TemporaryDirectory() as root, TemporaryDirectory() as destination:
-            sources = Sources({'slskd_download_root': root, 'download_timeout_seconds': 0.05, 'slskd_poll_seconds': 0.02})
+            sources = Sources({'slskd_download_root': root, 'download_stall_seconds': 0.05, 'slskd_poll_seconds': 0.02})
             candidate = self.candidate(1)
             polls = 0
             def transfers(username):
@@ -642,7 +643,7 @@ class TorrentTests(unittest.TestCase):
 
     def test_a_torrent_without_progress_is_removed_and_fails(self):
         with TemporaryDirectory() as tmp:
-            sources = Sources({'torrent_download_root': tmp, 'torrent_poll_seconds': 0, 'torrent_stall_seconds': 0})
+            sources = Sources({'torrent_download_root': tmp, 'torrent_poll_seconds': 0, 'download_stall_seconds': 0})
             calls, priority = [], {0: 1}
 
             def qbit(method, path, **kwargs):
