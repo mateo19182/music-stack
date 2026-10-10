@@ -891,3 +891,22 @@ def test_wishlist_import_list_retry_skip_and_ownership(backend, monkeypatch):
     assert client.post(f"/api/wishlist/{first}/retry", json={}).status_code == 404
     assert client.post(f"/api/wishlist/{first}/remove", json={}).status_code == 404
     assert client.get("/api/wishlist").json()["items"] == []
+
+
+def test_an_expired_youtube_premium_login_alerts_once(backend, monkeypatch):
+    main, _ = backend
+    answers, sent, clock = [True, False, False, True], [], [0.0]
+    monkeypatch.setattr(main.Sources, "youtube_premium", lambda self: answers.pop(0))
+    monkeypatch.setattr(main, "_premium", {"checked": -main.PREMIUM_CHECK_SECONDS, "alerted": False})
+    def tick():
+        main.youtube_premium_alert(lambda text: sent.append(text) or True, clock=lambda: clock[0])
+        clock[0] += main.PREMIUM_CHECK_SECONDS
+    tick()
+    assert sent == []
+    tick()
+    tick()
+    assert len(sent) == 1 and "expired" in sent[0]
+    main.youtube_premium_alert(lambda text: sent.append(text) or True, clock=lambda: clock[0] - 1)
+    assert len(sent) == 1   # checked at most every few hours
+    tick()
+    assert "works again" in sent[-1]

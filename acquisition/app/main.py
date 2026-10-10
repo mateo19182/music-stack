@@ -224,10 +224,31 @@ def needs_you_alerts(send=None):
         temporary.replace(path)
 
 
+PREMIUM_CHECK_SECONDS = 6 * 3600
+_premium = {"checked": 0.0, "alerted": False}
+
+
+def youtube_premium_alert(send=None, clock=time.time):
+    """Telegram once when the YouTube Premium login stops working (downloads fall back to
+    ~130 kbps), and once more when it works again."""
+    if clock() - _premium["checked"] < PREMIUM_CHECK_SECONDS:
+        return
+    _premium["checked"] = clock()
+    working = Sources(config).youtube_premium()
+    send = send or (lambda text: telegram(config, text))
+    if working is False and not _premium["alerted"]:
+        _premium["alerted"] = bool(send("⚠️ The YouTube Premium login expired: YouTube downloads are back to ~130 kbps.\n"
+                                        "Export new cookies (private window, music.youtube.com) and send them to update "
+                                        "youtube-cookies.txt."))
+    elif working and _premium["alerted"]:
+        send("✅ The YouTube Premium login works again: YouTube downloads are 256 kbps.")
+        _premium["alerted"] = False
+
+
 def soulseek_watcher():
     while not stop.is_set():
         for check in (lambda: soulseek_health.watch(lambda text: telegram(config, text), soulseek_waiting),
-                      needs_you_alerts):
+                      needs_you_alerts, youtube_premium_alert):
             try:
                 check()
             except Exception:

@@ -80,6 +80,8 @@ soulseek_searches = SearchLimiter()
 
 # Premium 256 kbps Opus, then Premium 256 kbps AAC, then the best audio for everyone (~130-160 kbps Opus).
 YOUTUBE_FORMAT = "774/141/bestaudio/best"
+PREMIUM_FORMATS = {"774", "141"}
+PREMIUM_PROBE = "https://music.youtube.com/watch?v=lYBUbBu4W08"   # any YouTube Music track
 YOUTUBE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be", "www.youtu.be"}
 
 
@@ -456,6 +458,19 @@ class Sources:
         if cookies and Path(cookies).is_file():
             options["cookiefile"] = cookies
         return options
+
+    def youtube_premium(self):
+        """True while the cookies still unlock Premium audio, False once they stopped, None
+        without a cookies file or when YouTube could not be asked."""
+        options = self._youtube_options()
+        if "cookiefile" not in options:
+            return None
+        try:
+            with yt_dlp.YoutubeDL({**options, "skip_download": True}) as client:
+                info = client.extract_info(self.config.get("youtube_premium_probe", PREMIUM_PROBE), download=False)
+        except Exception:
+            return None
+        return any(f.get("format_id") in PREMIUM_FORMATS for f in info.get("formats") or [])
 
     def search(self, query, source="all", kind="track"):
         query = query.strip()
