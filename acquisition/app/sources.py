@@ -470,7 +470,7 @@ class Sources:
         """True while the cookies still unlock Premium audio, False once they stopped, None
         without a cookies file or when YouTube could not be asked."""
         options = self._youtube_options()
-        if "cookiefile" not in options:
+        if "cookiefile" not in options or not self.config.get("youtube_enabled", True):
             return None
         try:
             with yt_dlp.YoutubeDL({**options, "skip_download": True}) as client:
@@ -485,13 +485,20 @@ class Sources:
             raise SourceError("Enter a search or YouTube URL.")
         if source not in {"all", "soulseek", "youtube", "torrent"} or kind not in {"track", "album"}:
             raise SourceError("Unsupported search source or kind.")
+        youtube_paused = not self.config.get("youtube_enabled", True)
+        if youtube_paused and source == "youtube":
+            raise SourceError("YouTube is paused.")
         if urlsplit(query).scheme or query.startswith(("www.", "youtube.com/", "youtu.be/")):
+            if youtube_paused:
+                raise SourceError("YouTube is paused.")
             youtube_url(query)
             if source in {"soulseek", "torrent"}:
                 raise SourceError("Use the YouTube source for a YouTube URL.")
             self.last_errors = {}
             return self._search_youtube(query, kind)
         selected = {"soulseek": self._search_soulseek, "youtube": self._search_youtube}
+        if youtube_paused:
+            del selected["youtube"]
         if self.torrents_configured() and (source == "torrent" or kind == "album"):
             selected["torrent"] = self._search_torrent
         if source != "all":

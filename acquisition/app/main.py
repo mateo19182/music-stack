@@ -174,10 +174,12 @@ def soulseek_waiting():
 
 
 def paused_sources(stages):
-    """Soulseek downloads wait while slskd is disconnected or failing: they would only fail."""
+    """Soulseek downloads wait while slskd is logged out (they would only fail); YouTube
+    downloads wait while youtube_enabled is off."""
+    paused = () if config.get("youtube_enabled", True) else ("youtube",)
     if "queued" in stages and soulseek_waiting() and not soulseek_health.ready():
-        return ("soulseek",)
-    return ()
+        paused += ("soulseek",)
+    return paused
 
 
 _review_sightings = {}
@@ -260,7 +262,7 @@ def soulseek_watcher():
 
 match_judge = Judge(config)
 wishlist = Wishlist(store, config, lambda: Sources(config), lambda candidate, user: enqueue(candidate, user),
-                    soulseek_ready=lambda: soulseek_health.ready(), youtube_ready=lambda: _premium["working"] is True, judge=match_judge if match_judge.enabled else None)
+                    soulseek_ready=lambda: soulseek_health.ready(), youtube_ready=lambda: config.get("youtube_enabled", True) and _premium["working"] is True, judge=match_judge if match_judge.enabled else None)
 
 
 def wishlist_worker():

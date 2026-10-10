@@ -760,6 +760,15 @@ def test_a_better_copy_takes_the_replaced_files_name(backend):
     assert new["path"] == old["path"]   # no " [hash]" added: the name was free
 
 
+def test_youtube_downloads_wait_while_youtube_is_paused(backend, monkeypatch):
+    main, _ = backend
+    monkeypatch.setitem(main.config, "youtube_enabled", False)
+    main.store.put("jobs", "yt", {"candidate": {"source": "youtube"}}, owner="mateo", stage="queued", created_at="1")
+    assert main.store.claim(("queued",), paused=main.paused_sources(("queued",))) is None
+    with pytest.raises(main.SourceError, match="paused"):
+        main.Sources(main.config).search("Artist Album", "youtube", "album")
+
+
 def test_download_lanes_run_in_parallel_within_bounds(backend):
     main, _ = backend
     assert main.download_lanes(None) == [("download-worker", ("queued",))]
