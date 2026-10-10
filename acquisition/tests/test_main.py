@@ -830,12 +830,15 @@ def test_soulseek_outage_requeues_instead_of_failing(backend, monkeypatch):
     run_until(lambda: main.store.get("jobs", "refused")["stage"] == "failed")
     assert main.store.get("jobs", "refused")["stage"] == "failed"
     assert released == [["t1"]]   # its waiting requests leave slskd's queue
-    # A connection error puts the job back in the queue and pauses Soulseek downloads.
+    # slskd itself failing puts the job back in the queue; only a logout pauses Soulseek downloads.
     main.store.put("jobs", "outage", {"candidate": {"source": "soulseek", "username": "peer"}}, owner="mateo",
                    stage="queued", created_at="2")
     run_until(lambda: main.store.get("jobs", "outage").get("unavailable_retries"))
     outage = main.store.get("jobs", "outage")
-    assert outage["stage"] == "queued" and outage["unavailable_retries"] == 1
+    assert outage["stage"] == "queued" and outage["unavailable_retries"] >= 1
+    assert main.paused_sources(("queued",)) == ()
+    connected[0] = False
+    main.soulseek_health.refresh(force=True)
     assert main.paused_sources(("queued",)) == ("soulseek",)
     assert released == [["t1"]]   # a job that waits keeps its requests
     main.stop.clear()

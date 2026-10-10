@@ -747,11 +747,6 @@ def worker(stages=("queued", "process_queued", "publish_queued")):
 
         def progress(value):
             if isinstance(value, dict):
-                percent = value.get("percent")
-                if (job["stage"] == "downloading" and job["candidate"].get("source") == "soulseek"
-                        and percent and percent > (progress.last or 0)):
-                    soulseek_health.alive()   # bytes are arriving: Soulseek itself is up
-                    progress.last = percent
                 updates = {
                     "detail": value.get("message"),
                     "progress": value.get("percent"),
@@ -763,8 +758,6 @@ def worker(stages=("queued", "process_queued", "publish_queued")):
             else:
                 updates = {"detail": str(value), "progress": None}
             store.update_job(id, **updates)
-
-        progress.last = None
 
         try:
             if job["stage"] == "downloading":
@@ -853,12 +846,10 @@ def worker(stages=("queued", "process_queued", "publish_queued")):
                     detail="Interrupted; resumes after restart",
                 )
                 continue
-            if (job["stage"] == "downloading" and job["candidate"].get("source") == "soulseek"
-                    and isinstance(exc, SourceError) and int(job.get("unavailable_retries", 0)) < 5
-                    and (isinstance(exc, SoulseekUnavailable) or not soulseek_health.refresh(force=True))):
-                # The connection, not the uploader: wait and retry instead of failing (a network
-                # outage would otherwise fail the whole queue in minutes).
-                soulseek_health.failed()
+            if (job["stage"] == "downloading" and isinstance(exc, SoulseekUnavailable)
+                    and int(job.get("unavailable_retries", 0)) < 5):
+                # slskd itself, not the uploader: back in the queue. While slskd is logged out,
+                # Soulseek downloads wait (paused_sources); an uploader's own failure fails the job.
                 log.warning("Job %s waits for Soulseek: %s", id, exc)
                 store.update_job(id, stage="queued", unavailable_retries=int(job.get("unavailable_retries", 0)) + 1,
                                  detail="Soulseek connection problem; retries automatically. " + str(exc)[:300])

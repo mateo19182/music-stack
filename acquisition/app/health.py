@@ -1,10 +1,9 @@
-"""Soulseek availability: pause downloads during an outage and tell the owner on Telegram.
+"""Soulseek availability: pause downloads while slskd is logged out and tell the owner on Telegram.
 
-On 2026-10-08 the VPN lost UDP for ~90 minutes; every queued Soulseek job failed within
-minutes with the same slskd error. Jobs now wait while slskd is logged out or failing.
-During that outage slskd was logged out of the server, so only a logout (or an unreachable
-slskd) is an outage worth a banner and a Telegram alert. Errors while logged in come from a busy
-slskd or single peers: they only pause new downloads, quietly.
+On 2026-10-08 the VPN lost UDP for ~90 minutes and slskd was logged out of the server; every
+queued Soulseek job failed within minutes. Jobs now wait while slskd is logged out or
+unreachable. Anything else (a slow slskd, an uploader that does not answer) is not an
+outage: it fails that one download and the next copy is tried.
 """
 from __future__ import annotations
 
@@ -17,33 +16,17 @@ import httpx
 log = logging.getLogger("acquisition")
 
 CHECK_SECONDS = 30
-SHORT_PAUSE = 60          # after one connection error: maybe just that uploader
-LONG_PAUSE = 600          # after several in a row: the network is down
-BURST, BURST_WINDOW = 3, 300
 ALERT_AFTER = 600
-ALIVE_WINDOW = 300        # a download made progress this recently: the network is up
 
 
 class SoulseekHealth:
     def __init__(self, connected, clock=time.time):
+        # connected() is True when logged in, False when logged out or unreachable, None when
+        # slskd is too busy to say: then the last answer stands.
         self._connected, self._clock = connected, clock
         self._lock = threading.Lock()
         self._checked_at, self._logged_in = 0.0, True
-        self.paused_until, self.down_since, self.alerted = 0.0, None, False
-        self.burst = False   # the long pause: several errors in a row, slskd is struggling
-        self._errors = []
-        self._alive_at = None
-
-    def alive(self):
-        """A Soulseek download made progress: errors meanwhile are a busy slskd or one uploader."""
-        now = self._clock()
-        with self._lock:
-            self._alive_at = now
-            self._errors, self.burst = [], False
-            self.paused_until = min(self.paused_until, now + SHORT_PAUSE)
-
-    def _recently_alive(self, now):
-        return self._alive_at is not None and now - self._alive_at < ALIVE_WINDOW
+        self.down_since, self.alerted = None, False
 
     def refresh(self, force=False):
         now = self._clock()
@@ -53,32 +36,18 @@ class SoulseekHealth:
             self._checked_at = now
         logged_in = self._connected()
         with self._lock:
-            self._logged_in = logged_in
-            return logged_in
+            if logged_in is not None:
+                self._logged_in = bool(logged_in)
+            return self._logged_in
 
     def ready(self):
         """Whether a Soulseek download may start now."""
-        if self._clock() < self.paused_until:
-            return False
         return self.refresh()
 
-    def failed(self):
-        """A connection error during a download: pause briefly, or longer when they pile up."""
-        now = self._clock()
-        with self._lock:
-            self._errors = [t for t in self._errors if now - t < BURST_WINDOW] + [now]
-            self.burst = len(self._errors) >= BURST and not self._recently_alive(now)
-            pause = LONG_PAUSE if self.burst else SHORT_PAUSE
-            self.paused_until = max(self.paused_until, now + pause)
-            self._checked_at = 0.0   # check the server again before the next start
-
     def status(self):
-        now = self._clock()
         logged_in = self.refresh()
-        paused = now < self.paused_until
-        # Errors while logged in pause new downloads quietly; only a logout is an outage.
-        return {"connected": logged_in, "logged_in": logged_in, "paused": paused,
-                "paused_until": self.paused_until if paused else None, "down_since": self.down_since}
+        return {"connected": logged_in, "logged_in": logged_in, "paused": not logged_in,
+                "paused_until": None, "down_since": self.down_since}
 
     def watch(self, notify, waiting=lambda: 0):
         """One watchdog tick: track the outage and send one alert after ALERT_AFTER, one on recovery."""
@@ -96,8 +65,6 @@ class SoulseekHealth:
             minutes = round((now - self.down_since) / 60)
             notify(f"✅ Soulseek reconnected after {minutes} min. Downloads are resuming.")
         self.down_since, self.alerted = None, False
-        with self._lock:
-            self._errors = []
 
 
 def telegram(config, text):

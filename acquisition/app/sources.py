@@ -427,12 +427,17 @@ class Sources:
             raise SoulseekUnavailable("Soulseek is unavailable; retry when the connection recovers.") from None
 
     def soulseek_connected(self):
-        """True while slskd is logged in to the Soulseek server."""
+        """True while slskd is logged in to the Soulseek server, False when it is logged out or
+        unreachable, None when it is too busy to answer in time (it is running, so not an outage)."""
         try:
-            server = self._slskd('GET', '/server', timeout=10) or {}
-        except SourceError:
+            response = httpx.get(self.config.get("slskd_url", "http://slskd:5030").rstrip("/") + "/api/v0/server",
+                                 headers={"X-API-KEY": self.config.get("slskd_api_key", "")}, timeout=10)
+            response.raise_for_status()
+            return bool(_get(response.json() or {}, 'isLoggedIn'))
+        except httpx.TimeoutException:
+            return None
+        except (httpx.HTTPError, ValueError):
             return False
-        return bool(_get(server, 'isLoggedIn'))
 
     def soulseek_checks(self):
         conversations = []
