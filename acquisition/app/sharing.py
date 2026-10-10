@@ -106,6 +106,8 @@ class Sharing:
                 self.data['managed'] = sorted(managed)
                 self._save()
                 for name, source in desired.items():
+                    if not source.exists():
+                        continue  # replaced or removed while scanning; the next refresh sees it
                     target = self._destination(name)
                     if target.exists() and os.path.samefile(target, source):
                         if name not in managed:

@@ -96,3 +96,21 @@ def test_failed_scan_retries_saved_policy(tmp_path):
     sharing.refresh()
     assert not sharing.status()['scan_pending']
     assert sharing.status()['error'] is None
+
+
+def test_file_replaced_during_scan_is_skipped(tmp_path, monkeypatch):
+    sharing, audio = setup(tmp_path)
+    sharing.reconcile()
+    gone = audio.with_name('Old.ogg')
+    gone.write_bytes(b'lossy')
+    scan = Path.rglob
+
+    def vanishing(self, pattern):
+        yield from list(scan(self, pattern))
+        gone.unlink(missing_ok=True)
+
+    monkeypatch.setattr(Path, 'rglob', vanishing)
+    sharing.reconcile()
+    assert sharing.error is None
+    assert os.path.samefile(sharing.root / audio.relative_to(sharing.library), audio)
+    assert not (sharing.root / gone.relative_to(sharing.library)).exists()
