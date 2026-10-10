@@ -863,6 +863,17 @@ def test_soulseek_outage_requeues_instead_of_failing(backend, monkeypatch):
     main.stop.clear()
 
 
+def test_youtube_downloads_one_album_at_a_time(backend):
+    main, _ = backend
+    assert main.paused_sources(("queued",)) == ()
+    main.store.put("jobs", "yt1", {"candidate": {"source": "youtube"}}, owner="mateo", stage="downloading", created_at="1")
+    main.store.put("jobs", "yt2", {"candidate": {"source": "youtube"}}, owner="mateo", stage="queued", created_at="2")
+    assert main.paused_sources(("queued",)) == ("youtube",)
+    assert main.store.claim(("queued",), paused=main.paused_sources(("queued",))) is None
+    main.store.update_job("yt1", stage="published")
+    assert main.store.claim(("queued",), paused=main.paused_sources(("queued",)))["id"] == "yt2"
+
+
 def test_soulseek_status_endpoint(backend, monkeypatch):
     main, client = backend
     monkeypatch.setattr(main, "soulseek_health", main.SoulseekHealth(lambda: False))

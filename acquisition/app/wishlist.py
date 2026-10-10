@@ -6,7 +6,7 @@ when a download fails. A list that runs out is searched again a day later, for a
 picked from search results is tried first; if it fails, the request searches like any other.
 A link is downloaded as given, once a day for a week until it works.
 
-Albums and tracks that came in lossy are searched once a week for a lossless copy, for four
+Albums and tracks that came in lossy are searched once a week for a better copy, for four
 weeks; review replaces the lossy tracks. Downloads are jobs (app.main); a request follows one
 job at a time. (The table is still called "wishlist".)
 """
@@ -29,7 +29,7 @@ log = logging.getLogger("acquisition")
 DAY = 24 * 3600
 SEARCH_AGAIN = DAY             # after a list runs out, or nothing was found
 SEARCHES = 7                   # a week of daily searches, then give up
-UPGRADE_EVERY = 7 * DAY        # a lossy album or track: look for lossless this often
+UPGRADE_EVERY = 7 * DAY        # a lossy album or track: look for a better copy this often
 UPGRADE_FOR = 28 * DAY         # ...for this long after it arrived
 LOSSLESS = 3                   # matching.quality of a lossless copy
 YOUTUBE_TITLE_FLOOR = 0.2      # 2026-10-09: right albums scored 0.23 and 0.40, same-titled ones by others 0.03-0.18
@@ -45,10 +45,16 @@ def item_id(owner, list_name, artist, album, kind="album", title="", url=""):
     return hashlib.sha256(f"{owner}\0{list_name}\0{matching.key(artist)}\0{name}".encode()).hexdigest()[:24]
 
 
+def search_artist(artist):
+    """The artist to put in a search: none for a compilation, whose folders rarely say "Various Artists"."""
+    first = matching.clean_artist(artist)
+    return "" if matching.key(first) in {"variousartists", "various", "va", "vvaa"} else first
+
+
 def soulseek_queries(album, artist, year=None):
     """Artist + album; the album alone (the server drops some artist names); the artist alone
     (typos in the album name); album + year for short titles under a dropped artist name."""
-    first = matching.clean_artist(artist)
+    first = search_artist(artist)
     name = matching.re.sub(r"\s*[\(\[].*?[\)\]]", "", album).strip() or album
     ladder = [f"{first} {name}".strip(), name if len(matching.key(name)) >= 5 or len(name.split()) >= 2 else None,
               first if len(matching.key(first)) >= 3 else None,
@@ -162,8 +168,8 @@ class Wishlist:
             item.update(status="have", note="In the library", candidates=[])
             self.save(item)
         if item["status"] == "have":
-            if "quality" not in item:
-                self._backfill_quality(item, jobs)
+            if item.get("quality") is None and not item.get("quality_checked"):
+                self._backfill_quality(item, jobs, library)
             if self._upgrading(item):
                 self._next(item, jobs, upgrade=True)
             return
@@ -184,24 +190,27 @@ class Wishlist:
             return matching.library_has_track(library, item)
         return False   # a link: only its own download counts
 
-    def _backfill_quality(self, item, jobs):
-        """Albums that arrived before quality was recorded: read it from the job that published them."""
+    def _backfill_quality(self, item, jobs, library):
+        """Albums that arrived before quality was recorded: read it from the job that published them,
+        or from the library's files for albums that were there before they were requested."""
         published = [j for j in jobs.values() if j["stage"] == "published"
                      and (j.get("candidate") or {}).get("wishlist_id") == item["id"] and j["id"] not in item.get("wrong_jobs", [])]
         quality = matching.quality(max(published, key=lambda j: j.get("created_at") or "")["candidate"]) if published else None
-        item["quality"] = quality
+        if quality is None and item["kind"] == "album" and library is not None:
+            quality = matching.library_quality(library, item)
+        item.update(quality=quality, quality_checked=quality is not None or library is not None)
         if quality is not None and quality < LOSSLESS and item["kind"] != "link":
             item.update(upgrade_until=self.clock() + UPGRADE_FOR, next_search_at=0, rounds=0,
-                        note="In the library (lossy); looking for lossless weekly")
+                        note="In the library (lossy); looking for a better copy weekly")
         self.save(item)
 
     def _upgrading(self, item):
-        """A lossy copy arrived less than UPGRADE_FOR ago: keep looking for lossless."""
+        """A lossy copy arrived less than UPGRADE_FOR ago: keep looking for a better copy."""
         if item.get("quality") is None or item["quality"] >= LOSSLESS or not item.get("upgrade_until"):
             return False
         if self.clock() < item["upgrade_until"]:
             return True
-        item.update(upgrade_until=None, candidates=[], note="In the library (lossy; no lossless copy turned up in 4 weeks)")
+        item.update(upgrade_until=None, candidates=[], note="In the library (lossy; no better copy turned up in 4 weeks)")
         self.save(item)
         return False
 
@@ -214,7 +223,7 @@ class Wishlist:
         stage = job["stage"]
         if stage in ACTIVE + ("review",):
             if upgrade:
-                note = "Lossless copy waiting for review" if stage == "review" else f"Getting a lossless copy: {job.get('detail') or stage}"
+                note = "Better copy waiting for review" if stage == "review" else f"Getting a better copy: {job.get('detail') or stage}"
                 if item.get("note") != note:
                     item.update(note=note)
                     self.save(item)
@@ -232,7 +241,7 @@ class Wishlist:
             if quality is not None and quality < LOSSLESS and item["kind"] != "link":
                 if not upgrade:
                     item.update(upgrade_until=self.clock() + UPGRADE_FOR, next_search_at=self.clock() + UPGRADE_EVERY)
-                item["note"] = "Added to the library (lossy); looking for lossless weekly"
+                item["note"] = "Added to the library (lossy); looking for a better copy weekly"
             else:
                 item.update(upgrade_until=None, note="Added to the library")
             self.save(item)
@@ -284,10 +293,10 @@ class Wishlist:
         if found is None:
             return   # a search error, not "not found": try next tick
         if upgrade:
-            found = [c for c in found if matching.quality(c) == LOSSLESS]
+            found = [c for c in found if (matching.quality(c) or 0) > (item.get("quality") or 0)]
         item.update(candidates=found, searched_at=now)
         if not found:
-            self._exhausted(item, upgrade, "No lossless copy found" if upgrade else "Not found")
+            self._exhausted(item, upgrade, "No better copy found" if upgrade else "Not found")
             return
         if not upgrade:
             item.update(status="wanted", note=f"Found {len(found)} cop{'y' if len(found) == 1 else 'ies'}")
@@ -323,7 +332,7 @@ class Wishlist:
             return None
         album, artist, year, title = item["album"], item["artist"], item.get("year"), item.get("title", "")
         avoid = {t["provider"] for t in item["tried"]}
-        first = matching.clean_artist(artist)
+        first = search_artist(artist)
         track = item["kind"] == "track"
 
         def soulseek():
@@ -352,13 +361,14 @@ class Wishlist:
         def youtube():
             if not self.youtube_ready():
                 return []
+            # Requests take YouTube only at Premium quality (256 kbps), so that is what these copies are.
             if track:
-                return self.sources().search(f"{first} {title}".strip(), "youtube", "track")
+                return [{**c, "premium_only": True} for c in self.sources().search(f"{first} {title}".strip(), "youtube", "track")]
             # The album title alone too: blog lists misspell artists ("Andrea" for Andrae Durden).
             results, seen = [], set()
             for query in dict.fromkeys((f"{first} {album}".strip(), album.strip())):
                 found = self.sources().search(query, "youtube", "album")
-                results += [c for c in found if c.get("url") not in seen]
+                results += [{**c, "premium_only": True} for c in found if c.get("url") not in seen]
                 seen |= {c.get("url") for c in found}
             return results
 
@@ -383,7 +393,8 @@ class Wishlist:
         Without a usable answer from the model, the matching rules decide, as before."""
         album, artist = item["album"], item["artist"]
         pool = [c for c in results if self._eligible(c, avoid)]
-        pool.sort(key=lambda c: (-matching.quality(c),) + matching.availability(c))
+        # Results the rules recognise first, so a flood of unrelated ones cannot push them past what the model sees.
+        pool.sort(key=lambda c: (not matching.identity(c, album, artist), -matching.quality(c)) + matching.availability(c))
         verdicts = None
         if self.judge and pool:
             if "tracklist" not in item:
@@ -457,7 +468,7 @@ class Wishlist:
         source = candidate.get("username") or candidate.get("title")
         item["job_id"] = job["id"]
         if upgrade:
-            item["note"] = f"Getting a lossless copy from {candidate['source']}: {source}"
+            item["note"] = f"Getting a better copy from {candidate['source']}: {source}"
         else:
             item.update(status="queued", note=f"Queued from {candidate['source']}: {source}")
         self.save(item)

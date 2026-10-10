@@ -33,9 +33,11 @@ SoundCloud, Bandcamp and Vimeo URLs are supported.
    Music at once; the copies that are that record are ranked by quality
    (lossless first; ties go to whoever can send now) and tried one by one. A copy
    that sends nothing for 10 minutes is dropped for the next one. A list that runs
-   out is searched again daily for a week. Lossy arrivals are searched weekly for
-   a lossless copy for four weeks. YouTube is used only with a Premium login
-   (256 kbps), and can be switched off (`youtube_enabled`).
+   out is searched again daily for a week. Lossy arrivals, and albums already in
+   the library as lossy files, are searched weekly for a better copy for four
+   weeks. YouTube is used only with a Premium login (256 kbps), one album at a
+   time with pauses between tracks, and can be switched off (`youtube_enabled`).
+   A compilation by "Various Artists" is searched by its title.
 2. To pick a copy yourself, search, filter results by file type and quality, and
    choose **Get this**: that copy is tried first, then others if it fails.
    Library hints mark existing tracks or possible matches. A few downloads run at

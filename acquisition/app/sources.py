@@ -842,6 +842,8 @@ class Sources:
                    "ignoreerrors": False,
                    "outtmpl": str(destination / "%(id)s.%(ext)s"), "restrictfilenames": True,
                    "continuedl": True, "overwrites": False, "progress_hooks": [hook],
+                   # A pause between tracks, as a person listening would leave: fewer reasons to block the account.
+                   "sleep_interval": 5, "max_sleep_interval": 15,
                    # The video thumbnail becomes embedded cover art; Navidrome otherwise shows none.
                    "writethumbnail": True, "postprocessor_hooks": [hook], "postprocessors": [
                        {"key": "FFmpegThumbnailsConvertor", "format": "jpg", "when": "before_dl"},

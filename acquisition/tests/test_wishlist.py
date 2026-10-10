@@ -109,12 +109,12 @@ class WishlistTests(unittest.TestCase):
         self.finish(item["id"], "published")
         w.tick()
         saved = self.store.get("wishlist", item["id"])
-        self.assertEqual((saved["status"], saved["quality"]), ("have", 0))
+        self.assertEqual((saved["status"], saved["quality"]), ("have", 2))
         calls = len(sources.calls)
         self.clock[0] += UPGRADE_EVERY - 60
         w.tick()
         self.assertEqual(len(sources.calls), calls)   # not before a week
-        # A week later a 320 shows up: not lossless, so nothing is queued.
+        # A week later a 320 shows up: no better than Premium YouTube (both 256 kbps and up), so nothing is queued.
         sources.results["soulseek"] = [slsk("b", "mp3", 320)]
         self.clock[0] += 60
         w.tick()
@@ -145,7 +145,7 @@ class WishlistTests(unittest.TestCase):
         self.clock[0] += UPGRADE_EVERY
         w.tick()
         self.assertEqual(len(sources.calls), calls)
-        self.assertIn("no lossless copy", self.store.get("wishlist", item["id"])["note"])
+        self.assertIn("no better copy", self.store.get("wishlist", item["id"])["note"])
 
     def test_lossy_albums_from_before_join_the_upgrade_search(self):
         sources = FakeSources({"soulseek": [slsk("a")]})
@@ -161,6 +161,22 @@ class WishlistTests(unittest.TestCase):
         self.assertEqual(saved["quality"], 0)
         self.assertEqual(self.queued[-1]["username"], "a")
         self.assertEqual(saved["status"], "have")
+
+    def test_albums_in_the_library_before_their_request_get_quality_from_the_files(self):
+        sources = FakeSources({"soulseek": [slsk("a")]})
+        w = self.wishlist(sources)
+        album = {"keys": {matching.album_key("Jazz Codes")}, "numbers": matching.numbers("Jazz Codes"),
+                 "artists": {matching.key("Moor Mother")}, "tracks": [f"t{n}" for n in range(6)], "titles": set(),
+                 "qualities": [3, 3, 0, 3, 3, 3]}
+        w._library = lambda: {"al1": album}
+        item = w.add("mateo", "Moor Mother", "Jazz Codes")
+        w.tick()
+        saved = self.store.get("wishlist", item["id"])
+        self.assertEqual((saved["status"], saved["quality"]), ("have", 0))
+        self.assertTrue(saved["upgrade_until"])
+        self.assertEqual(self.queued[-1]["username"], "a")
+        self.assertEqual(matching.file_quality("m4a", 987), 3)
+        self.assertEqual(matching.file_quality("ogg", 135), 0)
 
     def test_youtube_copies_are_left_out_without_a_premium_login(self):
         premium = [False]
@@ -409,3 +425,30 @@ def test_a_track_is_in_the_library_by_artist_and_title_but_not_as_a_remix():
     assert matching.library_has_track(library, {"artist": "Vulfpeck", "title": "Sauna"})
     assert not matching.library_has_track(library, {"artist": "Vulfpeck", "title": "Birds of a Feather"})
     assert not matching.library_has_track(library, {"artist": "Someone Else", "title": "Sauna"})
+
+
+def test_a_compilation_is_searched_by_its_title_and_unrelated_lossless_cannot_crowd_it_out(tmp_path):
+    store, queued = Store(tmp_path / "a.db"), []
+    junk = [torrent(f"j{n}", title=f"Various Artists - Zen Classical Vol. {n} - 2014, FLAC (tracks)") for n in range(30)]
+    copy = slsk("warp", fmt="mp3", bitrate=320, files=12, folder="We Are Reasonable People")
+    sources = FakeSources({"soulseek": [copy], "torrent": junk})
+    judge = FakeJudge(accept={"warp"})
+    w = _wishlist(store, sources, judge, queued)
+    w.add("mateo", "Various Artists", "We Are Reasonable People")
+    w.tick()
+    assert [c["username"] for c in queued] == ["warp"]
+    assert judge.seen[0][0] == "warp"
+    assert all("Various" not in query for query, _ in sources.calls)
+
+
+def test_an_old_youtube_copy_is_upgraded_by_premium_youtube(tmp_path):
+    store, queued = Store(tmp_path / "a.db"), []
+    w = _wishlist(store, FakeSources({"youtube": [yt("Jazz Codes", "Moor Mother - Topic", "OLAK5uy_j", "Moor Mother")]}),
+                  FakeJudge(fail=True), queued)
+    item = w.add("mateo", "Moor Mother", "Jazz Codes")
+    saved = store.get("wishlist", item["id"])
+    saved.update(status="have", quality=0, upgrade_until=w.clock() + UPGRADE_FOR, next_search_at=0)
+    w.save(saved)
+    w.tick()
+    assert queued[-1]["source"] == "youtube" and queued[-1]["premium_only"]
+    assert matching.quality(queued[-1]) == 2

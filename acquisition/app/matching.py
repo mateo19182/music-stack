@@ -44,14 +44,16 @@ def in_library(navidrome_db):
     artists, track ids, and track titles (artist key, title key) for single-track requests."""
     db = sqlite3.connect(f'file:{navidrome_db}?mode=ro', uri=True)
     albums = {}
-    for id, album_id, album, artist, album_artist, title in db.execute(
-            'select id, album_id, album, artist, album_artist, title from media_file '
+    for id, album_id, album, artist, album_artist, title, suffix, bit_rate in db.execute(
+            'select id, album_id, album, artist, album_artist, title, suffix, bit_rate from media_file '
             'where missing = 0 order by album_id, disc_number, track_number, path'):
         a = albums.setdefault(album_id, {'keys': {album_key(album), album_key(re.sub(r'\s*[\(\[].*?[\)\]]', '', album))} - {''},
-                                         'numbers': numbers(album), 'artists': set(), 'tracks': [], 'titles': set()})
+                                         'numbers': numbers(album), 'artists': set(), 'tracks': [], 'titles': set(),
+                                         'qualities': []})
         a['artists'].update({key(artist), key(album_artist)} - {''})
         a['tracks'].append(id)
         a['titles'].add(track_key(title))
+        a['qualities'].append(file_quality(suffix, bit_rate))
     return albums
 
 
@@ -124,8 +126,26 @@ def artist_matches(wanted, credited):
 EDITION = re.compile(r"[\(\[]\s*(director'?s cut|deluxe|expanded|complete)", re.I)
 
 
+def file_quality(suffix, kbps):
+    """matching.quality of a library file; lossy files under 192 kbps count as 0, like YouTube."""
+    suffix, kbps = str(suffix or '').lower(), kbps or 0
+    if suffix in ('flac', 'alac', 'wav', 'aiff', 'aif') or suffix == 'm4a' and kbps >= 500:   # m4a that big is ALAC
+        return 3
+    return 2 if kbps >= 256 else 1 if kbps >= 192 else 0
+
+
+def library_quality(library, item):
+    """The worst file's quality across the library album that is this entry, or None when not found."""
+    return min((q for a in library_albums(library, item) for q in a.get('qualities', [])), default=None)
+
+
 def album_tracks(library, item):
     """Navidrome track ids for a blog entry, in disc/track order. Title (typos allowed) and artist must both match."""
+    return list(dict.fromkeys(t for a in library_albums(library, item) for t in a['tracks']))
+
+
+def library_albums(library, item):
+    """The Navidrome albums that are this entry: title (typos allowed) and artist must both match."""
     artist = key(clean_artist(item['artist']))
     stripped = re.sub(r'\s*[\(\[].*?[\)\]]', '', item['album'])
     names = [item['album']]
@@ -140,8 +160,7 @@ def album_tracks(library, item):
         if found:
             # Navidrome splits an album whose tracks credit different album artists ("Machinedrum,
             # Kučka" / "Machinedrum, DUCKWRTH") into several albums: together they are the album.
-            exact = [a for a in found if k in a['keys']] or found
-            return list(dict.fromkeys(t for a in exact for t in a['tracks']))
+            return [a for a in found if k in a['keys']] or found
     return []
 
 
@@ -350,9 +369,10 @@ def pick_youtube(results, album, artist):
 
 
 def quality(c):
-    """3 lossless, 2 for 256 kbps and up, 1 for 192 kbps and up, 0 for YouTube (lossy, ~130-160 kbps)."""
+    """3 lossless, 2 for 256 kbps and up (YouTube Premium too), 1 for 192 kbps and up, 0 for YouTube
+    without Premium (~130-160 kbps)."""
     if c.get('source') == 'youtube':
-        return 0
+        return 2 if c.get('premium_only') else 0
     fmt, bitrate = (c.get('format') or '').lower(), c.get('bitrate') or 0
     if fmt in ('flac', 'alac', 'wav', 'aiff'):
         return 3

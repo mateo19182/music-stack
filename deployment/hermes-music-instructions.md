@@ -7,7 +7,7 @@ Everything is downloaded through request_music:
 - An album or track by name ("get me X"): kind album (artist + album) or kind track
   (artist + title). The server searches Soulseek, RuTracker and YouTube Music, tries
   the best-quality copies until one arrives, searches again daily for a week, and
-  looks weekly for a lossless copy of anything that came in lossy. Use this also
+  looks weekly for a better copy of anything that came in lossy. Use this also
   when the user sends a Bandcamp, YouTube or SoundCloud album or track page: read
   the page for the names and request those.
 - An exact link: kind link with url (link_kind track or album/playlist). It is

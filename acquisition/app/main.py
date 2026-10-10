@@ -166,11 +166,18 @@ def soulseek_waiting():
 
 
 def paused_sources(stages):
-    """Soulseek downloads wait while slskd is logged out: they would only fail. (Requests decide
-    whether YouTube may be used at all.)"""
-    if "queued" in stages and soulseek_waiting() and not soulseek_health.ready():
-        return ("soulseek",)
-    return ()
+    """Soulseek downloads wait while slskd is logged out: they would only fail. YouTube downloads
+    one at a time, at a listener's pace. (Requests decide whether YouTube may be used at all.)"""
+    if "queued" not in stages:
+        return ()
+    paused = []
+    if soulseek_waiting() and not soulseek_health.ready():
+        paused.append("soulseek")
+    with store.db() as db:
+        if db.execute("SELECT 1 FROM jobs WHERE stage='downloading' "
+                      "AND json_extract(data, '$.candidate.source')='youtube' LIMIT 1").fetchone():
+            paused.append("youtube")
+    return tuple(paused)
 
 
 _review_sightings = {}
