@@ -133,6 +133,14 @@ class SourceTests(unittest.TestCase):
         self.assertEqual(len(sources._validate_playlist({'entries': [{'id': 'a'}, {'id': 'b'}]}, {'kind': 'album'})), 2)
         self.assertNotIn('playlistend', sources._youtube_options())
 
+    def test_youtube_premium_cookies_are_used_only_when_the_file_exists(self):
+        with TemporaryDirectory() as tmp:
+            cookies = Path(tmp) / 'cookies.txt'
+            sources = Sources({'youtube_cookies_file': str(cookies)})
+            self.assertNotIn('cookiefile', sources._youtube_options())
+            cookies.write_text('# Netscape HTTP Cookie File\n')
+            self.assertEqual(sources._youtube_options()['cookiefile'], str(cookies))
+
     def test_cancel_only_owned_remote_transfers(self):
         sources = Sources({})
         candidate = {'source': 'soulseek', 'username': 'peer', 'transfer_ids': ['shared', 'own'], 'owned_transfer_ids': ['own']}

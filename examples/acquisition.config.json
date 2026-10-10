@@ -8,6 +8,7 @@
   "slskd_search_seconds": 15,
   "download_timeout_seconds": 3600,
   "download_stall_seconds": 600,
+  "youtube_cookies_file": "/state/youtube-cookies.txt",
   "ingestion_workers": 1,
   "download_workers": 4,
   "telegram_bot_token": "",

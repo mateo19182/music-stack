@@ -78,6 +78,8 @@ class SearchLimiter:
 
 soulseek_searches = SearchLimiter()
 
+# Premium 256 kbps Opus, then Premium 256 kbps AAC, then the best audio for everyone (~130-160 kbps Opus).
+YOUTUBE_FORMAT = "774/141/bestaudio/best"
 YOUTUBE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be", "www.youtu.be"}
 
 
@@ -445,10 +447,15 @@ class Sources:
         self._slskd('PUT', f'/conversations/{quote(username, safe="")}')
 
     def _youtube_options(self):
-        return {"quiet": True, "no_warnings": True, "logger": _QuietLogger(), "socket_timeout": 20,
-                "retries": 2, "extractor_retries": 2, "cachedir": False,
-                "js_runtimes": {"node": {"path": self.config.get("node_path", "node")}},
-                "allowed_extractors": ["youtube.*", "soundcloud.*", "bandcamp.*", "vimeo.*"]}
+        options = {"quiet": True, "no_warnings": True, "logger": _QuietLogger(), "socket_timeout": 20,
+                   "retries": 2, "extractor_retries": 2, "cachedir": False,
+                   "js_runtimes": {"node": {"path": self.config.get("node_path", "node")}},
+                   "allowed_extractors": ["youtube.*", "soundcloud.*", "bandcamp.*", "vimeo.*"]}
+        # A YouTube Premium account's cookies unlock 256 kbps audio (formats 774 and 141).
+        cookies = self.config.get("youtube_cookies_file")
+        if cookies and Path(cookies).is_file():
+            options["cookiefile"] = cookies
+        return options
 
     def search(self, query, source="all", kind="track"):
         query = query.strip()
@@ -801,7 +808,7 @@ class Sources:
         candidate["file_count"] = len({str(entry["id"]) for entry in entries})
         progress({"candidate": candidate, "message": "Source identity confirmed", "percent": 0})
         hook({})
-        options = {**self._youtube_options(), "format": "bestaudio/best", "noplaylist": candidate.get("kind") != "album",
+        options = {**self._youtube_options(), "format": YOUTUBE_FORMAT, "noplaylist": candidate.get("kind") != "album",
                    "ignoreerrors": False,
                    "outtmpl": str(destination / "%(id)s.%(ext)s"), "restrictfilenames": True,
                    "continuedl": True, "overwrites": False, "progress_hooks": [hook],
