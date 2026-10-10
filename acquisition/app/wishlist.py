@@ -49,11 +49,12 @@ def soulseek_queries(album, artist, year=None):
 
 class Wishlist:
     def __init__(self, store, config, sources, enqueue, soulseek_ready=lambda: True, clock=time.time, judge=None,
-                 tracklist=None):
+                 tracklist=None, youtube_ready=lambda: True):
         self.store, self.config, self.sources, self.enqueue = store, config, sources, enqueue
         self.judge = judge   # app.llm_match.Judge, or None: the matching rules alone
         self.tracklist = tracklist or self._musicbrainz_tracklist
-        self.soulseek_ready, self.clock = soulseek_ready, clock
+        # YouTube copies only while the Premium login works: without it YouTube is ~130 kbps.
+        self.soulseek_ready, self.youtube_ready, self.clock = soulseek_ready, youtube_ready, clock
         self._playlists_at = 0.0
         self._searches_left = 0
 
@@ -203,7 +204,8 @@ class Wishlist:
         """Try the best untried copy; when the list runs out, search again later."""
         now = self.clock()
         tried = {t["provider"] for t in item["tried"]}
-        untried = [c for c in item["candidates"] if matching.provider(c) not in tried]
+        untried = [c for c in item["candidates"] if matching.provider(c) not in tried
+                   and (c.get("source") != "youtube" or self.youtube_ready())]
         if untried:
             if self._room(jobs):
                 self._queue(item, untried[0], jobs, upgrade)
@@ -276,6 +278,8 @@ class Wishlist:
             return results
 
         def youtube():
+            if not self.youtube_ready():
+                return []
             # The album title alone too: blog lists misspell artists ("Andrea" for Andrae Durden).
             results, seen = [], set()
             for query in dict.fromkeys((f"{first} {album}".strip(), album.strip())):

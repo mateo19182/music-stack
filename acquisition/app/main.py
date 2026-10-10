@@ -225,7 +225,7 @@ def needs_you_alerts(send=None):
 
 
 PREMIUM_CHECK_SECONDS = 6 * 3600
-_premium = {"checked": 0.0, "alerted": False}
+_premium = {"checked": 0.0, "alerted": False, "working": None}
 
 
 def youtube_premium_alert(send=None, clock=time.time):
@@ -235,9 +235,11 @@ def youtube_premium_alert(send=None, clock=time.time):
         return
     _premium["checked"] = clock()
     working = Sources(config).youtube_premium()
+    if working is not None:
+        _premium["working"] = working
     send = send or (lambda text: telegram(config, text))
     if working is False and not _premium["alerted"]:
-        _premium["alerted"] = bool(send("⚠️ The YouTube Premium login expired: YouTube downloads are back to ~130 kbps.\n"
+        _premium["alerted"] = bool(send("⚠️ The YouTube Premium login expired: albums are no longer taken from YouTube.\n"
                                         "Export new cookies (private window, music.youtube.com) and send them to update "
                                         "youtube-cookies.txt."))
     elif working and _premium["alerted"]:
@@ -258,7 +260,7 @@ def soulseek_watcher():
 
 match_judge = Judge(config)
 wishlist = Wishlist(store, config, lambda: Sources(config), lambda candidate, user: enqueue(candidate, user),
-                    soulseek_ready=lambda: soulseek_health.ready(), judge=match_judge if match_judge.enabled else None)
+                    soulseek_ready=lambda: soulseek_health.ready(), youtube_ready=lambda: _premium["working"] is True, judge=match_judge if match_judge.enabled else None)
 
 
 def wishlist_worker():
@@ -802,12 +804,14 @@ def worker(stages=("queued", "process_queued", "publish_queued")):
                     prepared = [r for r in prepared if r["path"] in job["selected_paths"]]
                     if not prepared:
                         raise ValueError("No selected tracks remain available for publication")
+                if job.get("replace"):
+                    # Old versions go to trash first, so the better copy takes their file names
+                    # instead of a name with a hash added. Undo restores them.
+                    retire_versions(ingestor, job)
                 records = ingestor.publish(
                     prepared, job.get("edits", {}), id, progress, cancelled
                 )
                 register_files(records, job, True)
-                if job.get("replace"):
-                    retire_versions(ingestor, job)
                 with store.db() as db:
                     db.execute(
                         "DELETE FROM files WHERE job_id=? AND published=0", (id,)

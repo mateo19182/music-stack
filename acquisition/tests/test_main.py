@@ -749,6 +749,17 @@ def test_replaced_versions_go_to_trash_once(backend):
     assert main.retire_versions(ingestor, main.store.get("jobs", "better")) == first
 
 
+def test_a_better_copy_takes_the_replaced_files_name(backend):
+    main, _ = backend
+    ingestor = main.Ingestor(main.config)
+    old = ingestor.process([tone(main.STATE / "old" / "Song.mp3", 4)], {}, "old")[0]
+    main.register_files([old], {"id": "old-job", "owner": "mateo"}, True)
+    main.store.put("jobs", "better", {"replace": {"x": [old["path"]]}}, owner="mateo", stage="publishing", created_at="1")
+    main.retire_versions(ingestor, main.store.get("jobs", "better"))
+    new = ingestor.process([tone(main.STATE / "new" / "Song.mp3", 5)], {}, "new")[0]
+    assert new["path"] == old["path"]   # no " [hash]" added: the name was free
+
+
 def test_download_lanes_run_in_parallel_within_bounds(backend):
     main, _ = backend
     assert main.download_lanes(None) == [("download-worker", ("queued",))]

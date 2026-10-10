@@ -162,6 +162,20 @@ class WishlistTests(unittest.TestCase):
         self.assertEqual(self.queued[-1]["username"], "a")
         self.assertEqual(saved["status"], "have")
 
+    def test_youtube_copies_are_left_out_without_a_premium_login(self):
+        premium = [False]
+        sources = FakeSources({"youtube": [yt("Jazz Codes", "Moor Mother - Topic", "OLAK5uy_j", "Moor Mother")]})
+        w = self.wishlist(sources)
+        w.youtube_ready = lambda: premium[0]
+        item = w.add("mateo", "Moor Mother", "Jazz Codes")
+        w.tick()
+        self.assertEqual(self.queued, [])
+        self.assertNotIn("youtube", {s for _, s in sources.calls})
+        premium[0] = True
+        self.clock[0] += SEARCH_AGAIN
+        w.tick()
+        self.assertEqual(self.queued[-1]["source"], "youtube")
+
     def test_queueing_waits_while_every_download_worker_has_a_job_waiting(self):
         for n in range(4):
             self.store.put("jobs", uid(), {"candidate": {"source": "soulseek", "username": f"u{n}"}}, owner="mateo",

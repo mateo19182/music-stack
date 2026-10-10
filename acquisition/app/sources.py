@@ -80,6 +80,8 @@ soulseek_searches = SearchLimiter()
 
 # Premium 256 kbps Opus, then Premium 256 kbps AAC, then the best audio for everyone (~130-160 kbps Opus).
 YOUTUBE_FORMAT = "774/141/bestaudio/best"
+# Albums the Wishlist found: Premium quality or nothing (another copy is tried instead).
+YOUTUBE_PREMIUM_FORMAT = "774/141"
 PREMIUM_FORMATS = {"774", "141"}
 PREMIUM_PROBE = "https://music.youtube.com/watch?v=lYBUbBu4W08"   # any YouTube Music track
 YOUTUBE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be", "www.youtu.be"}
@@ -828,7 +830,8 @@ class Sources:
         candidate["file_count"] = len({str(entry["id"]) for entry in entries})
         progress({"candidate": candidate, "message": "Source identity confirmed", "percent": 0})
         hook({})
-        options = {**self._youtube_options(), "format": YOUTUBE_FORMAT, "noplaylist": candidate.get("kind") != "album",
+        options = {**self._youtube_options(),
+                   "format": YOUTUBE_PREMIUM_FORMAT if candidate.get("wishlist_id") else YOUTUBE_FORMAT, "noplaylist": candidate.get("kind") != "album",
                    "ignoreerrors": False,
                    "outtmpl": str(destination / "%(id)s.%(ext)s"), "restrictfilenames": True,
                    "continuedl": True, "overwrites": False, "progress_hooks": [hook],
