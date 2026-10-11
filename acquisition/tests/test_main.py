@@ -1067,3 +1067,25 @@ def test_quick_download_starts_now_in_its_own_lane_and_zips_whatever_has_arrived
     assert archive.namelist() == ["Vulfpeck/MSG II/01 Sauna.flac"] and archive.read(archive.namelist()[0]) == b"tagged"
     signin(main, client, monkeypatch, name="other", admin=False)
     assert client.get(f"/api/jobs/{job_id}/zip").status_code == 404
+
+
+def test_suggested_tracks_wait_for_the_owner_to_choose_them(backend, monkeypatch):
+    main, client = backend
+    signin(main, client, monkeypatch)
+    ids = [main.wishlist.add("mateo", "Herbie Hancock", "Head Hunters", "Saved tracks", kind="track", title=t,
+                             status="suggested", note="Waiting for your choice")["id"] for t in ("Sly", "Vein Melter")]
+    listed = client.get("/api/requests").json()
+    assert listed["suggested"] == 2 and listed["items"] == []
+    assert sorted(i["title"] for i in client.get("/api/requests/suggested").json()["items"]) == ["Sly", "Vein Melter"]
+    # Never searched while waiting.
+    searched = []
+    monkeypatch.setattr(main.wishlist, "_advance", lambda item, *a: searched.append(item["id"]))
+    main.wishlist.tick()
+    assert searched == []
+    assert client.post("/api/requests/choose", json={"ids": [ids[0]], "get": True}).json() == {"count": 1}
+    assert client.post("/api/requests/choose", json={"ids": [ids[1]], "get": False}).json() == {"count": 1}
+    assert main.store.get("wishlist", ids[0])["status"] == "wanted" and main.store.get("wishlist", ids[1]) is None
+    main.wishlist.tick()
+    assert searched == [ids[0]]
+    # Only the owner's own suggestions, and only while they are suggestions.
+    assert client.post("/api/requests/choose", json={"ids": [ids[0]], "get": False}).json() == {"count": 0}

@@ -79,6 +79,11 @@ class RequestAdd(BaseModel):
     quick: bool = False
 
 
+class RequestChoice(BaseModel):
+    ids: List[str] = Field(min_length=1, max_length=2000)
+    get: bool
+
+
 class Retry(BaseModel):
     stage: str = "download"
 
@@ -2033,13 +2038,37 @@ def owned_request(id, user):
 
 @app.get("/api/requests")
 def list_requests(user=Depends(check_user)):
-    items = wishlist.items(user["username"])
+    everything = wishlist.items(user["username"])
+    items = [i for i in everything if i["status"] != "suggested"]
     jobs = {j["id"]: j for j in store.list("jobs", "owner=? AND stage NOT IN ('failed','cancelled','rejected','published')",
                                            (user["username"],))}
     lists = list(dict.fromkeys(i["list"] for i in items))
     matching = {"model": match_judge.model if match_judge.enabled else None, "calls": match_judge.usage["calls"],
                 "cost_usd": round(match_judge.cost(), 4)}   # since the app started
-    return {"lists": lists, "items": [wishlist.view(i, jobs) for i in items], "matching": matching}
+    return {"lists": lists, "items": [wishlist.view(i, jobs) for i in items], "matching": matching,
+            "suggested": len(everything) - len(items)}
+
+
+@app.get("/api/requests/suggested")
+def suggested_requests(user=Depends(check_user)):
+    """Tracks offered for the owner to choose (saved elsewhere, missing here); none is searched until chosen."""
+    return {"items": [{k: i.get(k) for k in ("id", "artist", "title", "album", "list")}
+                      for i in wishlist.items(user["username"]) if i["status"] == "suggested"]}
+
+
+@app.post("/api/requests/choose")
+def choose_requests(body: RequestChoice, user=Depends(check_user)):
+    """Chosen suggestions become requests searched now; the others are removed."""
+    chosen = [i for i in (store.get("wishlist", id) for id in dict.fromkeys(body.ids))
+              if i and i["owner"] == user["username"] and i["status"] == "suggested"]
+    for item in chosen:
+        if body.get:
+            item.update(status="wanted", note="Waiting to search", next_search_at=0)
+            wishlist.save(item)
+        else:
+            with store.db() as db:
+                db.execute("DELETE FROM wishlist WHERE id=?", (item["id"],))
+    return {"count": len(chosen)}
 
 
 @app.post("/api/requests")

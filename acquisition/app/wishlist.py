@@ -140,7 +140,8 @@ class Wishlist:
 
     # ---- the loop ------------------------------------------------------------------------
     def tick(self):
-        items = [i for i in self.items() if i.get("status") != "skipped"]
+        # Suggestions wait for the owner to choose them; they are never searched.
+        items = [i for i in self.items() if i.get("status") not in ("skipped", "suggested")]
         if not items:
             return
         library = self._library()

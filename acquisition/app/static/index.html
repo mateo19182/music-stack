@@ -180,6 +180,17 @@
             </select></label>
             <span id="wishlist-summary" class="muted"></span>
           </div>
+          <details id="suggest-picker" class="card" hidden>
+            <summary>Choose from your saved tracks <span id="suggest-count" class="muted"></span></summary>
+            <p class="muted">Tracks you saved elsewhere that the library lacks. Nothing here is searched until you choose it.</p>
+            <div class="suggest-tools">
+              <input id="suggest-filter" type="search" placeholder="Filter by artist, title or album" aria-label="Filter saved tracks">
+              <button id="suggest-get" disabled>Get selected</button>
+              <button id="suggest-drop" class="quiet" disabled>Not these</button>
+              <span id="suggest-selected" class="muted"></span>
+            </div>
+            <div id="suggest-list"></div>
+          </details>
           <div id="wishlist"></div>
           <div class="section-title"><h2>Recently added</h2></div>
           <div id="recent"></div>

@@ -1665,6 +1665,8 @@ function wishRow(i) {
 async function loadWishlist() {
   const data = await api("/api/requests");
   state.wishlist = data;
+  $("#suggest-picker").hidden = !data.suggested;
+  $("#suggest-count").textContent = data.suggested ? `(${data.suggested})` : "";
   const lists = $("#wish-filter-list");
   const chosen = lists.value;
   lists.innerHTML = `<option value="">All lists</option>${data.lists.map((l) => `<option ${l === chosen ? "selected" : ""}>${esc(l)}</option>`).join("")}`;
@@ -1691,6 +1693,67 @@ function renderWishlist() {
     ? Object.entries(byList).map(([name, rows]) => `<div class="section-title"><h2>${esc(name)} <span class="muted">${rows.length}</span></h2></div>${rows.map(wishRow).join("")}`).join("")
     : `<p class="muted">${data.items.length ? "Nothing matches these filters." : "No requests yet. Add one above, or pick a copy in Search."}</p>`;
 }
+// Saved tracks to choose from, grouped by artist (most saved first).
+const suggest = { items: [], groups: [], selected: new Set(), shown: 40 };
+async function loadSuggestions() {
+  suggest.items = (await api("/api/requests/suggested")).items;
+  suggest.selected = new Set([...suggest.selected].filter((id) => suggest.items.some((i) => i.id === id)));
+  renderSuggestions();
+}
+function renderSuggestions() {
+  const words = $("#suggest-filter").value.toLocaleLowerCase().split(/\s+/).filter(Boolean);
+  const byArtist = new Map();
+  for (const i of suggest.items) {
+    const text = `${i.artist} ${i.title} ${i.album || ""}`.toLocaleLowerCase();
+    if (words.every((w) => text.includes(w))) {
+      if (!byArtist.has(i.artist)) byArtist.set(i.artist, []);
+      byArtist.get(i.artist).push(i);
+    }
+  }
+  suggest.groups = [...byArtist].sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
+  const shown = suggest.groups.slice(0, suggest.shown);
+  $("#suggest-list").innerHTML = shown.length
+    ? shown.map(([artist, tracks], n) => {
+        const all = tracks.every((t) => suggest.selected.has(t.id));
+        return `<div class="suggest-artist"><label><input type="checkbox" data-suggest-artist="${n}" ${all ? "checked" : ""}> <strong>${esc(artist)}</strong> <span class="muted">${tracks.length} track${tracks.length === 1 ? "" : "s"}</span></label><div class="suggest-tracks">${tracks
+          .map((t) => `<label><input type="checkbox" data-suggest="${esc(t.id)}" ${suggest.selected.has(t.id) ? "checked" : ""}> ${esc(t.title)}${t.album ? ` <span class="muted">· ${esc(t.album)}</span>` : ""}</label>`)
+          .join("")}</div></div>`;
+      }).join("") + (suggest.groups.length > shown.length ? `<button class="quiet" id="suggest-more">Show more artists (${suggest.groups.length - shown.length} left)</button>` : "")
+    : `<p class="muted">${suggest.items.length ? "Nothing matches the filter." : "Nothing left to choose."}</p>`;
+  const count = suggest.selected.size;
+  $("#suggest-selected").textContent = count ? `${count} selected` : "";
+  $("#suggest-get").disabled = $("#suggest-drop").disabled = !count;
+}
+$("#suggest-picker").addEventListener("toggle", (e) => {
+  if (e.target.open) loadSuggestions().catch((error) => toast(error.message, true));
+});
+$("#suggest-filter").addEventListener("input", () => {
+  suggest.shown = 40;
+  renderSuggestions();
+});
+$("#suggest-list").addEventListener("change", (e) => {
+  const box = e.target;
+  if (box.dataset.suggest) box.checked ? suggest.selected.add(box.dataset.suggest) : suggest.selected.delete(box.dataset.suggest);
+  else if (box.dataset.suggestArtist)
+    for (const t of suggest.groups[Number(box.dataset.suggestArtist)][1])
+      box.checked ? suggest.selected.add(t.id) : suggest.selected.delete(t.id);
+  renderSuggestions();
+});
+$("#suggest-list").addEventListener("click", (e) => {
+  if (e.target.id !== "suggest-more") return;
+  suggest.shown += 40;
+  renderSuggestions();
+});
+for (const [button, get] of [["#suggest-get", true], ["#suggest-drop", false]])
+  $(button).addEventListener("click", (e) =>
+    suggest.selected.size && busy(e.target, async () => {
+      const ids = [...suggest.selected];
+      for (let n = 0; n < ids.length; n += 2000) await api("/api/requests/choose", { ids: ids.slice(n, n + 2000), get });
+      toast(get ? `${ids.length} requested; searching starts now.` : `${ids.length} removed from the choices.`);
+      suggest.selected.clear();
+      await Promise.all([loadSuggestions(), loadWishlist()]);
+    }),
+  );
 $("#wish-filter-list").addEventListener("change", renderWishlist);
 $("#wish-filter-status").addEventListener("change", renderWishlist);
 $("#wish-kind").addEventListener("change", (e) => {

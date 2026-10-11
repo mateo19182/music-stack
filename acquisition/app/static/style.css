@@ -1378,3 +1378,9 @@ body:has(#player-bar:not([hidden])) .review-bar {
 .wish-row details p {
   margin: 4px 0;
 }
+
+.suggest-tools { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; margin: 0.5rem 0; }
+.suggest-tools input[type="search"] { flex: 1 1 14rem; }
+.suggest-artist { border-top: 1px solid var(--border, #ddd); padding: 0.4rem 0; }
+.suggest-tracks { display: grid; gap: 0.15rem; padding-left: 1.6rem; }
+.suggest-tracks label { font-weight: normal; }
