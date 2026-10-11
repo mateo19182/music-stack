@@ -15,7 +15,7 @@ from starlette.background import BackgroundTask
 from mediafile import MediaFile
 
 from .store import Store, uid, now
-from .sources import Sources, SourceError, SoulseekUnavailable, DownloadCancelled, youtube_url
+from .sources import Sources, SourceError, SoulseekUnavailable, DownloadCancelled, youtube_url, _timestamp
 from .wishlist import KINDS, Wishlist
 from .llm_match import Judge
 from typing import List
@@ -77,6 +77,12 @@ class RequestAdd(BaseModel):
     list: str = Field(default="Requests", min_length=1, max_length=120)
     # Start the picked result now and offer its files for download as soon as they arrive.
     quick: bool = False
+    # Stop at the copies found and wait for a choice (choose_request) instead of taking the best one.
+    hold: bool = False
+
+
+class CopyChoice(BaseModel):
+    candidate_id: str = Field(min_length=1, max_length=128)
 
 
 class RequestChoice(BaseModel):
@@ -200,9 +206,14 @@ def decide_open_reviews():
             log.exception("Review model failed for job %s; it stays in Review", job["id"])
 
 
-def needs_you_alerts(send=None):
-    """Telegram, once each: uploaders asking for a human check, and downloads waiting for review."""
+AGENT_GRACE = 15 * 60   # the agent polls /api/pending; only what it leaves alone reaches Telegram
+
+
+def needs_you_alerts(send=None, clock=time.time):
+    """Telegram, once each: uploaders asking for a human check, and downloads waiting for review,
+    when they have waited longer than the agent's grace period."""
     send = send or (lambda text: telegram(config, text))
+    now_ = clock()
     path = STATE / "notified.json"
     seen = set(json.loads(path.read_text())) if path.exists() else set()
     link = config.get("public_url", "").rstrip("/")
@@ -214,10 +225,11 @@ def needs_you_alerts(send=None):
         checks = []
     for check in checks:
         key = f"check:{check['username']}:{check.get('since')}"
-        if check["status"] == "open" and key not in seen:
+        since = _timestamp(check.get("since")) or now_
+        if check["status"] == "open" and key not in seen and now_ - since >= AGENT_GRACE:
             messages.append(([key], f"🔐 Soulseek user {check['username']} asks for a human check before sharing:\n"
                                     f"“{str(check.get('message') or '')[:300]}”\nAnswer it in Needs you." + footer))
-    # A job seen in review on two ticks in a row: automatic adding had its chance and left questions.
+    # A job in review for the grace period: automatic adding and the agent had their chance.
     reviews = {job["id"]: job for job in store.list("jobs", "stage='review'")}
     for id in list(_review_sightings):
         if id not in reviews:
@@ -226,9 +238,9 @@ def needs_you_alerts(send=None):
     for id, job in reviews.items():
         if f"review:{id}" in seen:
             continue
-        if _review_sightings.get(id):
+        first = _review_sightings.setdefault(id, now_)
+        if now_ - first >= AGENT_GRACE:
             ready.append(job)
-        _review_sightings[id] = True
     if ready:
         names = "\n".join(f"• {job.get('label') or 'Download'}" for job in ready[:10])
         more = f"\n…and {len(ready) - 10} more" if len(ready) > 10 else ""
@@ -1650,7 +1662,7 @@ def publish_selection(job, records, selected, later, edits, approved_by, replace
 @app.post("/api/jobs/{id}/skip")
 def skip_tracks(id: str, body: FileChoice, user=Depends(check_user)):
     """Leave some tracks out for good; they stay privately in the retained download."""
-    require_manual(user)
+    require_approver(user)
     job = owned_job(id, user)
     if job["stage"] != "review":
         raise HTTPException(409, "Job is not awaiting review")
@@ -2036,17 +2048,38 @@ def owned_request(id, user):
     return item
 
 
+REQUEST_SETTLED = ("have", "skipped", "not_found", "gave_up")
+
+
+def request_jobs(user):
+    return {j["id"]: j for j in store.list("jobs", "owner=? AND stage NOT IN ('failed','cancelled','rejected','published')",
+                                           (user["username"],))}
+
+
 @app.get("/api/requests")
-def list_requests(user=Depends(check_user)):
+def list_requests(user=Depends(check_user), q: str = "", status: str = "", limit: int = 0):
+    """Everything by default (the web app's Requests tab). `status` narrows to one status, or
+    `active` (not settled); `q` matches artist, album or title; `limit` caps the items."""
     everything = wishlist.items(user["username"])
     items = [i for i in everything if i["status"] != "suggested"]
-    jobs = {j["id"]: j for j in store.list("jobs", "owner=? AND stage NOT IN ('failed','cancelled','rejected','published')",
-                                           (user["username"],))}
+    suggested = len(everything) - len(items)
     lists = list(dict.fromkeys(i["list"] for i in items))
+    if status == "active":
+        items = [i for i in items if i["status"] not in REQUEST_SETTLED]
+    elif status and status != "all":
+        items = [i for i in items if i["status"] == status]
+    if q.strip():
+        words = q.casefold().split()
+        items = [i for i in items if all(w in f"{i['artist']} {i.get('album') or ''} {i.get('title') or ''}".casefold()
+                                         for w in words)]
+    total = len(items)
+    if limit > 0:
+        items = items[:min(limit, 500)]
+    jobs = request_jobs(user)
     matching = {"model": match_judge.model if match_judge.enabled else None, "calls": match_judge.usage["calls"],
                 "cost_usd": round(match_judge.cost(), 4)}   # since the app started
-    return {"lists": lists, "items": [wishlist.view(i, jobs) for i in items], "matching": matching,
-            "suggested": len(everything) - len(items)}
+    return {"lists": lists, "items": [wishlist.view(i, jobs) for i in items], "total": total, "matching": matching,
+            "suggested": suggested}
 
 
 @app.get("/api/requests/suggested")
@@ -2069,6 +2102,54 @@ def choose_requests(body: RequestChoice, user=Depends(check_user)):
             with store.db() as db:
                 db.execute("DELETE FROM wishlist WHERE id=?", (item["id"],))
     return {"count": len(chosen)}
+
+
+@app.get("/api/requests/{id}")
+def get_request(id: str, user=Depends(check_user)):
+    """One request with every copy it found, and the review questions of its download, if any."""
+    item = owned_request(id, user)
+    detail = wishlist.detail(item, request_jobs(user))
+    job = store.get("jobs", item["job_id"]) if item.get("job_id") else None
+    if job and job["stage"] == "review":
+        detail["review"] = review_questions(job)
+    return detail
+
+
+def review_questions(job):
+    """What a review still asks, per track: the plan's open questions and the model's doubts."""
+    view = job_view(job)
+    return {"job_id": job["id"], "label": job.get("label"),
+            "files": [{"id": f["id"], "title": f.get("title"), "artist": f.get("artist"), "album": f.get("album"),
+                       "format": f.get("format"), "bitrate": f.get("bitrate"), "duration": f.get("duration"),
+                       "action": (f.get("plan") or {}).get("action"), "questions": (f.get("plan") or {}).get("questions", [])}
+                      for f in view.get("files", [])],
+            "model_decisions": job.get("model_decisions"), "concerns": (job.get("review_summary") or {}).get("concerns")}
+
+
+@app.post("/api/requests/{id}/choose")
+def choose_request(id: str, body: CopyChoice, user=Depends(check_user)):
+    """Get this copy of a request that stopped at the copies it found."""
+    item = owned_request(id, user)
+    if item["status"] != "choice":
+        raise HTTPException(409, "This request is not waiting for a choice")
+    if not wishlist.choose(item, body.candidate_id):
+        raise HTTPException(404, "That copy is not one this request found")
+    return wishlist.view(item, request_jobs(user))
+
+
+@app.get("/api/pending")
+def pending(user=Depends(check_user)):
+    """What waits for a decision: requests holding at their copies, reviews with open questions,
+    uploaders asking for a human check, and agents asking for approval rights."""
+    jobs = request_jobs(user)
+    choices = [wishlist.view(i, jobs) for i in wishlist.items(user["username"]) if i["status"] == "choice"]
+    reviews = [review_questions(j) for j in store.list("jobs", "stage='review' AND owner=?", (user["username"],),
+                                                       order="created_at")]
+    checks = [c for c in soulseek_checks(user)["checks"] if c.get("status") == "open"] if user["isAdmin"] else []
+    asks = [agent_request_view(r) for r in store.list("sessions", "expires>?", (time.time(),))
+            if r.get("kind") == "agent_request" and r.get("status") == "pending"] if user["isAdmin"] else []
+    return {"choices": choices, "reviews": reviews, "checks": checks,
+            "agent_requests": [{k: a.get(k) for k in ("id", "name", "can_approve", "requested_by", "created_at")} for a in asks]}
 
 
 @app.post("/api/requests")
@@ -2098,7 +2179,7 @@ def add_request(body: RequestAdd, user=Depends(check_user)):
         if not pick and not (artist.strip() and (album if kind == "album" else title).strip()):
             raise HTTPException(400, "Enter an artist and " + ("an album" if kind == "album" else "a title"))
         item = wishlist.add(user["username"], artist, album, body.list.strip(), kind=kind, title=title, pick=pick,
-                            position=int(time.time()), renew=True)
+                            position=int(time.time()), renew=True, **({"hold": True} if body.hold else {}))
     if body.quick:
         if not pick:
             raise HTTPException(400, "Quick download needs a search result")
@@ -2178,8 +2259,7 @@ def soulseek_checks(user=Depends(check_user)):
 
 @app.post("/api/soulseek/checks/{username}/reply")
 def reply_to_check(username: str, body: CheckReply, user=Depends(check_user)):
-    """Send the answer the user typed. Agents may not answer human checks."""
-    require_manual(user)
+    """Send the answer the user, or their agent, wrote to the uploader."""
     if not user["isAdmin"]:
         raise HTTPException(403, "Administrator access required")
     if not any(c["username"] == username for c in _checks_cache["checks"]):

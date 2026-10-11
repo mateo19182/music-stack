@@ -1617,14 +1617,14 @@ $("#import-existing").addEventListener("toggle", (e) => {
 
 // Wishlist: albums the server keeps looking for until they are in the library.
 const WISH_LABELS = {
-  wanted: "Looking", queued: "Queued", downloading: "Downloading", processing: "Processing",
+  wanted: "Looking", choice: "Choose a copy", queued: "Queued", downloading: "Downloading", processing: "Processing",
   review: "In review", have: "In library", not_found: "Not found", gave_up: "Gave up", skipped: "Skipped",
 };
 const WISH_GROUPS = {
-  open: ["wanted"], active: ["queued", "downloading", "processing"], review: ["review"],
+  open: ["wanted", "choice"], active: ["queued", "downloading", "processing"], review: ["review"],
   have: ["have"], stopped: ["not_found", "gave_up"], skipped: ["skipped"],
 };
-const WISH_BADGE = { have: "published", review: "review", not_found: "failed", gave_up: "failed" };
+const WISH_BADGE = { have: "published", review: "review", choice: "review", not_found: "failed", gave_up: "failed" };
 function relativeTime(seconds) {
   const diff = Math.round(seconds - Date.now() / 1000);
   const hours = Math.round(Math.abs(diff) / 3600);
@@ -1639,8 +1639,8 @@ function wishRow(i) {
         .join("")}</details>`
     : "";
   const next = i.next.length && !["have", "skipped"].includes(i.status)
-    ? `<details><summary>${i.candidates} candidate${i.candidates === 1 ? "" : "s"} found</summary>${i.next
-        .map((c) => `<p class="muted">${esc(sourceLabel(c.source))} · ${esc(c.username || c.provider || "")} · ${esc(c.title || "")} · ${esc([c.format, c.bitrate ? `${c.bitrate} kbps` : "", c.file_count ? `${c.file_count} files` : "", c.seeders != null ? `${c.seeders} seeders` : ""].filter(Boolean).join(" · "))}${c.reason ? ` — ${esc(c.reason)}` : ""}</p>`)
+    ? `<details ${i.status === "choice" ? "open" : ""}><summary>${i.candidates} candidate${i.candidates === 1 ? "" : "s"} found${i.status === "choice" ? " · waiting for your or your agent's choice" : ""}</summary>${i.next
+        .map((c) => `<p class="muted">${i.status === "choice" && c.id ? `<button class="quiet" data-wish-choose="${esc(i.id)}" data-copy="${esc(c.id)}">Get this</button> ` : ""}${esc(sourceLabel(c.source))} · ${esc(c.username || c.provider || "")} · ${esc(c.title || "")} · ${esc([c.format, c.bitrate ? `${c.bitrate} kbps` : "", c.file_count ? `${c.file_count} files` : "", c.seeders != null ? `${c.seeders} seeders` : ""].filter(Boolean).join(" · "))}${c.reason ? ` — ${esc(c.reason)}` : ""}</p>`)
         .join("")}</details>`
     : "";
   const rejected = (i.rejected || []).length && !["have", "skipped"].includes(i.status)
@@ -1772,13 +1772,14 @@ $("#wishlist-form").addEventListener("submit", (e) => {
   });
 });
 document.addEventListener("click", (e) => {
-  const button = e.target.closest("[data-wish-retry],[data-wish-skip],[data-wish-remove]");
+  const button = e.target.closest("[data-wish-retry],[data-wish-skip],[data-wish-remove],[data-wish-choose]");
   if (!button) return;
   const [action, id] = button.dataset.wishRetry ? ["retry", button.dataset.wishRetry]
-    : button.dataset.wishSkip ? ["skip", button.dataset.wishSkip] : ["remove", button.dataset.wishRemove];
+    : button.dataset.wishSkip ? ["skip", button.dataset.wishSkip]
+    : button.dataset.wishChoose ? ["choose", button.dataset.wishChoose] : ["remove", button.dataset.wishRemove];
   busy(button, async () => {
-    await api(`/api/wishlist/${path(id)}/${action}`, {});
-    toast({ retry: "Trying again shortly.", skip: "Stopped.", remove: "Request removed." }[action]);
+    await api(`/api/requests/${path(id)}/${action}`, action === "choose" ? { candidate_id: button.dataset.copy } : {});
+    toast({ retry: "Trying again shortly.", skip: "Stopped.", remove: "Request removed.", choose: "Getting that copy." }[action]);
     await loadWishlist();
   });
 });

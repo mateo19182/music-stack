@@ -924,25 +924,84 @@ def test_soulseek_status_endpoint(backend, monkeypatch):
     assert status["connected"] is False and status["logged_in"] is False and status["waiting"] == 0
 
 
-def test_needs_you_alerts_once_per_check_and_review(backend, monkeypatch):
+def test_needs_you_alerts_wait_for_the_agent_then_once_per_check_and_review(backend, monkeypatch):
     main, _ = backend
     check = {"username": "peer", "status": "open", "since": "2026-10-08T10:00:00Z", "message": 'type "watermelon"', "recent": []}
     monkeypatch.setattr(main.Sources, "soulseek_checks", lambda self: [check])
     main.store.put("jobs", "r1", {"candidate": {}, "label": "Album One"}, owner="mateo", stage="review", created_at="1")
+    clock = [main._timestamp("2026-10-08T10:00:00Z") + 60]
     sent = []
     send = lambda text: sent.append(text) or True
-    main.needs_you_alerts(send)
-    assert len(sent) == 1 and "peer" in sent[0] and "watermelon" in sent[0]   # review waits a tick for auto-adding
-    main.needs_you_alerts(send)
-    assert len(sent) == 2 and "Album One" in sent[1]
-    main.needs_you_alerts(send)
+    main.needs_you_alerts(send, clock=lambda: clock[0])
+    assert sent == []   # the agent gets its grace period first
+    clock[0] += main.AGENT_GRACE
+    main.needs_you_alerts(send, clock=lambda: clock[0])
+    assert len(sent) == 2 and "peer" in sent[0] and "watermelon" in sent[0] and "Album One" in sent[1]
+    main.needs_you_alerts(send, clock=lambda: clock[0])
     assert len(sent) == 2
     # Failed sends are retried on the next tick.
     main.store.put("jobs", "r2", {"candidate": {}, "label": "Album Two"}, owner="mateo", stage="review", created_at="2")
-    main.needs_you_alerts(send)
-    main.needs_you_alerts(lambda text: False)
-    main.needs_you_alerts(send)
+    main.needs_you_alerts(send, clock=lambda: clock[0])
+    assert len(sent) == 2
+    clock[0] += main.AGENT_GRACE
+    main.needs_you_alerts(lambda text: False, clock=lambda: clock[0])
+    main.needs_you_alerts(send, clock=lambda: clock[0])
     assert len(sent) == 3 and "Album Two" in sent[2]
+
+
+def test_a_request_holds_at_its_copies_for_a_choice_and_pending_lists_it(backend, monkeypatch):
+    main, client = backend
+    signin(main, client, monkeypatch)
+    held = client.post("/api/requests", json={"kind": "album", "artist": "Blawan", "album": "Long Distance", "hold": True}).json()
+    assert main.store.get("wishlist", held["id"])["hold"] is True and held["hold"] is True
+    plain = client.post("/api/requests", json={"kind": "album", "artist": "Blawan", "album": "Other"}).json()
+    assert not main.store.get("wishlist", plain["id"]).get("hold")
+    item = main.store.get("wishlist", held["id"])
+    copies = [{"id": "c1", "source": "soulseek", "kind": "album", "username": "u1", "title": "LDOWW (WEB)", "format": "flac",
+               "file_count": 4, "reason": "97% likely the album", "judged": "model",
+               "files": [{"filename": "Music\\LDOWW\\01. Scarborough Harbour.flac", "size": 10, "duration": 392, "format": "flac"}]},
+              {"id": "c2", "source": "youtube", "kind": "album", "title": "LDOWW", "url": "https://youtube.com/playlist?list=x", "file_count": 4}]
+    item.update(status="choice", note="2 copies found; waiting for a choice", candidates=copies, tracklist={"tracks": [["Scarborough Harbour", 392]]})
+    main.wishlist.save(item)
+    detail = client.get(f"/api/requests/{held['id']}").json()
+    assert [c["id"] for c in detail["copies"]] == ["c1", "c2"]
+    assert detail["copies"][0]["files"] == [{"name": "01. Scarborough Harbour.flac", "size": 10, "duration": 392, "format": "flac", "bitrate": None}]
+    assert detail["copies"][0]["reason"] == "97% likely the album" and detail["tracklist"]["tracks"] == [["Scarborough Harbour", 392]]
+    assert "review" not in detail
+    listed = client.get("/api/requests", params={"status": "choice"}).json()
+    assert [i["id"] for i in listed["items"]] == [held["id"]] and listed["total"] == 1
+    assert [i["id"] for i in client.get("/api/requests", params={"q": "blawan other", "status": "all"}).json()["items"]] == [plain["id"]]
+    assert len(client.get("/api/requests", params={"status": "active", "limit": 1}).json()["items"]) == 1
+    assert len(client.get("/api/requests").json()["items"]) == 2   # the web app still gets everything
+    pending = client.get("/api/pending").json()
+    assert [c["id"] for c in pending["choices"]] == [held["id"]] and pending["reviews"] == [] and pending["agent_requests"] == []
+    assert client.post(f"/api/requests/{held['id']}/choose", json={"candidate_id": "nope"}).status_code == 404
+    assert client.post(f"/api/requests/{plain['id']}/choose", json={"candidate_id": "c1"}).status_code == 409
+    chosen = client.post(f"/api/requests/{held['id']}/choose", json={"candidate_id": "c2"}).json()
+    assert chosen["status"] == "wanted" and main.store.get("wishlist", held["id"])["pick"] == "c2"
+    assert client.get("/api/pending").json()["choices"] == []
+    assert client.get("/api/requests/suggested").json() == {"items": []}   # not taken for a request id
+    signin(main, client, monkeypatch, name="other", admin=False)
+    assert client.get(f"/api/requests/{held['id']}").status_code == 404
+
+
+def test_an_agent_answers_human_checks_and_an_approver_agent_skips_tracks(backend, monkeypatch):
+    main, client = backend
+    check = {"username": "peer", "status": "open", "since": "2026-10-07T16:54:00Z", "message": 'type "watermelon"', "recent": []}
+    sent = []
+    monkeypatch.setattr(main.Sources, "soulseek_checks", lambda self: [check])
+    monkeypatch.setattr(main.Sources, "reply", lambda self, username, message: sent.append((username, message)))
+    seed_review(main)
+    approver = {"Authorization": "Bearer " + main.mint_agent("mateo", "hermes", True, "owner")["token"]}
+    watcher = {"Authorization": "Bearer " + main.mint_agent("mateo", "watcher", False, "owner")["token"]}
+    pending = client.get("/api/pending", headers=watcher).json()
+    assert [c["username"] for c in pending["checks"]] == ["peer"] and [r["job_id"] for r in pending["reviews"]] == ["job"]
+    assert pending["reviews"][0]["files"][0]["id"] == "file" and "questions" in pending["reviews"][0]["files"][0]
+    assert client.post("/api/soulseek/checks/peer/reply", json={"message": "watermelon"}, headers=watcher).status_code == 200
+    assert sent == [("peer", "watermelon")]
+    assert client.post("/api/jobs/job/skip", json={"file_ids": ["file"]}, headers=watcher).status_code == 403
+    assert client.post("/api/jobs/job/skip", json={"file_ids": ["file"]}, headers=approver).status_code == 200
+    assert main.store.get("jobs", "job")["stage"] == "rejected"
 
 
 def test_requests_import_list_retry_skip_and_ownership(backend, monkeypatch):

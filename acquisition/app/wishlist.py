@@ -106,11 +106,11 @@ class Wishlist:
         id = item_id(owner, list_name, artist, album, kind, title, url)
         existing = self.store.get("wishlist", id)
         if existing:
-            for k in ("star", "position", "list_order", "playlist", "year"):
+            for k in ("star", "position", "list_order", "playlist", "year", "hold"):
                 if k in extra:
                     existing[k] = extra[k]
             if pick and not existing.get("job_id"):
-                existing.update(candidates=[pick], pinned=True, status="wanted", note="Trying your pick")
+                existing.update(candidates=[pick], pinned=True, pick=pick.get("id"), status="wanted", note="Trying your pick")
             elif renew and existing["status"] in ("not_found", "gave_up", "skipped"):
                 self.retry(existing)
                 return existing
@@ -121,7 +121,7 @@ class Wishlist:
                 "rounds": 0, "searched_at": None, "next_search_at": 0, "job_id": None, "wrong_jobs": [],
                 "added_at": self.clock(), **extra}
         if pick:
-            item.update(candidates=[pick], pinned=True, note="Trying your pick")
+            item.update(candidates=[pick], pinned=True, pick=pick.get("id"), note="Trying your pick")
         elif kind == "link":
             item["candidates"] = [link_candidate(url, extra.get("link_kind", "track"))]
         elif not artist or not (album if kind == "album" else title):
@@ -137,6 +137,15 @@ class Wishlist:
         if item.get("kind") == "link":
             item.update(tried=[], candidates=[link_candidate(item["url"], item.get("link_kind", "track"))])
         self.save(item)
+
+    def choose(self, item, candidate_id):
+        """The copy to get, from the candidates a held request found. None when it is not one of them."""
+        chosen = next((c for c in item.get("candidates", []) if c.get("id") == candidate_id), None)
+        if not chosen or item.get("job_id"):
+            return None
+        item.update(pick=candidate_id, pinned=True, status="wanted", note="Trying the copy you chose")
+        self.save(item)
+        return chosen
 
     # ---- the loop ------------------------------------------------------------------------
     def tick(self):
@@ -175,7 +184,7 @@ class Wishlist:
             if self._upgrading(item):
                 self._next(item, jobs, upgrade=True)
             return
-        if item["status"] in DONE:
+        if item["status"] in DONE or item["status"] == "choice":
             return
         if item["kind"] == "album" and matching.superseded(item, [o for o in everything if o["owner"] == item["owner"]
                                                                   and o.get("kind", "album") == "album"]):
@@ -282,6 +291,12 @@ class Wishlist:
         tried = {t["provider"] for t in item["tried"]}
         untried = [c for c in item["candidates"] if (item["kind"] == "link" or matching.provider(c) not in tried)
                    and self._allowed(item, c)]
+        if untried and item.get("hold") and not upgrade and item["kind"] != "link":
+            chosen = [c for c in untried if c.get("id") == item.get("pick")]
+            if not chosen:
+                self._hold(item, untried)
+                return
+            untried = chosen
         if untried:
             if self._room(jobs):
                 self._queue(item, untried[0], jobs, upgrade)
@@ -313,6 +328,15 @@ class Wishlist:
             item.update(status="wanted", note=f"Found {len(found)} cop{'y' if len(found) == 1 else 'ies'}")
         self.save(item)
         self._next(item, jobs, upgrade)
+
+    def _hold(self, item, untried):
+        """Found copies wait for a choice (the agent's, or the owner's in the web app)."""
+        last = item["tried"][-1] if item.get("tried") else None
+        failed = f"The chosen copy failed ({last.get('error') or last.get('outcome')}); " if last and item.get("pick") else ""
+        note = f"{failed}{len(untried)} cop{'y' if len(untried) == 1 else 'ies'} found; waiting for a choice"
+        if item["status"] != "choice" or item.get("note") != note:
+            item.update(status="choice", pick=None, note=note)
+            self.save(item)
 
     def _exhausted(self, item, upgrade, why):
         now = self.clock()
@@ -535,13 +559,33 @@ class Wishlist:
         return {"id": item["id"], "kind": item.get("kind", "album"), "artist": item["artist"], "name": name(item),
                 "album": item.get("album"), "title": item.get("title"), "url": item.get("url"), "list": item["list"],
                 "position": item.get("position", 0), "star": bool(item.get("star")), "status": item["status"],
+                "hold": bool(item.get("hold")),
                 "note": item.get("note"), "quality": item.get("quality"), "upgrading": bool(item.get("upgrade_until")),
                 "tries": len(item.get("tried", [])),
                 "tried": [{k: t.get(k) for k in ("source", "provider", "outcome", "error", "at")} for t in item.get("tried", [])[-10:]],
                 "rejected": item.get("rejected", [])[:5],
                 "candidates": len(item.get("candidates", [])), "next": [
-                    {k: c.get(k) for k in ("source", "username", "provider", "title", "format", "bitrate", "file_count", "seeders", "reason")}
+                    {k: c.get(k) for k in ("id", "source", "username", "provider", "title", "format", "bitrate", "file_count", "seeders", "reason")}
                     for c in item.get("candidates", [])[:5]],
                 "searched_at": item.get("searched_at"), "next_search_at": item.get("next_search_at") or None,
                 "job": {"id": job["id"], "stage": job["stage"], "progress": job.get("progress"), "detail": job.get("detail"),
                         "source": (job.get("candidate") or {}).get("source")} if job else None}
+
+    def detail(self, item, jobs=None):
+        """One request with every copy it found, for whoever chooses: the matching model's reasons,
+        the files in each copy, what was tried and what the model turned down."""
+        tried = {t["provider"] for t in item.get("tried", [])}
+        copies = []
+        for c in item.get("candidates", []):
+            files = [{"name": str(f.get("filename") or "").replace("\\", "/").rsplit("/", 1)[-1], "size": f.get("size"),
+                      "duration": f.get("duration"), "format": f.get("format"), "bitrate": f.get("bitrate")}
+                     for f in (c.get("files") or [])[:MAX_ALBUM_FILES]]
+            copies.append({"id": c.get("id"), "source": c.get("source"), "username": c.get("username"),
+                           "provider": matching.provider(c), "title": c.get("title"), "folder": c.get("directory"),
+                           "url": c.get("url"), "format": c.get("format"), "bitrate": c.get("bitrate"),
+                           "duration": c.get("duration"), "size": c.get("size"), "file_count": c.get("file_count") or len(files),
+                           "files": files, "seeders": c.get("seeders"), "queue_length": c.get("queue_length"),
+                           "free_slots": c.get("free_slots"), "reason": c.get("reason"), "judged": c.get("judged"),
+                           "tried": matching.provider(c) in tried, "chosen": bool(item.get("pick")) and c.get("id") == item.get("pick")})
+        return {**self.view(item, jobs), "copies": copies, "tracklist": item.get("tracklist"),
+                "year": item.get("year"), "added_at": item.get("added_at")}

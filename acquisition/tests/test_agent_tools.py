@@ -40,13 +40,26 @@ def initialize(instance):
     ("list_reviews", {}, "GET", "/api/review", {}),
     ("request_review_advice", {"id": "job"}, "POST", "/api/jobs/job/advice", {}),
     ("library", {"q": "Sauna", "genre": "Funk", "key": "Cm", "bpm_min": 90, "bpm_max": 110, "page": 2, "sort": "album"}, "GET", "/api/library", {"q": "Sauna", "genre": "Funk", "key": "Cm", "bpm_min": "90", "bpm_max": "110", "page": "2", "sort": "album"}),
-    ("request_music", {"candidate_id": "candidate", "artist": "Vulfpeck", "title": "Sauna"}, "POST", "/api/requests", {"candidate_id": "candidate", "artist": "Vulfpeck", "title": "Sauna"}),
-    ("request_music", {"kind": "link", "url": "https://youtu.be/example", "link_kind": "album"}, "POST", "/api/requests", {"kind": "link", "url": "https://youtu.be/example", "link_kind": "album"}),
-    ("request_music", {"kind": "album", "artist": "Moor Mother", "album": "Jazz Codes"}, "POST", "/api/requests", {"kind": "album", "artist": "Moor Mother", "album": "Jazz Codes"}),
+    ("request_music", {"candidate_id": "candidate", "artist": "Vulfpeck", "title": "Sauna"}, "POST", "/api/requests", {"candidate_id": "candidate", "artist": "Vulfpeck", "title": "Sauna", "hold": True}),
+    ("request_music", {"kind": "link", "url": "https://youtu.be/example", "link_kind": "album"}, "POST", "/api/requests", {"kind": "link", "url": "https://youtu.be/example", "link_kind": "album", "hold": True}),
+    ("request_music", {"kind": "album", "artist": "Moor Mother", "album": "Jazz Codes"}, "POST", "/api/requests", {"kind": "album", "artist": "Moor Mother", "album": "Jazz Codes", "hold": True}),
+    ("request_music", {"kind": "album", "artist": "Moor Mother", "album": "Jazz Codes", "hold": False}, "POST", "/api/requests", {"kind": "album", "artist": "Moor Mother", "album": "Jazz Codes", "hold": False}),
+    ("get_request", {"id": "r"}, "GET", "/api/requests/r", {}),
+    ("choose_copy", {"id": "r", "candidate_id": "c"}, "POST", "/api/requests/r/choose", {"candidate_id": "c"}),
+    ("retry_request", {"id": "r"}, "POST", "/api/requests/r/retry", {}),
+    ("skip_request", {"id": "r"}, "POST", "/api/requests/r/skip", {}),
+    ("remove_request", {"id": "r"}, "POST", "/api/requests/r/remove", {}),
+    ("pending", {}, "GET", "/api/pending", {}),
+    ("list_suggested", {}, "GET", "/api/requests/suggested", {}),
+    ("choose_suggested", {"ids": ["a", "b"], "get": True}, "POST", "/api/requests/choose", {"ids": ["a", "b"], "get": True}),
+    ("soulseek_checks", {}, "GET", "/api/soulseek/checks", {}),
+    ("answer_check", {"username": "peer", "message": "watermelon"}, "POST", "/api/soulseek/checks/peer/reply", {"message": "watermelon"}),
+    ("skip_tracks", {"id": "job", "file_ids": ["f1"]}, "POST", "/api/jobs/job/skip", {"file_ids": ["f1"]}),
     ("retry_job", {"id": "job", "stage": "processing"}, "POST", "/api/jobs/job/retry", {"stage": "processing"}),
     ("cancel_job", {"id": "job"}, "POST", "/api/jobs/job/cancel", {}),
     ("import_files", {"paths": ["Album/Sauna.m4a"]}, "POST", "/api/import", {"paths": ["Album/Sauna.m4a"]}),
-    ("list_requests", {}, "GET", "/api/requests", {}),
+    ("list_requests", {}, "GET", "/api/requests", {"status": "active", "limit": 50}),
+    ("list_requests", {"q": "blawan", "status": "all", "limit": 5}, "GET", "/api/requests", {"q": "blawan", "status": "all", "limit": 5}),
     ("reject_review", {"id": "job"}, "POST", "/api/jobs/job/reject", {}),
     ("request_approval_token", {"name": "reviewer", "can_approve": True}, "POST", "/api/agents/requests", {"name": "reviewer", "can_approve": True}),
     ("list_agent_tokens", {}, "GET", "/api/agents", {}),
@@ -73,6 +86,9 @@ def test_tools_use_exact_api_contract(bridge, name, args, method, path, payload)
     ("retry_job", {"id": "x", "stage": "publish"}), ("search_music", {"source": "unsupported"}),
     ("library", {"page": True}), ("library", {"bpm_min": float("inf")}), ("library", {"page": 0}),
     ("import_files", {"paths": []}), ("import_files", {"paths": [1]}), ("import_files", {"paths": ["x"] * 101}),
+    ("request_music", {"hold": "yes"}), ("list_requests", {"status": "wrong"}), ("list_requests", {"limit": 0}),
+    ("choose_copy", {"id": "r"}), ("answer_check", {"username": "peer", "message": ""}), ("skip_tracks", {"id": "j", "file_ids": []}),
+    ("choose_suggested", {"ids": ["a"]}),
     ("health", []), ("approve", {"id": "job"}), ("approve_review", {"id": "j", "keep_existing": "yes"}), ("approve_review", {"id": "j", "files": []}), ("approve_review", {"id": "j", "selected_file_ids": []}),
 ])
 def test_invalid_inputs_never_reach_http(bridge, name, args):
@@ -129,7 +145,7 @@ def test_handshake_registry_notifications_and_invalid_requests(bridge):
     initialize(instance)
     assert instance.handle({"jsonrpc": "2.0", "id": 2, "method": "ping"})["result"] == {}
     registry = instance.handle({"jsonrpc": "2.0", "id": 3, "method": "tools/list"})["result"]["tools"]
-    assert len(registry) == 19
+    assert len(registry) == 30
     assert [item["name"] for item in registry if "approve" in item["name"] or "reject" in item["name"]] == ["approve_review", "reject_review"]
     assert not any(any(word in item["name"] for word in ["publish", "delete", "sharing"]) for item in registry)
     for item in registry:

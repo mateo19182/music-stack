@@ -3,7 +3,9 @@
 The active code is `acquisition/`.
 
 For music requests, use the tools in [acquisition/AGENTS.md](acquisition/AGENTS.md).
-Downloads and LLM advice stop at review. Publication needs the user's explicit
+Agents are the main way in: a request stops at the copies it found and the agent
+chooses one (`choose_copy`), asking the user only when editions or versions differ;
+the agent also answers Soulseek human checks. Downloads and LLM advice stop at review. Publication needs the user's explicit
 say-so: in the web app, through `approve_review` with an agent token that has
 `can_approve` (only the owner can grant it, in the web app), or through the owner's automatic-adding setting.
 That setting, which agents cannot change, covers tracks whose review plan

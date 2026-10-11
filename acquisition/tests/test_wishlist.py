@@ -461,3 +461,45 @@ def test_a_soulseek_folder_far_bigger_than_an_album_is_not_a_candidate():
     # An uploader's 480-track "club adjacent" folder, once judged 51% likely the album.
     assert not Wishlist._eligible({**album, "file_count": 480}, set())
     assert Wishlist._eligible({**album, "file_count": MAX_ALBUM_FILES}, set())
+
+
+def test_a_held_request_waits_at_its_copies_until_one_is_chosen(tmp_path):
+    store, queued = Store(tmp_path / "a.db"), []
+    sources = FakeSources({"soulseek": [slsk("a"), slsk("b", "mp3", 320)]})
+    w = _wishlist(store, sources, FakeJudge(accept={"a", "b"}), queued)
+    item = w.add("mateo", "Moor Mother", "Jazz Codes", hold=True)
+    w.tick()
+    saved = store.get("wishlist", item["id"])
+    assert (saved["status"], len(saved["candidates"]), queued) == ("choice", 2, [])
+    assert saved["note"] == "2 copies found; waiting for a choice"
+    searches = len(sources.calls)
+    w.tick()
+    assert len(sources.calls) == searches and not queued   # waits, instead of searching or queueing
+    detail = w.detail(saved)
+    assert [(c["id"], c["username"], c["format"], c["tried"]) for c in detail["copies"]] == [("s-a", "a", "flac", False), ("s-b", "b", "mp3", False)]
+    assert w.choose(saved, "s-nobody") is None
+    assert w.choose(saved, "s-b")["username"] == "b"
+    w.tick()
+    assert queued[-1]["username"] == "b" and store.get("wishlist", item["id"])["status"] == "queued"
+    job = store.get("jobs", store.get("wishlist", item["id"])["job_id"])
+    store.update_job(job["id"], stage="failed", error="did not start sending", progress=0)
+    w.tick()
+    saved = store.get("wishlist", item["id"])
+    assert saved["status"] == "choice" and saved["note"].startswith("The chosen copy failed (did not start sending); 1 copy found")
+    assert [c["tried"] for c in w.detail(saved)["copies"]] == [False, True]
+    assert len(queued) == 1   # the other copy is not taken without a choice
+    w.choose(saved, "s-a")
+    w.tick()
+    assert queued[-1]["username"] == "a"
+    store.update_job(store.get("wishlist", item["id"])["job_id"], stage="published")
+    w.tick()
+    assert store.get("wishlist", item["id"])["status"] == "have"
+
+
+def test_a_held_request_with_a_picked_result_or_a_link_needs_no_choice(tmp_path):
+    store, queued = Store(tmp_path / "a.db"), []
+    w = _wishlist(store, FakeSources({}), FakeJudge(accept={"a"}), queued)
+    w.add("mateo", "Moor Mother", "Jazz Codes", pick=slsk("a"), hold=True)
+    w.add("mateo", "", "", kind="link", url="https://youtu.be/dQw4w9WgXcQ", link_kind="track", hold=True)
+    w.tick()
+    assert sorted(c["source"] for c in queued) == ["soulseek", "youtube"]
