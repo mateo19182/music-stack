@@ -89,17 +89,19 @@ class Store:
                 (stage, json.dumps(data), id),
             )
 
-    def claim(self, stages=("queued", "process_queued", "publish_queued"), paused=()):
-        """Take the oldest job in these stages; downloads from a paused source wait."""
+    def claim(self, stages=("queued", "process_queued", "publish_queued"), paused=(), quick_only=False):
+        """Take the oldest job in these stages, quick downloads first; downloads from a paused source wait."""
         paused = list(paused)
         skip = (" AND NOT (stage='queued' AND json_extract(data, '$.candidate.source') IN ("
                 + ",".join("?" for _ in paused) + "))") if paused else ""
+        if quick_only:
+            skip += " AND json_extract(data, '$.candidate.quick')"
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute(
                 "SELECT * FROM jobs WHERE stage IN ("
                 + ",".join("?" for _ in stages)
-                + ")" + skip + " ORDER BY created_at LIMIT 1",
+                + ")" + skip + " ORDER BY json_extract(data, '$.candidate.quick') IS NULL, created_at LIMIT 1",
                 list(stages) + paused,
             ).fetchone()
             if not row:

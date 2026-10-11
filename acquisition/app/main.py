@@ -75,6 +75,8 @@ class RequestAdd(BaseModel):
     link_kind: str = "track"
     candidate_id: str = Field(default="", max_length=128)
     list: str = Field(default="Requests", min_length=1, max_length=120)
+    # Start the picked result now and offer its files for download as soon as they arrive.
+    quick: bool = False
 
 
 class Retry(BaseModel):
@@ -745,11 +747,11 @@ def do_search(id, user, body):
         )
 
 
-def worker(stages=("queued", "process_queued", "publish_queued")):
+def worker(stages=("queued", "process_queued", "publish_queued"), quick_only=False):
     sources = Sources(config)
     ingestor = Ingestor(config)
     while not stop.is_set():
-        job = store.claim(stages, paused=paused_sources(stages))
+        job = store.claim(stages, paused=paused_sources(stages), quick_only=quick_only)
         if not job:
             stop.wait(1)
             continue
@@ -995,6 +997,8 @@ async def lifespan(app):
         threading.Thread(target=worker, args=(stages,), name=name, daemon=True)
         for name, stages in ingestion_lanes(config.get("ingestion_workers", 1))
     ]
+    # Quick downloads never wait behind slow uploaders in the other lanes.
+    worker_threads.append(threading.Thread(target=worker, args=(("queued",), True), name="quick-download", daemon=True))
     worker_threads.append(threading.Thread(target=sharing_worker, name="sharing-worker", daemon=True))
     worker_threads.append(threading.Thread(target=soulseek_watcher, name="soulseek-watcher", daemon=True))
     if config.get("wishlist_enabled", True):
@@ -2066,6 +2070,13 @@ def add_request(body: RequestAdd, user=Depends(check_user)):
             raise HTTPException(400, "Enter an artist and " + ("an album" if kind == "album" else "a title"))
         item = wishlist.add(user["username"], artist, album, body.list.strip(), kind=kind, title=title, pick=pick,
                             position=int(time.time()), renew=True)
+    if body.quick:
+        if not pick:
+            raise HTTPException(400, "Quick download needs a search result")
+        job_id = wishlist.start_now(item)
+        if not job_id:
+            raise HTTPException(409, "That copy cannot start now (YouTube is paused); pick another")
+        return {**wishlist.view(item), "quick_job_id": job_id}
     return wishlist.view(item)
 
 
@@ -2234,6 +2245,43 @@ def album_download(id: str, user=Depends(check_user)):
         media_type="application/zip",
         background=BackgroundTask(path.unlink, missing_ok=True),
     )
+
+
+@app.get("/api/jobs/{id}/zip")
+def job_zip(id: str, user=Depends(check_user)):
+    """A download's files as they are now: the library copies once published, before that the
+    downloaded files (raw, untagged)."""
+    job = owned_job(id, user)
+    files = []
+    if job["stage"] == "published":
+        files = [(Path(r["path"]), str(Path(r["path"]).relative_to(LIBRARY)))
+                 for r in store.list("files", "job_id=? AND published=1", (id,))
+                 if Path(r["path"]).resolve().is_relative_to(LIBRARY)]
+    if not files:
+        files = [(Path(p), Path(p).name) for p in job.get("paths") or []]
+    files = [(p, name) for p, name in files if p.is_file()][:500]
+    if not files:
+        raise HTTPException(409, "No files yet" if job["stage"] in {"queued", "downloading"} else "The files are not available")
+    export = STATE / "exports"
+    export.mkdir(exist_ok=True)
+    path = export / (uid() + ".zip")
+    names = set()
+    try:
+        with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_STORED, allowZip64=True) as archive:
+            for p, name in files:
+                while name in names:   # two folders with the same file name
+                    name = f"{Path(name).stem} (2){Path(name).suffix}"
+                names.add(name)
+                try:
+                    archive.write(p, arcname=name)
+                except FileNotFoundError:
+                    continue   # moved into the library while zipping; the rest still comes
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+    label = re.sub(r'[\\/:*?"<>|]', "_", job.get("label") or "Download")[:120]
+    return FileResponse(path, filename=label + ".zip", media_type="application/zip",
+                        background=BackgroundTask(path.unlink, missing_ok=True))
 
 
 @app.get("/api/inbox")

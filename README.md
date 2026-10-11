@@ -40,6 +40,9 @@ SoundCloud, Bandcamp and Vimeo URLs are supported.
    A compilation by "Various Artists" is searched by its title.
 2. To pick a copy yourself, search, filter results by file type and quality, and
    choose **Get this**: that copy is tried first, then others if it fails.
+   **Quick download** starts that copy at once in its own download lane and
+   downloads its files to your browser as a ZIP the moment they arrive (raw, before
+   tagging); the same download then continues into the library as usual.
    Library hints mark existing tracks or possible matches. A few downloads run at
    a time (`download_workers`); the rest wait their turn.
 3. Preparation fills what it can: BPM, key, genre, year and mood, plus a missing

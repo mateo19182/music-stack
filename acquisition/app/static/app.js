@@ -22,6 +22,7 @@ const state = {
   reviewSignature: "",
   reviewerConfigured: false,
   queuedCandidates: new Set(),
+  quick: loadQuick(),
 };
 const esc = (v) =>
   String(v ?? "").replace(
@@ -99,6 +100,65 @@ function loginView() {
   $("#player").pause();
   $("#player").removeAttribute("src");
   $("#player-bar").hidden = true;
+}
+// Quick downloads: candidate id -> {job, label, ready}; kept across reloads in this browser.
+function loadQuick() {
+  try {
+    const day = Date.now() - 86400000;
+    return new Map(JSON.parse(localStorage.getItem("acquire.quick") || "[]").filter(([, q]) => (q.at || 0) > day));
+  } catch {
+    return new Map();
+  }
+}
+function saveQuick() {
+  try {
+    localStorage.setItem("acquire.quick", JSON.stringify([...state.quick]));
+  } catch {}
+}
+function quickButton(r) {
+  const quick = state.quick.get(r.id);
+  if (quick?.ready)
+    return `<a href="/api/jobs/${path(quick.job)}/zip">Download files</a>`;
+  if (quick)
+    return `<button class="quiet" disabled>${esc(quick.status || "Starting…")}</button>`;
+  return `<button class="quiet" data-quick="${esc(r.id)}" title="Start this copy now and download its files here as soon as they arrive. They also go to your library.">Quick download</button>`;
+}
+const QUICK_READY = ["process_queued", "processing", "review", "publish_queued", "publishing", "published"];
+async function pollQuick() {
+  let changed = false;
+  for (const [candidate, quick] of state.quick) {
+    if (quick.ready) continue;
+    let job;
+    try {
+      job = await api(`/api/jobs/${path(quick.job)}`);
+    } catch {
+      state.quick.delete(candidate);
+      changed = true;
+      continue;
+    }
+    if (QUICK_READY.includes(job.stage)) {
+      quick.ready = true;
+      const link = document.createElement("a");
+      link.href = `/api/jobs/${path(quick.job)}/zip`;
+      link.download = "";
+      document.body.append(link);
+      link.click();
+      link.remove();
+      toast(`${quick.label} downloaded. It also goes to your library.`);
+    } else if (["failed", "cancelled", "rejected"].includes(job.stage)) {
+      state.quick.delete(candidate);
+      toast(`${quick.label}: ${job.error || "the download failed"}. Try another copy.`, true);
+    } else {
+      const status = job.stage === "queued" ? "Starting…" : `Downloading… ${Math.round(job.progress || 0)}%`;
+      if (status === quick.status) continue;
+      quick.status = status;
+    }
+    changed = true;
+  }
+  if (changed) {
+    saveQuick();
+    if (state.results.length) renderResults({ results: state.results, status: state.searchStatus });
+  }
 }
 async function api(url, body) {
   const response = await fetch(url, {
@@ -269,7 +329,7 @@ function renderResults(data) {
       results
         .map(
           (r) =>
-            `<article class="result-row"><div class="track-info"><h3>${esc(r.title || r.filename || r.album || "Untitled")}</h3>${meta([r.artist, r.album])}${searchLibraryHint(r)}${resultSourceLink(r)}<details class="source-details"><summary>${esc(sourceLabel(r.source))} · ${esc(r.username || r.uploader || r.provider || "Source details")}</summary>${meta([r.provider, r.seeders != null ? `${r.seeders} seeders` : "", r.queue_length != null ? `Queue ${r.queue_length}` : "", r.free_slots != null ? `${r.free_slots} free slots` : "", bytes(r.size)])}${r.folder_complete === false ? '<p class="muted">The full album folder is checked when queued.</p>' : ""}${r.files?.length ? `<ul class="file-list">${r.files.map((f) => `<li>${esc(f.filename)} ${esc(bytes(f.size))}</li>`).join("")}</ul>` : ""}</details></div><div class="quality">${meta([r.format, r.bitrate ? `${r.bitrate} kbps` : "", duration(r.duration)])}${r.files?.length ? `<span class="muted">${esc(r.file_count || r.files.length)} files</span>` : ""}</div><button class="quiet" data-enqueue="${esc(r.id)}" ${state.queuedCandidates.has(r.id) ? 'disabled data-queued="true"' : ""}>${state.queuedCandidates.has(r.id) ? "Requested" : "Get this"}</button></article>`,
+            `<article class="result-row"><div class="track-info"><h3>${esc(r.title || r.filename || r.album || "Untitled")}</h3>${meta([r.artist, r.album])}${searchLibraryHint(r)}${resultSourceLink(r)}<details class="source-details"><summary>${esc(sourceLabel(r.source))} · ${esc(r.username || r.uploader || r.provider || "Source details")}</summary>${meta([r.provider, r.seeders != null ? `${r.seeders} seeders` : "", r.queue_length != null ? `Queue ${r.queue_length}` : "", r.free_slots != null ? `${r.free_slots} free slots` : "", bytes(r.size)])}${r.folder_complete === false ? '<p class="muted">The full album folder is checked when queued.</p>' : ""}${r.files?.length ? `<ul class="file-list">${r.files.map((f) => `<li>${esc(f.filename)} ${esc(bytes(f.size))}</li>`).join("")}</ul>` : ""}</details></div><div class="quality">${meta([r.format, r.bitrate ? `${r.bitrate} kbps` : "", duration(r.duration)])}${r.files?.length ? `<span class="muted">${esc(r.file_count || r.files.length)} files</span>` : ""}</div>${quickButton(r)}<button class="quiet" data-enqueue="${esc(r.id)}" ${state.queuedCandidates.has(r.id) ? 'disabled data-queued="true"' : ""}>${state.queuedCandidates.has(r.id) ? "Requested" : "Get this"}</button></article>`,
         )
         .join("") +
       "</div>"
@@ -587,6 +647,29 @@ document.addEventListener("click", (e) => {
     state.searchQuality = "";
     renderResults({ results: state.results, status: state.searchStatus });
   } else if (button.dataset.tab) showTab(button.dataset.tab);
+  else if (button.dataset.quick && !state.quick.has(button.dataset.quick))
+    busy(button, async () => {
+      const result = state.results.find((r) => r.id === button.dataset.quick) || {};
+      const item = await api("/api/requests", {
+        candidate_id: button.dataset.quick,
+        quick: true,
+        ...Object.fromEntries(
+          ["artist", "title", "album"].map((name) => [
+            name,
+            $(`#search-form [name="${name}"]`).value,
+          ]),
+        ),
+      });
+      state.quick.set(button.dataset.quick, {
+        job: item.quick_job_id,
+        at: Date.now(),
+        label: result.title || result.album || result.filename || "Download",
+      });
+      state.queuedCandidates.add(button.dataset.quick);
+      saveQuick();
+      toast("Started. The files download here as soon as they arrive.");
+      renderResults({ results: state.results, status: state.searchStatus });
+    });
   else if (
     button.dataset.enqueue &&
     !state.queuedCandidates.has(button.dataset.enqueue)
@@ -746,6 +829,9 @@ async function start() {
     if (result.status === "rejected") toast(result.reason.message, true);
 }
 start().catch(() => loginView());
+setInterval(() => {
+  if (state.authenticated && state.quick.size) pollQuick().catch(() => {});
+}, 3000);
 setInterval(() => {
   if (state.authenticated) {
     if (

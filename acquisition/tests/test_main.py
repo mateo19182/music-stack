@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-import hashlib, importlib, json, threading, time
+import hashlib, importlib, io, json, threading, time, zipfile
 from pathlib import Path
 from unittest.mock import Mock
 import pytest
@@ -1027,3 +1027,43 @@ def test_a_published_download_leaves_one_copy_and_undo_moves_it_back(backend, mo
     assert response.status_code == 200
     assert not library[0].exists() and Path(prepared[0]["path"]).is_file()
     assert client.get("/api/review").json()["jobs"][0]["id"] == response.json()["review_job_id"]
+
+
+def test_quick_download_starts_now_in_its_own_lane_and_zips_whatever_has_arrived(backend, monkeypatch):
+    main, client = backend
+    signin(main, client, monkeypatch)
+    main.store.put("jobs", "older", {"candidate": {"source": "soulseek"}, "source": "soulseek"},
+                   owner="mateo", stage="queued", created_at="2026-01-01")
+    main.store.put("candidates", "c1", {"id": "c1", "source": "soulseek", "kind": "album", "username": "u",
+                                         "title": "MSG II", "files": []}, owner="mateo")
+    assert client.post("/api/requests", json={"kind": "album", "artist": "V", "album": "A", "quick": True}).status_code == 400
+    picked = client.post("/api/requests", json={"candidate_id": "c1", "artist": "Vulfpeck", "quick": True}).json()
+    job_id = picked["quick_job_id"]
+    job = main.store.get("jobs", job_id)
+    assert job["stage"] == "queued" and job["candidate"]["quick"] is True
+    assert main.store.get("wishlist", picked["id"])["job_id"] == job_id
+    # The quick lane takes only quick downloads; every lane takes them first.
+    assert main.store.claim(("queued",), quick_only=True)["id"] == job_id
+    assert main.store.claim(("queued",), quick_only=True) is None
+    assert main.store.claim(("queued",))["id"] == "older"
+    # Nothing has arrived yet.
+    assert client.get(f"/api/jobs/{job_id}/zip").status_code == 409
+    # Downloaded: the raw files.
+    raw = main.STAGING / job_id / "01 Sauna.flac"
+    raw.parent.mkdir(parents=True)
+    raw.write_bytes(b"raw")
+    main.store.update_job(job_id, stage="process_queued", paths=[str(raw)])
+    response = client.get(f"/api/jobs/{job_id}/zip")
+    assert response.status_code == 200
+    assert zipfile.ZipFile(io.BytesIO(response.content)).namelist() == ["01 Sauna.flac"]
+    # Published: the library copies, even after the download itself is gone.
+    raw.unlink()
+    published = main.LIBRARY / "Vulfpeck" / "MSG II" / "01 Sauna.flac"
+    published.parent.mkdir(parents=True)
+    published.write_bytes(b"tagged")
+    main.store.put("files", "f1", {"path": str(published)}, job_id=job_id, owner="mateo", published=1, path=str(published))
+    main.store.update_job(job_id, stage="published")
+    archive = zipfile.ZipFile(io.BytesIO(client.get(f"/api/jobs/{job_id}/zip").content))
+    assert archive.namelist() == ["Vulfpeck/MSG II/01 Sauna.flac"] and archive.read(archive.namelist()[0]) == b"tagged"
+    signin(main, client, monkeypatch, name="other", admin=False)
+    assert client.get(f"/api/jobs/{job_id}/zip").status_code == 404

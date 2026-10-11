@@ -260,6 +260,15 @@ class Wishlist:
         self.save(item)
         return True
 
+    def start_now(self, item):
+        """A quick download: the picked copy starts now, in its own lane, instead of at the next pass.
+        Returns the job id, or None when that copy cannot start (YouTube paused)."""
+        if not item.get("job_id") and item.get("candidates"):
+            if not self._allowed(item, item["candidates"][0]):
+                return None
+            self._queue(item, {**item["candidates"][0], "quick": True}, {})
+        return item.get("job_id")
+
     def _allowed(self, item, c):
         if not matching.is_youtube(c):
             return True
