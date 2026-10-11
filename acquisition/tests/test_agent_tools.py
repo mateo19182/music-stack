@@ -32,38 +32,25 @@ def initialize(instance):
 
 
 @pytest.mark.parametrize("name,args,method,path,payload", [
-    ("health", {}, "GET", "/api/health", {}),
-    ("search_music", {"query": "Sauna", "source": "soulseek", "kind": "track", "artist": "Vulfpeck"}, "POST", "/api/search", {"query": "Sauna", "source": "soulseek", "kind": "track", "artist": "Vulfpeck"}),
-    ("get_search", {"id": "search"}, "GET", "/api/search/search", {}),
-    ("list_jobs", {}, "GET", "/api/jobs", {}),
-    ("get_job", {"id": "job"}, "GET", "/api/jobs/job", {}),
-    ("list_reviews", {}, "GET", "/api/review", {}),
-    ("request_review_advice", {"id": "job"}, "POST", "/api/jobs/job/advice", {}),
-    ("library", {"q": "Sauna", "genre": "Funk", "key": "Cm", "bpm_min": 90, "bpm_max": 110, "page": 2, "sort": "album"}, "GET", "/api/library", {"q": "Sauna", "genre": "Funk", "key": "Cm", "bpm_min": "90", "bpm_max": "110", "page": "2", "sort": "album"}),
-    ("request_music", {"candidate_id": "candidate", "artist": "Vulfpeck", "title": "Sauna"}, "POST", "/api/requests", {"candidate_id": "candidate", "artist": "Vulfpeck", "title": "Sauna", "hold": True}),
     ("request_music", {"kind": "link", "url": "https://youtu.be/example", "link_kind": "album"}, "POST", "/api/requests", {"kind": "link", "url": "https://youtu.be/example", "link_kind": "album", "hold": True}),
     ("request_music", {"kind": "album", "artist": "Moor Mother", "album": "Jazz Codes"}, "POST", "/api/requests", {"kind": "album", "artist": "Moor Mother", "album": "Jazz Codes", "hold": True}),
-    ("request_music", {"kind": "album", "artist": "Moor Mother", "album": "Jazz Codes", "hold": False}, "POST", "/api/requests", {"kind": "album", "artist": "Moor Mother", "album": "Jazz Codes", "hold": False}),
-    ("get_request", {"id": "r"}, "GET", "/api/requests/r", {}),
-    ("choose_copy", {"id": "r", "candidate_id": "c"}, "POST", "/api/requests/r/choose", {"candidate_id": "c"}),
-    ("retry_request", {"id": "r"}, "POST", "/api/requests/r/retry", {}),
-    ("skip_request", {"id": "r"}, "POST", "/api/requests/r/skip", {}),
-    ("remove_request", {"id": "r"}, "POST", "/api/requests/r/remove", {}),
+    ("request_music", {"kind": "track", "artist": "Vulfpeck", "title": "Sauna", "hold": False}, "POST", "/api/requests", {"kind": "track", "artist": "Vulfpeck", "title": "Sauna", "hold": False}),
+    ("requests", {}, "GET", "/api/requests", {"status": "active", "limit": 50}),
+    ("requests", {"q": "blawan", "status": "all", "limit": 5}, "GET", "/api/requests", {"q": "blawan", "status": "all", "limit": 5}),
+    ("requests", {"id": "r"}, "GET", "/api/requests/r", {"status": "active", "limit": 50}),
+    ("request_action", {"id": "r", "action": "choose", "candidate_id": "c"}, "POST", "/api/requests/r/choose", {"candidate_id": "c"}),
+    ("request_action", {"id": "r", "action": "retry"}, "POST", "/api/requests/r/retry", {}),
+    ("request_action", {"id": "r", "action": "skip"}, "POST", "/api/requests/r/skip", {}),
+    ("request_action", {"id": "r", "action": "remove"}, "POST", "/api/requests/r/remove", {}),
     ("pending", {}, "GET", "/api/pending", {}),
-    ("list_suggested", {}, "GET", "/api/requests/suggested", {}),
-    ("choose_suggested", {"ids": ["a", "b"], "get": True}, "POST", "/api/requests/choose", {"ids": ["a", "b"], "get": True}),
-    ("soulseek_checks", {}, "GET", "/api/soulseek/checks", {}),
+    ("decide_review", {"id": "job", "action": "add", "file_ids": ["f1"], "keep_existing": True}, "POST", "/api/jobs/job/approve", {"selected_file_ids": ["f1"], "keep_existing": True}),
+    ("decide_review", {"id": "job", "action": "add"}, "POST", "/api/jobs/job/approve", {}),
+    ("decide_review", {"id": "job", "action": "skip", "file_ids": ["f1"]}, "POST", "/api/jobs/job/skip", {"file_ids": ["f1"]}),
+    ("decide_review", {"id": "job", "action": "reject"}, "POST", "/api/jobs/job/reject", {}),
     ("answer_check", {"username": "peer", "message": "watermelon"}, "POST", "/api/soulseek/checks/peer/reply", {"message": "watermelon"}),
-    ("skip_tracks", {"id": "job", "file_ids": ["f1"]}, "POST", "/api/jobs/job/skip", {"file_ids": ["f1"]}),
-    ("retry_job", {"id": "job", "stage": "processing"}, "POST", "/api/jobs/job/retry", {"stage": "processing"}),
-    ("cancel_job", {"id": "job"}, "POST", "/api/jobs/job/cancel", {}),
-    ("import_files", {"paths": ["Album/Sauna.m4a"]}, "POST", "/api/import", {"paths": ["Album/Sauna.m4a"]}),
-    ("list_requests", {}, "GET", "/api/requests", {"status": "active", "limit": 50}),
-    ("list_requests", {"q": "blawan", "status": "all", "limit": 5}, "GET", "/api/requests", {"q": "blawan", "status": "all", "limit": 5}),
-    ("reject_review", {"id": "job"}, "POST", "/api/jobs/job/reject", {}),
+    ("library", {"q": "Sauna", "genre": "Funk", "key": "Cm", "bpm_min": 90, "bpm_max": 110, "page": 2, "sort": "album"}, "GET", "/api/library", {"q": "Sauna", "genre": "Funk", "key": "Cm", "bpm_min": "90", "bpm_max": "110", "page": "2", "sort": "album"}),
     ("request_approval_token", {"name": "reviewer", "can_approve": True}, "POST", "/api/agents/requests", {"name": "reviewer", "can_approve": True}),
-    ("list_agent_tokens", {}, "GET", "/api/agents", {}),
-    ("revoke_agent_token", {"id": "abc"}, "DELETE", "/api/agents/abc", {}),
+    ("claim_approval_token", {"id": "abc"}, "GET", "/api/agents/requests/abc", {}),
 ])
 def test_tools_use_exact_api_contract(bridge, name, args, method, path, payload):
     instance, received = bridge
@@ -81,15 +68,15 @@ def test_tools_use_exact_api_contract(bridge, name, args, method, path, payload)
 
 
 @pytest.mark.parametrize("name,args", [
-    ("enqueue", {"candidate_id": "x"}), ("request_music", {"candidate_id": 5}), ("request_music", {"candidate_id": "x", "approve": True}),
-    ("request_music", {"kind": "playlist"}),
-    ("retry_job", {"id": "x", "stage": "publish"}), ("search_music", {"source": "unsupported"}),
+    ("enqueue", {"candidate_id": "x"}), ("request_music", {"candidate_id": "x"}), ("request_music", {"kind": "album", "approve": True}),
+    ("request_music", {"kind": "playlist"}), ("request_music", {"hold": "yes"}),
+    ("requests", {"status": "wrong"}), ("requests", {"limit": 0}), ("requests", {"id": ""}),
+    ("request_action", {"id": "r"}), ("request_action", {"id": "r", "action": "cancel"}),
+    ("decide_review", {"id": "j"}), ("decide_review", {"id": "j", "action": "approve"}), ("decide_review", {"id": "j", "action": "add", "keep_existing": "yes"}),
+    ("decide_review", {"id": "j", "action": "skip", "file_ids": []}), ("decide_review", {"id": "j", "action": "add", "files": []}),
+    ("answer_check", {"username": "peer", "message": ""}), ("answer_check", {"username": "peer", "message": "x" * 201}),
     ("library", {"page": True}), ("library", {"bpm_min": float("inf")}), ("library", {"page": 0}),
-    ("import_files", {"paths": []}), ("import_files", {"paths": [1]}), ("import_files", {"paths": ["x"] * 101}),
-    ("request_music", {"hold": "yes"}), ("list_requests", {"status": "wrong"}), ("list_requests", {"limit": 0}),
-    ("choose_copy", {"id": "r"}), ("answer_check", {"username": "peer", "message": ""}), ("skip_tracks", {"id": "j", "file_ids": []}),
-    ("choose_suggested", {"ids": ["a"]}),
-    ("health", []), ("approve", {"id": "job"}), ("approve_review", {"id": "j", "keep_existing": "yes"}), ("approve_review", {"id": "j", "files": []}), ("approve_review", {"id": "j", "selected_file_ids": []}),
+    ("health", {}), ("import_files", {"paths": ["x"]}), ("search_music", {"query": "x"}), ("get_job", {"id": "x"}), ("approve_review", {"id": "job"}),
 ])
 def test_invalid_inputs_never_reach_http(bridge, name, args):
     instance, received = bridge
@@ -103,7 +90,7 @@ def test_invalid_inputs_never_reach_http(bridge, name, args):
 def test_http_errors_are_safe_tool_results(status):
     instance = AcquisitionTools("https://acquire.example", "private-token", transport=httpx.MockTransport(lambda _: httpx.Response(status, text='secret-error-body private-token')))
     try:
-        result = instance.call("health", {})
+        result = instance.call("pending", {})
         assert result["isError"] is True
         assert "secret-error-body" not in json.dumps(result)
         assert "private-token" not in json.dumps(result)
@@ -118,7 +105,7 @@ def test_network_and_invalid_json_errors_are_sanitized():
     for transport in [httpx.MockTransport(unavailable), httpx.MockTransport(lambda _: httpx.Response(200, text='secret-invalid-json'))]:
         instance = AcquisitionTools("https://acquire.example", "private-token", transport=transport)
         try:
-            result = instance.call("health", {})
+            result = instance.call("pending", {})
             assert result["isError"] is True
             assert "secret" not in json.dumps(result)
         finally:
@@ -128,15 +115,17 @@ def test_network_and_invalid_json_errors_are_sanitized():
 def test_echoed_bearer_is_redacted():
     instance = AcquisitionTools("https://acquire.example", "private-token", transport=httpx.MockTransport(lambda _: httpx.Response(200, json={"echo": "private-token"})))
     try:
-        assert "private-token" not in json.dumps(instance.call("health", {}))
+        assert "private-token" not in json.dumps(instance.call("pending", {}))
     finally:
         instance.close()
 
 
 def test_identifier_is_encoded_as_one_path_component(bridge):
     instance, received = bridge
-    instance.call("cancel_job", {"id": "job/approve?x=1"})
-    assert received[0].url.raw_path == b"/api/jobs/job%2Fapprove%3Fx%3D1/cancel"
+    instance.call("request_action", {"id": "r/choose?x=1", "action": "skip"})
+    assert received[0].url.raw_path == b"/api/requests/r%2Fchoose%3Fx%3D1/skip"
+    instance.call("answer_check", {"username": "peer/one", "message": "watermelon"})
+    assert received[1].url.raw_path == b"/api/soulseek/checks/peer%2Fone/reply"
 
 
 def test_handshake_registry_notifications_and_invalid_requests(bridge):
@@ -145,9 +134,9 @@ def test_handshake_registry_notifications_and_invalid_requests(bridge):
     initialize(instance)
     assert instance.handle({"jsonrpc": "2.0", "id": 2, "method": "ping"})["result"] == {}
     registry = instance.handle({"jsonrpc": "2.0", "id": 3, "method": "tools/list"})["result"]["tools"]
-    assert len(registry) == 30
-    assert [item["name"] for item in registry if "approve" in item["name"] or "reject" in item["name"]] == ["approve_review", "reject_review"]
-    assert not any(any(word in item["name"] for word in ["publish", "delete", "sharing"]) for item in registry)
+    assert len(registry) == 9
+    assert [item["name"] for item in registry if "review" in item["name"]] == ["decide_review"]
+    assert not any(any(word in item["name"] for word in ["publish", "delete", "sharing", "approve"]) for item in registry)
     for item in registry:
         assert "endpoint" not in item and "method" not in item
         assert item["inputSchema"]["additionalProperties"] is False

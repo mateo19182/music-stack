@@ -2110,8 +2110,14 @@ def get_request(id: str, user=Depends(check_user)):
     item = owned_request(id, user)
     detail = wishlist.detail(item, request_jobs(user))
     job = store.get("jobs", item["job_id"]) if item.get("job_id") else None
-    if job and job["stage"] == "review":
-        detail["review"] = review_questions(job)
+    if job:
+        detail["job"] = {**(detail.get("job") or {"id": job["id"], "stage": job["stage"]}), "error": job.get("error"),
+                         "files": [{"id": f["id"], "title": f.get("title"), "artist": f.get("artist"), "album": f.get("album"),
+                                    "format": format_name(f.get("format")), "bitrate": round((f.get("bitrate") or 0) / 1000),
+                                    "duration": f.get("duration"), "published": bool(f.get("published"))}
+                                   for f in store.list("files", "job_id=?", (job["id"],))]}
+        if job["stage"] == "review":
+            detail["review"] = review_questions(job)
     return detail
 
 
@@ -2269,7 +2275,12 @@ def reply_to_check(username: str, body: CheckReply, user=Depends(check_user)):
     except SourceError as exc:
         raise HTTPException(502, str(exc)) from None
     _checks_cache["at"] = 0.0
-    return {"ok": True}
+    # The downloads that failed on this uploader get another go now that the check is answered.
+    retried = [j["id"] for j in store.list("jobs", "stage='failed' AND owner=?", (user["username"],))
+               if (j.get("candidate") or {}).get("username") == username
+               and store.transition_job(j["id"], {"failed"}, "queued", cancel_requested=False, error=None, progress=0,
+                                        retry_count=int(j.get("retry_count", 0)) + 1, detail="Retry after the human check")]
+    return {"ok": True, "retried": retried}
 
 
 @app.get("/api/sharing")

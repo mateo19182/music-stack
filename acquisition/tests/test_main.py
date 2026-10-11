@@ -997,8 +997,11 @@ def test_an_agent_answers_human_checks_and_an_approver_agent_skips_tracks(backen
     pending = client.get("/api/pending", headers=watcher).json()
     assert [c["username"] for c in pending["checks"]] == ["peer"] and [r["job_id"] for r in pending["reviews"]] == ["job"]
     assert pending["reviews"][0]["files"][0]["id"] == "file" and "questions" in pending["reviews"][0]["files"][0]
-    assert client.post("/api/soulseek/checks/peer/reply", json={"message": "watermelon"}, headers=watcher).status_code == 200
-    assert sent == [("peer", "watermelon")]
+    main.store.put("jobs", "blocked", {"candidate": {"username": "peer"}, "label": "Album", "error": "human check"},
+                   owner="mateo", stage="failed", created_at="1")
+    answered = client.post("/api/soulseek/checks/peer/reply", json={"message": "watermelon"}, headers=watcher)
+    assert answered.status_code == 200 and answered.json()["retried"] == ["blocked"]
+    assert sent == [("peer", "watermelon")] and main.store.get("jobs", "blocked")["stage"] == "queued"
     assert client.post("/api/jobs/job/skip", json={"file_ids": ["file"]}, headers=watcher).status_code == 403
     assert client.post("/api/jobs/job/skip", json={"file_ids": ["file"]}, headers=approver).status_code == 200
     assert main.store.get("jobs", "job")["stage"] == "rejected"
