@@ -161,6 +161,18 @@ def _detail(value):
     return str(value or '').splitlines()[0][:240] if value else ''
 
 
+def _staged_name(index, filename):
+    """The staged file's name: numbered, and short enough for the file system (255 bytes,
+    with room for ".copying") whatever the uploader called it."""
+    name = PureWindowsPath(filename).name
+    suffix = PureWindowsPath(name).suffix if len(PureWindowsPath(name).suffix) <= 10 else ""
+    stem = name[:len(name) - len(suffix)] if suffix else name
+    prefix = f"{index + 1:03d}-"
+    while len((prefix + stem + suffix).encode()) > 230:
+        stem = stem[:-1]
+    return prefix + stem + suffix
+
+
 def _transfer_failure(username, transfer):
     state = _state(transfer)
     reason = _detail(_get(transfer, 'exception') or _get(transfer, 'message') or _get(transfer, 'reason'))
@@ -1074,7 +1086,7 @@ class Sources:
                       'message': message})
             if done == len(files):
                 for index, file in enumerate(files):
-                    target = destination / f"{index + 1:03d}-{PureWindowsPath(file['filename']).name}"
+                    target = destination / _staged_name(index, file['filename'])
                     if target.is_file() and target.stat().st_size == file["size"]:
                         result.append(target)   # moved here on an earlier try
                         continue

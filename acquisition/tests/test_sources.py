@@ -711,3 +711,11 @@ class YouTubeMusicAlbumTests(unittest.TestCase):
                          [('Mid Spiral', 'Album', 'Band', 2), ('Mid Spiral: Order', 'EP', 'Band', 6)])
         self.assertEqual(found[0]['url'], 'https://www.youtube.com/playlist?list=OLAK5uy_full')
         self.assertEqual(found[0]['duration'], 150)
+
+
+def test_a_very_long_uploaded_file_name_is_shortened_when_staged():
+    from app.sources import _staged_name
+    long = "Music\\\\Flume\\\\05 - Flume - " + "╜Φ°⌂▌╫§" * 60 + " [FLAC].flac"
+    name = _staged_name(4, long)
+    assert name.startswith("005-05 - Flume") and name.endswith(".flac") and len(name.encode()) <= 230
+    assert _staged_name(0, "a\\\\01 Song.mp3") == "001-01 Song.mp3"
