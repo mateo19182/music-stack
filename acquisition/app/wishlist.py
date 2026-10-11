@@ -32,6 +32,7 @@ SEARCHES = 7                   # a week of daily searches, then give up
 UPGRADE_EVERY = 7 * DAY        # a lossy album or track: look for a better copy this often
 UPGRADE_FOR = 28 * DAY         # ...for this long after it arrived
 LOSSLESS = 3                   # matching.quality of a lossless copy
+MAX_ALBUM_FILES = 60           # a bigger Soulseek folder is a collection, not one album
 YOUTUBE_TITLE_FLOOR = 0.2      # 2026-10-09: right albums scored 0.23 and 0.40, same-titled ones by others 0.03-0.18
 ACTIVE = ("queued", "downloading", "process_queued", "processing", "publish_queued", "publishing")
 DONE = ("not_found", "gave_up", "skipped")
@@ -440,7 +441,7 @@ class Wishlist:
         if c.get("kind") != "album" or matching.quality(c) is None or matching.provider(c) in avoid:
             return False
         if c.get("source") == "soulseek":
-            return not c.get("mixed_formats") and (c.get("file_count") or 0) >= 2
+            return not c.get("mixed_formats") and 2 <= (c.get("file_count") or 0) <= MAX_ALBUM_FILES
         if c.get("source") == "torrent":
             return (c.get("seeders") or 0) > 0
         return c.get("source") == "youtube" and bool(c.get("official"))

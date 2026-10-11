@@ -452,3 +452,12 @@ def test_an_old_youtube_copy_is_upgraded_by_premium_youtube(tmp_path):
     w.tick()
     assert queued[-1]["source"] == "youtube" and queued[-1]["premium_only"]
     assert matching.quality(queued[-1]) == 2
+
+
+def test_a_soulseek_folder_far_bigger_than_an_album_is_not_a_candidate():
+    from app.wishlist import MAX_ALBUM_FILES, Wishlist
+    album = {"source": "soulseek", "kind": "album", "format": "mp3", "bitrate": 320, "username": "u"}
+    assert Wishlist._eligible({**album, "file_count": 12}, set())
+    # An uploader's 480-track "club adjacent" folder, once judged 51% likely the album.
+    assert not Wishlist._eligible({**album, "file_count": 480}, set())
+    assert Wishlist._eligible({**album, "file_count": MAX_ALBUM_FILES}, set())
