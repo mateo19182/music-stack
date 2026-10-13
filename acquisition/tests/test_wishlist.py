@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from app import matching
 from app.store import Store, now, uid
-from app.wishlist import Wishlist, SEARCH_AGAIN, SEARCHES, UPGRADE_EVERY, UPGRADE_FOR
+from app.wishlist import Wishlist, UPGRADE_EVERY, UPGRADE_FOR
 
 
 def slsk(user, fmt="flac", bitrate=None, files=10, folder="Moor Mother - Jazz Codes"):
@@ -84,21 +84,34 @@ class WishlistTests(unittest.TestCase):
         self.assertEqual(len(sources.calls), searches)   # no new search
         self.assertEqual(self.queued[-1]["requested_album"], "Jazz Codes")
 
-    def test_a_used_up_list_is_searched_again_daily_for_a_week_then_given_up(self):
+    def test_one_search_then_missing_until_searched_again(self):
         sources = FakeSources({})
         w = self.wishlist(sources)
         item = w.add("mateo", "Moor Mother", "Jazz Codes")
         w.tick()
-        saved = self.store.get("wishlist", item["id"])
-        self.assertEqual(saved["status"], "wanted")
-        self.assertEqual(saved["next_search_at"], self.clock[0] + SEARCH_AGAIN)
-        calls = len(sources.calls)
-        w.tick()
-        self.assertEqual(len(sources.calls), calls)   # waits instead of searching every pass
-        for _ in range(SEARCHES - 1):
-            self.clock[0] += SEARCH_AGAIN
-            w.tick()
         self.assertEqual(self.store.get("wishlist", item["id"])["status"], "not_found")
+        calls = len(sources.calls)
+        self.clock[0] += 30 * 24 * 3600
+        w.tick()
+        self.assertEqual(len(sources.calls), calls)   # no scheduled searches
+        w.retry(self.store.get("wishlist", item["id"]))
+        sources.results["soulseek"] = [slsk("a")]
+        w.tick()
+        self.assertEqual(self.queued[-1]["username"], "a")
+
+    def test_a_request_whose_copies_all_failed_gives_up(self):
+        sources = FakeSources({"soulseek": [slsk("a")]})
+        w = self.wishlist(sources)
+        item = w.add("mateo", "Moor Mother", "Jazz Codes")
+        w.tick()
+        self.finish(item["id"], "failed", failed_stage="download", error="x", progress=0)
+        w.tick()
+        saved = self.store.get("wishlist", item["id"])
+        self.assertEqual(saved["status"], "gave_up")
+        calls = len(sources.calls)
+        self.clock[0] += 30 * 24 * 3600
+        w.tick()
+        self.assertEqual(len(sources.calls), calls)
 
     def test_a_lossy_album_is_upgraded_weekly_for_four_weeks(self):
         sources = FakeSources({"youtube": [yt("Jazz Codes", "Moor Mother - Topic", "OLAK5uy_j", "Moor Mother")]})
@@ -188,7 +201,7 @@ class WishlistTests(unittest.TestCase):
         self.assertEqual(self.queued, [])
         self.assertNotIn("youtube", {s for _, s in sources.calls})
         premium[0] = True
-        self.clock[0] += SEARCH_AGAIN
+        w.retry(self.store.get("wishlist", item["id"]))
         w.tick()
         self.assertEqual(self.queued[-1]["source"], "youtube")
 
@@ -207,7 +220,7 @@ class WishlistTests(unittest.TestCase):
         self.assertTrue(self.queued[-1]["premium_only"])
         self.assertNotIn("torrent", {s for _, s in sources.calls})
 
-    def test_a_link_is_downloaded_as_given_and_retried_daily(self):
+    def test_a_link_is_downloaded_as_given_once(self):
         w = self.wishlist(FakeSources({}))
         item = w.add("mateo", "", list_name="Requests", kind="link", url="https://youtu.be/dQw4w9WgXcQ", link_kind="track")
         w.tick()
@@ -215,11 +228,10 @@ class WishlistTests(unittest.TestCase):
         self.assertFalse(self.queued[-1]["premium_only"])
         self.finish(item["id"], "failed", failed_stage="download", error="Video unavailable")
         w.tick()
-        self.assertEqual(len(self.queued), 1)   # not again right away
-        self.assertIn("again tomorrow", self.store.get("wishlist", item["id"])["note"])
-        self.clock[0] += SEARCH_AGAIN
+        self.assertEqual(self.store.get("wishlist", item["id"])["status"], "gave_up")
+        self.clock[0] += 30 * 24 * 3600
         w.tick()
-        self.assertEqual(len(self.queued), 2)
+        self.assertEqual(len(self.queued), 1)
 
     def test_youtube_links_wait_while_youtube_is_paused(self):
         w = self.wishlist(FakeSources({}))
@@ -243,17 +255,16 @@ class WishlistTests(unittest.TestCase):
         w.tick()
         w.tick()
         self.assertEqual(self.queued[-1]["username"], "a")
-        self.assertEqual(self.store.get("wishlist", item["id"])["rounds"], 0)   # the pick failing is not a round
 
     def test_asking_again_restarts_a_request_that_gave_up_but_an_import_does_not(self):
         w = self.wishlist(FakeSources({}))
         item = w.add("mateo", "Moor Mother", "Jazz Codes", "Blog")
         saved = self.store.get("wishlist", item["id"])
-        saved.update(status="gave_up", rounds=7)
+        saved.update(status="gave_up")
         w.save(saved)
         self.assertEqual(w.add("mateo", "Moor Mother", "Jazz Codes", "Blog")["status"], "gave_up")
         again = w.add("mateo", "Moor Mother", "Jazz Codes", "Blog", renew=True)
-        self.assertEqual((again["status"], again["rounds"]), ("wanted", 0))
+        self.assertEqual(again["status"], "wanted")
 
     def test_queueing_waits_while_every_download_worker_has_a_job_waiting(self):
         for n in range(4):

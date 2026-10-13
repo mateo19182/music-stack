@@ -32,8 +32,9 @@ SoundCloud, Bandcamp and Vimeo URLs are supported.
    request. An album or track is searched on Soulseek, RuTracker and YouTube
    Music at once; the copies that are that record are ranked by quality
    (lossless first; ties go to whoever can send now) and tried one by one. A copy
-   that sends nothing for 10 minutes is dropped for the next one. A list that runs
-   out is searched again daily for a week. Lossy arrivals, and albums already in
+   that sends nothing for 10 minutes is dropped for the next one. When nothing is
+   found, or every copy failed, the request is listed as missing; it is searched
+   again only when you ask. Lossy arrivals, and albums already in
    the library as lossy files, are searched weekly for a better copy for four
    weeks. YouTube is used only with a Premium login (256 kbps), one album at a
    time with pauses between tracks, and can be switched off (`youtube_enabled`).

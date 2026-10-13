@@ -1615,15 +1615,16 @@ $("#import-existing").addEventListener("toggle", (e) => {
   if (e.target.open) loadInbox().catch((error) => toast(error.message, true));
 });
 
-// Wishlist: albums the server keeps looking for until they are in the library.
+// Requests, in tabs by where they stand; "saved" is the picker of saved tracks.
 const WISH_LABELS = {
-  wanted: "Looking", choice: "Choose a copy", queued: "Queued", downloading: "Downloading", processing: "Processing",
-  review: "In review", have: "In library", not_found: "Not found", gave_up: "Gave up", skipped: "Skipped",
+  wanted: "Searching", choice: "Choose a copy", queued: "Queued", downloading: "Downloading", processing: "Processing",
+  review: "In review", have: "In library", not_found: "Not found", gave_up: "Copies failed", skipped: "Skipped",
 };
 const WISH_GROUPS = {
-  open: ["wanted", "choice"], active: ["queued", "downloading", "processing"], review: ["review"],
-  have: ["have"], stopped: ["not_found", "gave_up"], skipped: ["skipped"],
+  getting: ["wanted", "choice", "queued", "downloading", "processing", "review"],
+  missing: ["not_found", "gave_up"], have: ["have"], skipped: ["skipped"],
 };
+let wishTab = "getting";
 const WISH_BADGE = { have: "published", review: "review", choice: "review", not_found: "failed", gave_up: "failed" };
 function relativeTime(seconds) {
   const diff = Math.round(seconds - Date.now() / 1000);
@@ -1648,14 +1649,13 @@ function wishRow(i) {
         .map((r) => `<p class="muted">${esc(sourceLabel(r.source))} · ${esc(String(r.name || "").split(/[\\/]/).pop())} — ${esc(r.reason)}</p>`)
         .join("")}</details>`
     : "";
-  const when = i.status === "wanted" && i.next_search_at && i.next_search_at * 1000 > Date.now()
-    ? `Next search ${relativeTime(i.next_search_at)}` : i.searched_at ? `Searched ${relativeTime(i.searched_at)}` : "";
+  const when = i.searched_at ? `Searched ${relativeTime(i.searched_at)}` : "";
   const downloading = job && ["queued", "downloading"].includes(job.stage);
   const actions = [
     job && job.stage === "review" ? `<button data-tab="review">Review</button>` : "",
     downloading ? `<button class="quiet" data-cancel="${esc(job.id)}" title="Stop this copy; the next one is tried">Try another copy</button>` : "",
     ["not_found", "gave_up", "skipped", "wanted"].includes(i.status) && !job ? `<button class="quiet" data-wish-retry="${esc(i.id)}">${i.kind === "link" ? "Try again" : "Search again"}</button>` : "",
-    !["have", "skipped"].includes(i.status) ? `<button class="quiet" data-wish-skip="${esc(i.id)}">Stop</button>` : "",
+    !["have", "skipped", "not_found", "gave_up"].includes(i.status) ? `<button class="quiet" data-wish-skip="${esc(i.id)}">Stop</button>` : "",
     `<button class="quiet" data-wish-remove="${esc(i.id)}">Remove</button>`,
   ].join("");
   const kind = { album: "Album", track: "Track", link: "Link" }[i.kind] || "";
@@ -1665,8 +1665,6 @@ function wishRow(i) {
 async function loadWishlist() {
   const data = await api("/api/requests");
   state.wishlist = data;
-  $("#suggest-picker").hidden = !data.suggested;
-  $("#suggest-count").textContent = data.suggested ? `(${data.suggested})` : "";
   const lists = $("#wish-filter-list");
   const chosen = lists.value;
   lists.innerHTML = `<option value="">All lists</option>${data.lists.map((l) => `<option ${l === chosen ? "selected" : ""}>${esc(l)}</option>`).join("")}`;
@@ -1676,22 +1674,24 @@ async function loadWishlist() {
 function renderWishlist() {
   const data = state.wishlist || { lists: [], items: [] };
   const list = $("#wish-filter-list").value;
-  const group = $("#wish-filter-status").value;
-  const items = data.items.filter((i) => (!list || i.list === list) && (!group || WISH_GROUPS[group].includes(i.status)));
-  const counts = {};
+  const counts = { saved: data.suggested || 0 };
   for (const i of data.items.filter((i) => !list || i.list === list))
     for (const [g, statuses] of Object.entries(WISH_GROUPS)) if (statuses.includes(i.status)) counts[g] = (counts[g] || 0) + 1;
-  $("#wishlist-summary").textContent = [
-    counts.have ? `${counts.have} in library` : "", counts.active ? `${counts.active} downloading` : "",
-    counts.review ? `${counts.review} in review` : "", counts.open ? `${counts.open} looking` : "",
-    counts.stopped ? `${counts.stopped} not found or gave up` : "",
-    data.matching?.model ? `matching by ${data.matching.model}: ${data.matching.calls} calls, $${data.matching.cost_usd} since restart` : "",
-  ].filter(Boolean).join(" · ");
+  for (const button of document.querySelectorAll("[data-wish-tab]")) {
+    const tab = button.dataset.wishTab;
+    button.hidden = ["skipped", "saved"].includes(tab) && !counts[tab] && wishTab !== tab;
+    button.setAttribute("aria-pressed", String(tab === wishTab));
+    button.querySelector("span").textContent = counts[tab] ? counts[tab].toLocaleString() : "";
+  }
+  const saved = wishTab === "saved";
+  $("#suggest-picker").hidden = !saved;
+  $("#wish-filter-list").closest("label").hidden = saved;
+  const items = saved ? [] : data.items.filter((i) => (!list || i.list === list) && WISH_GROUPS[wishTab].includes(i.status));
   const byList = {};
   for (const i of items) (byList[i.list] ||= []).push(i);
-  $("#wishlist").innerHTML = Object.keys(byList).length
+  $("#wishlist").innerHTML = saved ? "" : Object.keys(byList).length
     ? Object.entries(byList).map(([name, rows]) => `<div class="section-title"><h2>${esc(name)} <span class="muted">${rows.length}</span></h2></div>${rows.map(wishRow).join("")}`).join("")
-    : `<p class="muted">${data.items.length ? "Nothing matches these filters." : "No requests yet. Add one above, or pick a copy in Search."}</p>`;
+    : `<div class="empty">Nothing here.</div>`;
 }
 // Saved tracks to choose from, grouped by artist (most saved first).
 const suggest = { items: [], groups: [], selected: new Set(), shown: 40 };
@@ -1724,9 +1724,12 @@ function renderSuggestions() {
   $("#suggest-selected").textContent = count ? `${count} selected` : "";
   $("#suggest-get").disabled = $("#suggest-drop").disabled = !count;
 }
-$("#suggest-picker").addEventListener("toggle", (e) => {
-  if (e.target.open) loadSuggestions().catch((error) => toast(error.message, true));
-});
+for (const button of document.querySelectorAll("[data-wish-tab]"))
+  button.addEventListener("click", () => {
+    wishTab = button.dataset.wishTab;
+    renderWishlist();
+    if (wishTab === "saved") loadSuggestions().catch((error) => toast(error.message, true));
+  });
 $("#suggest-filter").addEventListener("input", () => {
   suggest.shown = 40;
   renderSuggestions();
@@ -1755,7 +1758,6 @@ for (const [button, get] of [["#suggest-get", true], ["#suggest-drop", false]])
     }),
   );
 $("#wish-filter-list").addEventListener("change", renderWishlist);
-$("#wish-filter-status").addEventListener("change", renderWishlist);
 $("#wish-kind").addEventListener("change", (e) => {
   $("#wish-name-label").textContent = e.target.value === "album" ? "Album" : "Title";
 });

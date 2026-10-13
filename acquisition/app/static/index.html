@@ -6,8 +6,8 @@
     <meta name="color-scheme" content="light" />
     <title>Acquire</title>
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v=20261005-2" />
-    <link rel="stylesheet" href="/static/style.css?v=20261009-2" />
-    <script defer src="/static/app.js?v=20261009-2"></script>
+    <link rel="stylesheet" href="/static/style.css?v=20261013-1" />
+    <script defer src="/static/app.js?v=20261013-1"></script>
   </head>
   <body>
     <div id="toast" role="status" aria-live="polite" hidden></div>
@@ -132,12 +132,6 @@
             <h1>Requests</h1>
             <button id="refresh-jobs" class="quiet">Refresh</button>
           </div>
-          <p class="muted">
-            Everything you asked for. Each album or track is searched on
-            Soulseek, RuTracker and YouTube Music, the copies are ranked by
-            quality, and they are tried one by one until it is in your library.
-            Lossy arrivals are checked weekly for a lossless copy.
-          </p>
           <div class="section-title">
             <h2>Needs you <span id="review-count"></span></h2>
           </div>
@@ -168,21 +162,16 @@
             <button type="submit">Request</button>
           </form>
           <div class="wishlist-filters">
-            <label>List<select id="wish-filter-list"><option value="">All lists</option></select></label>
-            <label>Status<select id="wish-filter-status">
-              <option value="">All</option>
-              <option value="open">Still looking</option>
-              <option value="active">Downloading</option>
-              <option value="review">In review</option>
-              <option value="have">In library</option>
-              <option value="stopped">Not found or gave up</option>
-              <option value="skipped">Skipped</option>
-            </select></label>
-            <span id="wishlist-summary" class="muted"></span>
+          <div class="segmented wish-tabs" role="group" aria-label="Show requests">
+            <button type="button" data-wish-tab="getting" aria-pressed="true">Getting <span></span></button
+            ><button type="button" data-wish-tab="missing" aria-pressed="false">Missing <span></span></button
+            ><button type="button" data-wish-tab="have" aria-pressed="false">In library <span></span></button
+            ><button type="button" data-wish-tab="skipped" aria-pressed="false" hidden>Skipped <span></span></button
+            ><button type="button" data-wish-tab="saved" aria-pressed="false" hidden>Saved tracks <span></span></button>
           </div>
-          <details id="suggest-picker" class="card" hidden>
-            <summary>Choose from your saved tracks <span id="suggest-count" class="muted"></span></summary>
-            <p class="muted">Tracks you saved elsewhere that the library lacks. Nothing here is searched until you choose it.</p>
+            <label>List<select id="wish-filter-list"><option value="">All lists</option></select></label>
+          </div>
+          <div id="suggest-picker" hidden>
             <div class="suggest-tools">
               <input id="suggest-filter" type="search" placeholder="Filter by artist, title or album" aria-label="Filter saved tracks">
               <button id="suggest-get" disabled>Get selected</button>
@@ -190,7 +179,7 @@
               <span id="suggest-selected" class="muted"></span>
             </div>
             <div id="suggest-list"></div>
-          </details>
+          </div>
           <div id="wishlist"></div>
           <div class="section-title"><h2>Recently added</h2></div>
           <div id="recent"></div>

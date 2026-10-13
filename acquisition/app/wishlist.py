@@ -2,9 +2,9 @@
 
 A request is an album, a track, or an exact link. For albums and tracks: search every source
 at once, keep what is that record, sort by quality, try the best copy, and take the next one
-when a download fails. A list that runs out is searched again a day later, for a week. A copy
-picked from search results is tried first; if it fails, the request searches like any other.
-A link is downloaded as given, once a day for a week until it works.
+when a download fails. One search: when nothing is found, or every copy failed, the request is
+missing until the owner searches again. A copy picked from search results is tried first; if it
+fails, the request searches like any other. A link is downloaded as given, once.
 
 Albums and tracks that came in lossy are searched once a week for a better copy, for four
 weeks; review replaces the lossy tracks. Downloads are jobs (app.main); a request follows one
@@ -27,8 +27,6 @@ from .sources import SourceError, SoulseekUnavailable, soulseek_query, youtube_u
 log = logging.getLogger("acquisition")
 
 DAY = 24 * 3600
-SEARCH_AGAIN = DAY             # after a list runs out, or nothing was found
-SEARCHES = 7                   # a week of daily searches, then give up
 UPGRADE_EVERY = 7 * DAY        # a lossy album or track: look for a better copy this often
 UPGRADE_FOR = 28 * DAY         # ...for this long after it arrived
 LOSSLESS = 3                   # matching.quality of a lossless copy
@@ -118,7 +116,7 @@ class Wishlist:
             return existing
         item = {"id": id, "owner": owner, "kind": kind, "artist": artist, "album": album, "title": title, "url": url,
                 "list": list_name, "status": "wanted", "note": "Waiting to search", "candidates": [], "tried": [],
-                "rounds": 0, "searched_at": None, "next_search_at": 0, "job_id": None, "wrong_jobs": [],
+                "searched_at": None, "next_search_at": 0, "job_id": None, "wrong_jobs": [],
                 "added_at": self.clock(), **extra}
         if pick:
             item.update(candidates=[pick], pinned=True, pick=pick.get("id"), note="Trying your pick")
@@ -132,7 +130,7 @@ class Wishlist:
         return item
 
     def retry(self, item):
-        item.update(status="wanted", rounds=0, next_search_at=0, candidates=[], searched_at=None,
+        item.update(status="wanted", next_search_at=0, candidates=[], searched_at=None,
                     note="Retry requested; searching again")
         if item.get("kind") == "link":
             item.update(tried=[], candidates=[link_candidate(item["url"], item.get("link_kind", "track"))])
@@ -211,7 +209,7 @@ class Wishlist:
             quality = matching.library_quality(library, item)
         item.update(quality=quality, quality_checked=quality is not None or library is not None)
         if quality is not None and quality < LOSSLESS and item["kind"] != "link":
-            item.update(upgrade_until=self.clock() + UPGRADE_FOR, next_search_at=0, rounds=0,
+            item.update(upgrade_until=self.clock() + UPGRADE_FOR, next_search_at=0,
                         note="In the library (lossy); looking for a better copy weekly")
         self.save(item)
 
@@ -248,7 +246,7 @@ class Wishlist:
             return False
         if stage == "published" and job["id"] not in item.get("wrong_jobs", []):
             quality = matching.quality(job.get("candidate") or {})
-            item.update(status="have", job_id=None, candidates=[], quality=quality, rounds=0, pinned=False)
+            item.update(status="have", job_id=None, candidates=[], quality=quality, pinned=False)
             if quality is not None and quality < LOSSLESS and item["kind"] != "link":
                 if not upgrade:
                     item.update(upgrade_until=self.clock() + UPGRADE_FOR, next_search_at=self.clock() + UPGRADE_EVERY)
@@ -267,7 +265,7 @@ class Wishlist:
             item.update(status="wanted", note=f"{outcome.capitalize()}: {error[:160]}" if error else outcome.capitalize())
         if item["kind"] == "link":
             self._exhausted(item, False, f"Download failed: {error[:120]}" if error else "Download failed")
-            return False   # the link again tomorrow, not now
+            return False
         self.save(item)
         return True
 
@@ -286,7 +284,7 @@ class Wishlist:
         return self.youtube_enabled() if item["kind"] == "link" else self.youtube_ready()
 
     def _next(self, item, jobs, upgrade=False):
-        """Try the best untried copy; when the list runs out, search again later."""
+        """Try the best untried copy; when the list runs out, the request is missing."""
         now = self.clock()
         tried = {t["provider"] for t in item["tried"]}
         untried = [c for c in item["candidates"] if (item["kind"] == "link" or matching.provider(c) not in tried)
@@ -312,7 +310,7 @@ class Wishlist:
                 return
             self._exhausted(item, upgrade, "Your pick failed" if item.get("pinned") else "All copies failed")
             return
-        if now < item.get("next_search_at", 0) or self._searches_left <= 0:
+        if (upgrade and now < item.get("next_search_at", 0)) or self._searches_left <= 0:
             return
         self._searches_left -= 1
         found = self._search(item)
@@ -346,16 +344,12 @@ class Wishlist:
             item.update(pinned=False, next_search_at=0, status="wanted", note=f"{why}; searching other copies")
             self.save(item)
             return
-        item["rounds"] = item.get("rounds", 0) + 1
         if upgrade:
             item.update(next_search_at=now + UPGRADE_EVERY, note=f"In the library (lossy); {why.lower()} yet, looking again in a week")
-        elif item["rounds"] >= SEARCHES:
-            gave = "gave_up" if item["tried"] else "not_found"
-            item.update(status=gave, note=(f"Gave up after {len(item['tried'])} tries in a week" if item["tried"]
-                                           else "Not found on Soulseek, RuTracker or YouTube Music in a week"))
+        elif item["tried"]:
+            item.update(status="gave_up", note=f"{why} ({len(item['tried'])} tried)")
         else:
-            item.update(status="wanted", next_search_at=now + SEARCH_AGAIN,
-                        note=f"{why}; {'trying' if item['kind'] == 'link' else 'searching'} again tomorrow")
+            item.update(status="not_found", note="Not found on Soulseek, RuTracker or YouTube Music")
         self.save(item)
 
     def _search(self, item):

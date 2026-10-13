@@ -1384,3 +1384,26 @@ body:has(#player-bar:not([hidden])) .review-bar {
 .suggest-artist { border-top: 1px solid var(--border, #ddd); padding: 0.4rem 0; }
 .suggest-tracks { display: grid; gap: 0.15rem; padding-left: 1.6rem; }
 .suggest-tracks label { font-weight: normal; }
+.wish-tabs {
+  margin: 14px 0;
+  width: fit-content;
+  max-width: 100%;
+}
+.wish-tabs span:not(:empty) {
+  margin-left: 4px;
+  opacity: 0.7;
+}
+.wishlist-filters .wish-tabs {
+  margin: 0;
+}
+.suggest-artist label,
+.suggest-tracks label {
+  flex-direction: row;
+  align-items: center;
+  font-size: 14px;
+  color: inherit;
+}
+#suggest-list input[type="checkbox"] {
+  width: auto;
+  flex: none;
+}
