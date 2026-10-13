@@ -347,6 +347,7 @@ class Wishlist:
         if upgrade:
             item.update(next_search_at=now + UPGRADE_EVERY, note=f"In the library (lossy); {why.lower()} yet, looking again in a week")
         elif item["tried"]:
+            why = "No other copies found" if why == "Not found" else why
             item.update(status="gave_up", note=f"{why} ({len(item['tried'])} tried)")
         else:
             item.update(status="not_found", note="Not found on Soulseek, RuTracker or YouTube Music")
