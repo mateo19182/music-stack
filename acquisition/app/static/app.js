@@ -1722,7 +1722,7 @@ function renderSuggestions() {
     : `<p class="muted">${suggest.items.length ? "Nothing matches the filter." : "Nothing left to choose."}</p>`;
   const count = suggest.selected.size;
   $("#suggest-selected").textContent = count ? `${count} selected` : "";
-  $("#suggest-get").disabled = $("#suggest-drop").disabled = !count;
+  $("#suggest-get").disabled = $("#suggest-albums").disabled = $("#suggest-drop").disabled = !count;
 }
 for (const button of document.querySelectorAll("[data-wish-tab]"))
   button.addEventListener("click", () => {
@@ -1747,12 +1747,13 @@ $("#suggest-list").addEventListener("click", (e) => {
   suggest.shown += 40;
   renderSuggestions();
 });
-for (const [button, get] of [["#suggest-get", true], ["#suggest-drop", false]])
+for (const [button, get, album] of [["#suggest-get", true, false], ["#suggest-albums", true, true], ["#suggest-drop", false, false]])
   $(button).addEventListener("click", (e) =>
     suggest.selected.size && busy(e.target, async () => {
       const ids = [...suggest.selected];
-      for (let n = 0; n < ids.length; n += 2000) await api("/api/requests/choose", { ids: ids.slice(n, n + 2000), get });
-      toast(get ? `${ids.length} requested; searching starts now.` : `${ids.length} removed from the choices.`);
+      let count = 0;
+      for (let n = 0; n < ids.length; n += 2000) count += (await api("/api/requests/choose", { ids: ids.slice(n, n + 2000), get, album })).count;
+      toast(get ? `${count} requested; searching starts now.` : `${count} removed from the choices.`);
       suggest.selected.clear();
       await Promise.all([loadSuggestions(), loadWishlist()]);
     }),

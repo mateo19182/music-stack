@@ -1151,3 +1151,18 @@ def test_suggested_tracks_wait_for_the_owner_to_choose_them(backend, monkeypatch
     assert searched == [ids[0]]
     # Only the owner's own suggestions, and only while they are suggestions.
     assert client.post("/api/requests/choose", json={"ids": [ids[0]], "get": False}).json() == {"count": 0}
+
+
+def test_saved_tracks_can_bring_their_whole_album(backend, monkeypatch):
+    main, client = backend
+    signin(main, client, monkeypatch)
+    add = lambda title, album: main.wishlist.add("mateo", "Herbie Hancock", album, "Saved tracks", kind="track", title=title,
+                                                 status="suggested", note="Waiting for your choice")["id"]
+    sly, vein, other, single = add("Sly", "Head Hunters"), add("Vein Melter", "Head Hunters"), \
+        add("Rockit", "Future Shock"), add("Loose", "")
+    assert client.post("/api/requests/choose", json={"ids": [sly, vein, single], "get": True, "album": True}).json() == {"count": 2}
+    albums = [i for i in main.wishlist.items("mateo") if i["kind"] == "album"]
+    assert [(i["album"], i["list"], i["status"]) for i in albums] == [("Head Hunters", "Saved albums", "wanted")]
+    assert main.store.get("wishlist", sly) is None and main.store.get("wishlist", vein) is None
+    assert main.store.get("wishlist", other)["status"] == "suggested"
+    assert main.store.get("wishlist", single)["status"] == "wanted"   # no album named: the track itself

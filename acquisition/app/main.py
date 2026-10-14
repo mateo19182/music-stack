@@ -16,6 +16,7 @@ from mediafile import MediaFile
 
 from .store import Store, uid, now
 from .sources import Sources, SourceError, SoulseekUnavailable, DownloadCancelled, youtube_url, _timestamp
+from . import matching
 from .wishlist import KINDS, Wishlist
 from .llm_match import Judge
 from typing import List
@@ -88,6 +89,7 @@ class CopyChoice(BaseModel):
 class RequestChoice(BaseModel):
     ids: List[str] = Field(min_length=1, max_length=2000)
     get: bool
+    album: bool = False   # get the albums the chosen tracks are on, instead of the tracks
 
 
 class Retry(BaseModel):
@@ -2091,9 +2093,21 @@ def suggested_requests(user=Depends(check_user)):
 
 @app.post("/api/requests/choose")
 def choose_requests(body: RequestChoice, user=Depends(check_user)):
-    """Chosen suggestions become requests searched now; the others are removed."""
+    """Chosen suggestions become requests searched now; the others are removed. With `album`, each
+    chosen track's album is requested once, and that album's suggestions leave the picker."""
     chosen = [i for i in (store.get("wishlist", id) for id in dict.fromkeys(body.ids))
               if i and i["owner"] == user["username"] and i["status"] == "suggested"]
+    if body.get and body.album:
+        albums = {(matching.key(i["artist"]), matching.album_key(i["album"])): i for i in chosen if i.get("album")}
+        for item in albums.values():
+            wishlist.add(user["username"], item["artist"], item["album"], "Saved albums", renew=True)
+        covered = [i for i in wishlist.items(user["username"]) if i["status"] == "suggested" and i.get("album")
+                   and (matching.key(i["artist"]), matching.album_key(i["album"])) in albums]
+        with store.db() as db:
+            db.executemany("DELETE FROM wishlist WHERE id=?", [(i["id"],) for i in covered])
+        chosen = [i for i in chosen if not i.get("album")]   # no album to get: the track itself
+    else:
+        albums = {}
     for item in chosen:
         if body.get:
             item.update(status="wanted", note="Waiting to search", next_search_at=0)
@@ -2101,7 +2115,7 @@ def choose_requests(body: RequestChoice, user=Depends(check_user)):
         else:
             with store.db() as db:
                 db.execute("DELETE FROM wishlist WHERE id=?", (item["id"],))
-    return {"count": len(chosen)}
+    return {"count": len(chosen) + len(albums)}
 
 
 @app.get("/api/requests/{id}")
