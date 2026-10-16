@@ -61,7 +61,7 @@ def track_key(title):
     """A track title without "(feat. X)" and other bracketed credits, but with a version that
     makes it another recording ("(Remix)", "(Live)")."""
     title = str(title or '')
-    kept = [m for m in re.findall(r'[\(\[](.*?)[\)\]]', title) if re.search('|'.join(UNWANTED + ('edit', 'mix', 'version', 'vip')), m, re.I)]
+    kept = [m for m in re.findall(r'[\(\[](.*?)[\)\]]', title) if re.search('|'.join(UNWANTED + ('edit', 'mix', 'version', 'vip', 'dub')), m, re.I)]
     return key(re.sub(r'\s*[\(\[].*?[\)\]]', '', title) + ' '.join(kept))
 
 
@@ -217,6 +217,7 @@ FILLER = {'the', 'and', 'x', 'with', 'feat', 'ft', 'vs', 'a', 'de', 'la', 'el', 
 
 def words(text):
     text = unicodedata.normalize('NFKD', str(text or '')).encode('ascii', 'ignore').decode().lower() or str(text or '').casefold()
+    text = re.sub(r"\b(?:[^\W\d_]\.){2,}", lambda m: m.group().replace('.', ''), text)   # "R.A.V.E." = "RAVE"
     return [ROMAN.get(w, w) for w in re.split(r"[^\w]+|_", text.replace("'", '')) if w]   # "Pinball II" = "Pinball 2"
 
 

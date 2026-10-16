@@ -22,9 +22,10 @@ from .files import take
 AUDIO_EXTENSIONS = {"mp3", "flac", "m4a", "aac", "ogg", "opus", "wav", "aiff", "alac", "wma"}
 # Names the Soulseek server drops whole searches for (an empty answer, not an error).
 # A "*name" wildcard does not get through either, so the word is left out of the query.
-FILTERED_TERMS = {"jpegmafia"}
+FILTERED_TERMS = {"jpegmafia", "overmono"}
 # Same set Nicotine+ turns into spaces, plus Spanish/typographic marks.
 _PUNCTUATION = re.compile(r"[!\"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~¡¿’‘“”–—·•]")
+ACRONYM = re.compile(r"\b(?:[^\W\d_]\.){2,}")
 _DISC_FOLDER = re.compile(r"^(?:dis[ck]|cd)\s*\d{1,2}$", re.I)
 
 
@@ -36,6 +37,7 @@ def soulseek_query(text):
     """
     text = unicodedata.normalize("NFKC", str(text or "")).casefold()
     text = re.sub(r"[(\[{].*?[)\]}]", " ", text)
+    text = ACRONYM.sub(lambda m: m.group().replace(".", ""), text)   # "R.A.V.E." is "rave", not four dropped letters
     text = re.sub(r"\s(?:feat|ft|featuring)\b.*$", " ", text)
     words = _PUNCTUATION.sub(" ", text).split()
     words = [w for w in words if (len(w) > 1 or w.isdigit()) and w not in FILTERED_TERMS]

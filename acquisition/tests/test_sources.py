@@ -362,6 +362,10 @@ class SoulseekSearchTests(unittest.TestCase):
         self.assertEqual(soulseek_query('Jawnino 40'), 'jawnino 40')
         # A name the server drops searches for is left out; "-word" would be an exclusion.
         self.assertEqual(soulseek_query('JPEGMAFIA - Scaring the Hoes'), 'scaring the hoes')
+        self.assertEqual(soulseek_query('Overmono Gunk'), 'gunk')
+        # Dotted acronyms are one word, not single letters that get dropped.
+        self.assertEqual(soulseek_query('G Jones R.A.V.E.'), 'jones rave')
+        self.assertEqual(soulseek_query('clipping. - Dead Channel Sky'), 'clipping dead channel sky')
 
     def test_limiter_spaces_searches_and_keeps_the_window_rate(self):
         from app.sources import SearchLimiter
