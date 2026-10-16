@@ -7,9 +7,9 @@ from mediafile import MediaFile
 from app.ingestion import Ingestor, IngestionCancelled, _audio_hash
 
 
-def audio(tmp_path, name='track.mp3', title='Song (Club Remix)', bpm=123, key='Am'):
+def audio(tmp_path, name='track.mp3', title='Song (Club Remix)', bpm=123, key='Am', frequency=440):
     path = tmp_path / name
-    subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=3', '-codec:a', 'libmp3lame', '-q:a', '2', str(path)], check=True)
+    subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i', f'sine=frequency={frequency}:duration=3', '-codec:a', 'libmp3lame', '-q:a', '2', str(path)], check=True)
     tags = MediaFile(str(path))
     tags.title, tags.artist, tags.album = title, 'Artist', 'Album'
     tags.bpm, tags.initial_key = bpm, key
@@ -430,3 +430,74 @@ def test_one_copy_per_song_through_review_publish_and_undo(tmp_path):
     pipeline.retire(published, tmp_path / 'trash', to=prepared)
     assert prepared.is_file() and not published.exists()
     assert pipeline.publish([record], {}, 'job-again')[0]['path'] == str(published)
+
+
+def tagged(path, **tags):
+    media = MediaFile(str(path))
+    for field, value in tags.items():
+        setattr(media, field, value)
+    media.save()
+    return path
+
+
+def test_youtube_album_shares_one_artist_folder_with_numbers_and_year(tmp_path):
+    first = tagged(audio(tmp_path, name='idA.mp3', title='Coche Bomba'), artist='Nerve Agent, Rodol, Rodol, Nerve Agent x Rodol', album='12 Atentados', year=20250917)
+    second = tagged(audio(tmp_path, name='idB.mp3', title='Pekao', frequency=550), artist='Nerve Agent, Rodol, Plasaporros', album='12 Atentados', year=20250917)
+    candidate = {'source': 'youtube', 'kind': 'album', 'artist': 'Nerve Agent Official Channel', 'source_files': [{'id': 'idB'}, {'id': 'idA'}]}
+    pipeline = ingestor(tmp_path)
+    prepared = pipeline.prepare([first, second], candidate, 'yt-album')
+    published = pipeline.publish(prepared, {}, 'yt-album')
+    assert {Path(r['path']).parent for r in published} == {tmp_path / 'library' / 'Nerve Agent' / '12 Atentados'}
+    tags = {MediaFile(r['path']).title: MediaFile(r['path']) for r in published}
+    assert tags['Coche Bomba'].artist == 'Nerve Agent, Rodol, Nerve Agent x Rodol'
+    assert (tags['Pekao'].track, tags['Coche Bomba'].track, tags['Pekao'].tracktotal) == (1, 2, 2)
+    assert {t.albumartist for t in tags.values()} == {'Nerve Agent'} and {t.year for t in tags.values()} == {2025}
+
+
+def test_album_artist_follows_most_tracks_or_various_artists(tmp_path):
+    album = [tagged(audio(tmp_path, name=f'{n}.mp3', title=f'Song {n}', frequency=300 + 100 * n), albumartist=artist) for n, artist in
+             enumerate(['Kaytranada', 'Kaytranada', 'Kaytranada/Channel Tres'])]
+    prepared = ingestor(tmp_path).prepare(album, {'source': 'torrent', 'kind': 'album'}, 'mixed')
+    assert {MediaFile(r['path']).albumartist for r in prepared} == {'Kaytranada'}
+    compilation = [tagged(audio(tmp_path, name=f'c{n}.mp3', title=f'Song {n}', frequency=700 + 100 * n), artist=artist) for n, artist in enumerate(['A', 'B', 'C'])]
+    prepared = ingestor(tmp_path).prepare(compilation, {'source': 'soulseek', 'kind': 'album'}, 'compilation')
+    assert {MediaFile(r['path']).albumartist for r in prepared} == {'Various Artists'}
+    from app.ingestion import album_artist_of
+    assert album_artist_of(['Dana and Alden'] * 3 + ['Dana and Alden, Cinya Khan']) == 'Dana and Alden'
+    assert album_artist_of(['KAYTRANADA, Syd', 'KAYTRANADA, Vic Mensa', 'KAYTRANADA']) == 'KAYTRANADA'
+    from app.ingestion import first_credit
+    assert first_credit('Nerve Agent, Rodol, Nerve Agent x Rodol', 'Nerve Agent Official') == 'Nerve Agent'
+    assert first_credit('Tyler, The Creator, Kali Uchis', 'Tyler, The Creator') == 'Tyler, The Creator'
+    assert first_credit('Walt Fowler, Kevin Hays, Steve Gadd Band', 'Steve Gadd') == 'Steve Gadd Band'
+    assert first_credit('skaiwater, Lil Uzi Vert', 'skai') == 'skaiwater'
+
+
+def test_possible_duplicate_ignores_credits_but_not_versions(tmp_path):
+    library = tmp_path / 'library'
+    library.mkdir()
+    tagged(audio(library, name='old.mp3', title="YOU'RE THE ONE"), artist='KAYTRANADA, Syd', album='99.9%')
+    tagged(audio(library, name='dub.mp3', title='Da Funk (Dub)', frequency=600), artist='Daft Punk', album='Homework')
+    pipeline = ingestor(tmp_path)
+    upgrade = tagged(audio(tmp_path, name='new.mp3', title="YOU'RE THE ONE (feat. Syd)", frequency=500), artist='KAYTRANADA', album='99.9%')
+    assert pipeline.prepare([upgrade], {}, 'upgrade')[0]['possible_duplicates']
+    tagged(audio(library, name='roots.mp3', title='The Spark', frequency=450), artist='The Roots, Common')
+    roots = tagged(audio(tmp_path, name='spark.mp3', title='The Spark', frequency=480), artist='Roots')
+    assert pipeline.prepare([roots], {}, 'roots')[0]['possible_duplicates']
+    original = tagged(audio(tmp_path, name='funk.mp3', title='Da Funk', frequency=650), artist='Daft Punk', album='Homework')
+    assert not pipeline.prepare([original], {}, 'original')[0]['possible_duplicates']
+
+
+def test_a_title_from_the_filename_drops_numbers_and_the_artist():
+    from app.ingestion import _title_from_filename
+    assert _title_from_filename('001-06. D Double E - Tell Me A Ting', 'D Double E') == 'Tell Me A Ting'
+    assert _title_from_filename("001-(08) [Red Snapper] Wesley Don't Surf", 'Red Snapper') == "Wesley Don't Surf"
+    assert _title_from_filename('001-8. If Trees Could Speak', 'The Flashbulb') == 'If Trees Could Speak'
+    assert _title_from_filename('22 Acacia Avenue', 'Iron Maiden') == '22 Acacia Avenue'
+    assert _title_from_filename('1999', None) == '1999'
+
+
+def test_a_misread_year_comes_from_the_whole_date(tmp_path):
+    from app.ingestion import real_year
+    source = tagged(audio(tmp_path), year=None)
+    media = MediaFile(str(source)); media.mgfile['TDRC'] = __import__('mutagen.id3', fromlist=['TDRC']).TDRC(encoding=3, text=['05-02-2021']); media.save()
+    assert real_year(source, 5) == 2021 and real_year(source, 20250917) == 2025

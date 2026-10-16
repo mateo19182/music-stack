@@ -1,6 +1,7 @@
 """Copy-based, restart-safe ingestion. Source downloads are never changed."""
 from __future__ import annotations
 
+import collections
 import fcntl
 import hashlib
 import json
@@ -13,6 +14,7 @@ import time
 import sys
 from pathlib import Path
 
+import mutagen
 import numpy as np
 from beets.library import Item, Library
 from mediafile import Image, ImageType, MediaFile
@@ -22,6 +24,7 @@ from .audio_models import SAMPLE_RATE, models_at
 from .descriptors import fill_descriptors
 from .files import link, move
 from .lookup import Catalog, _identity
+from .matching import clean_artist, key, track_key
 from .tags import set_tag, split_values
 
 
@@ -85,6 +88,92 @@ def _requested_album(album, candidate):
     plain = lambda text: _identity(re.sub(r'\s*[\(\[].*?[\)\]]', '', str(text or '')))
     return bool(requested_artist and wanted and album and plain(album) and plain(album) == plain(wanted))
 
+
+def _unrepeated(artists):
+    """"Nerve Agent, Rodol, Rodol" (YouTube Music lists a credit once per role) → "Nerve Agent, Rodol"."""
+    return ', '.join(dict.fromkeys(a.strip() for a in str(artists or '').split(',') if a.strip()))
+
+
+def real_year(path, year):
+    """A year the tags misread: yt-dlp's upload date 20250917, or "05-02-2021" read as 5. None if unknown."""
+    if year and year > 9999:
+        return int(str(year)[:4])
+    try:
+        dates = [str(d) for d in (mutagen.File(str(path), easy=True) or {}).get('date') or []]
+    except Exception:
+        dates = []
+    for date in dates:
+        found = re.search(r'(?<!\d)(19\d\d|20\d\d)(?!\d)', date)
+        if found:
+            return int(found[1])
+    return None
+
+
+def _title_from_filename(stem, artist=None):
+    """"001-06. D Double E - Tell Me A Ting" → "Tell Me A Ting": without our download number
+    ("001-", sources.py), the track number and the artist."""
+    title = re.sub(r'^\d{3}-', '', stem)
+    title = re.sub(r'^(?:\(\d{1,3}\)|\d{1,3}[._-]|\d{1,3}\s+-\s)\s*', '', title)
+    artist = str(artist or '').strip()
+    if artist:
+        for prefix in (f'[{artist}] ', f'{artist} - '):
+            if title.casefold().startswith(prefix.casefold()):
+                title = title[len(prefix):]
+    return title.strip() or stem
+
+
+def _album_artist(paths, candidate):
+    """One album artist for a downloaded album, so its tracks share a folder (Navidrome takes a folder
+    as an album): the lead artist most tracks credit, or Various Artists. None when the files agree.
+    Not the YouTube playlist's artist, which is sometimes the channel ("Hiromi Official Channel")."""
+    if candidate.get('kind') != 'album' or len(paths) < 2:
+        return None
+    values = []
+    for path in paths:
+        try:
+            media = MediaFile(str(path))
+            values.append(_unrepeated(media.albumartist or media.artist))
+        except Exception:
+            values.append('')
+    if candidate.get('source') == 'youtube':
+        # The folder otherwise follows each track's credits, so name the album even when they agree.
+        values = [first_credit(v, candidate.get('requested_artist'), candidate.get('artist')) for v in values]
+        return album_artist_of(values) or values[0] or _unrepeated(candidate.get('artist')) or None
+    return album_artist_of(values) or (_unrepeated(candidate.get('artist')) if not any(values) else None)
+
+
+def first_credit(artists, *wanted):
+    """YouTube credits everyone on a track ("JPEGMAFIA, Danny Brown, Barrington Hendricks"): the
+    requested or playlist artist when the credits name it ("Tyler, The Creator", "Steve Gadd Band"
+    for "Steve Gadd"), otherwise the first one."""
+    artists = str(artists or '')
+    items = [a.strip() for a in artists.split(',') if a.strip()]
+    wanted = [str(w).strip() for w in wanted if w and str(w).strip()]
+    for w in wanted:
+        if artists.casefold().startswith(w.casefold()) and artists[len(w):len(w) + 1] in ('', ','):
+            return artists[:len(w)]
+    for w in wanted:
+        for item in items:
+            if key(item) == key(w) or (key(w) and key(item).startswith(key(w))):
+                return item
+    return items[0] if items else ''
+
+
+def album_artist_of(values):
+    """"KAYTRANADA, Syd", "KAYTRANADA" and "KAYTRANADA, Vic Mensa" → "KAYTRANADA"; None when all agree."""
+    if len(set(values)) == 1:
+        return None
+    common = collections.Counter(v for v in values if v).most_common(1)
+    if common and 2 * common[0][1] > len(values):
+        return common[0][0]   # "King Gizzard & The Lizard Wizard" on most tracks stays whole
+    leads = [clean_artist(v) for v in values if v]
+    counts = collections.Counter(lead.casefold() for lead in leads)
+    lead = max(counts, key=counts.get) if counts else ''
+    if not lead or 2 * counts[lead] <= len(values):
+        return 'Various Artists'
+    spellings = collections.Counter(v for v in values if v.casefold() == lead) or collections.Counter(
+        x for x in leads if x.casefold() == lead)
+    return max(spellings, key=lambda v: (spellings[v], -len(v)))
 
 def _audio_hash(path, cancelled=lambda: False):
     result = _run(['ffmpeg', '-v', 'error', '-i', str(path), '-map', '0:a:0',
@@ -279,6 +368,7 @@ class Ingestor:
             known = self._provenance()
             results = []
             database = Library(str(self.beets_path), directory=str(self.library))
+            album_artist = None if _preserve_tags else _album_artist(paths, candidate)
             for number, source in enumerate(paths):
                 check()
                 source = Path(source).resolve(strict=True)
@@ -328,13 +418,27 @@ class Ingestor:
                 media = MediaFile(str(work))
                 if not media.title and not _preserve_tags:
                     # A request often names the original song, so prefer the downloaded filename.
-                    media.title = source.stem
+                    media.title = _title_from_filename(source.stem, media.artist or candidate.get('requested_artist') or candidate.get('artist'))
                 if not media.artist and len(paths) == 1 and not _preserve_tags:
                     media.artist = candidate.get('artist') or candidate.get('requested_artist') or ''
                 elif not media.artist and not _preserve_tags and _requested_album(media.album, candidate):
                     # An album folder with blank artist tags, tagged as the album the owner asked for:
                     # the owner's request names the artist (2026-10-08: Sleep Token "Even In Arcadia").
                     media.artist = candidate['requested_artist']
+                if not _preserve_tags:
+                    if album_artist:
+                        media.albumartist = album_artist
+                    if candidate.get('source') == 'youtube':
+                        media.artist = _unrepeated(media.artist)
+                        playlist = [str(f.get('id')) for f in candidate.get('source_files') or []]
+                        if candidate.get('kind') == 'album' and not media.track and source.stem in playlist:
+                            media.track, media.tracktotal = playlist.index(source.stem) + 1, len(playlist)
+                    if media.year and not 1900 <= media.year <= 9999:
+                        year = real_year(work, media.year)
+                        if year:
+                            media.year = year
+                        else:
+                            media.date = None
                 duration = float(stream.get('duration') or probe['format'].get('duration') or 0)
                 analysis_note = None
                 if not _preserve_tags:
@@ -703,9 +807,14 @@ class Ingestor:
         matches = []
         def normalized(value):
             return re.sub(r'[^\w]', '', str(value or '').casefold())
+        # The lead artist and the title without credits: "KAYTRANADA, Syd" / "YOU'RE THE ONE" is
+        # "KAYTRANADA" / "YOU'RE THE ONE (feat. Syd)". A remix or live take keeps its version word.
+        def lead(value):
+            return key(re.sub(r'^the\s+', '', clean_artist(value), flags=re.I))   # "Roots" is "The Roots"
         artist, title = normalized(record.get('artist')), normalized(record.get('title'))
         if not artist or not title:
             return matches
+        artist_lead, title_key = lead(record.get('artist')), track_key(record.get('title'))
         for filename, entry in index.items():
             if not Path(filename).is_file():
                 continue
@@ -716,7 +825,9 @@ class Ingestor:
                 except Exception:
                     continue
             metadata = entry['metadata']
-            if normalized(metadata.get('artist')) == artist and normalized(metadata.get('title')) == title:
+            if ((normalized(metadata.get('artist')) == artist and normalized(metadata.get('title')) == title)
+                    or (artist_lead and title_key and lead(metadata.get('artist')) == artist_lead
+                        and track_key(metadata.get('title')) == title_key)):
                 matches.append(metadata)
                 if len(matches) >= 5:
                     break

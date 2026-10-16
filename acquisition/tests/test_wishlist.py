@@ -411,10 +411,28 @@ def test_an_exact_youtube_title_the_model_finds_plausible_is_the_last_resort(tmp
     store, queued = Store(tmp_path / "a.db"), []
     sources = FakeSources({"youtube": [yt("Parallel Movement", "BDTom - Topic", "OLAK5uy_b"), yt("BLINDAO", "marquitos", "OLAK5uy_a")]})
     w = _wishlist(store, sources, OddsJudge({"BLINDAO": 0.4, "Parallel Movement": 0.17}), queued)
-    w.add("mateo", "ODDLIQUOR", "BLINDAO")
+    item = w.add("mateo", "ODDLIQUOR", "BLINDAO")
+    w.tick()
+    assert ("BLINDAO", "youtube") in sources.calls   # the title alone is searched too
+    # Under a collaborator's channel: it waits for a choice rather than downloading on its own.
+    held = store.get("wishlist", item["id"])
+    assert queued == [] and held["status"] == "choice" and "credited to marquitos" in held["candidates"][0]["reason"]
+    w.choose(held, held["candidates"][0]["id"])
     w.tick()
     assert [c["title"] for c in queued] == ["BLINDAO"]
-    assert ("BLINDAO", "youtube") in sources.calls   # the title alone is searched too
+
+
+def test_a_same_titled_youtube_album_by_another_artist_waits_even_when_the_model_takes_it(tmp_path):
+    store, queued = Store(tmp_path / "a.db"), []
+    sources = FakeSources({"youtube": [yt("Homework", "Mato - Topic", "OLAK5uy_m", artist="Mato"),
+                                       yt("Discovery", "Daft Punk - Topic", "OLAK5uy_p", artist="Daft Punk")]})
+    w = _wishlist(store, sources, OddsJudge({"Homework": 0.82, "Discovery": 0.9}), queued)
+    w.judge.verdicts = lambda *a, **k: {0: {"match": True, "problem": None, "probability": 0.82, "reason": "x"}}
+    item = w.add("mateo", "Daft Punk", "Homework")
+    w.tick()
+    assert queued == [] and store.get("wishlist", item["id"])["status"] == "choice"
+    assert not Wishlist._other_artist(yt("Discovery", "Daft Punk - Topic", "x"), "Daft Punk").get("other_artist")
+    assert not Wishlist._other_artist(yt("Naloxona", "Andrae Durden - Topic", "x"), "Andrea Durden").get("other_artist")
 
 
 def test_same_titled_youtube_albums_the_model_doubts_are_not_taken(tmp_path):

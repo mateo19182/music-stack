@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import hashlib
+import re
 import logging
 import secrets
 import time
@@ -289,7 +290,10 @@ class Wishlist:
         tried = {t["provider"] for t in item["tried"]}
         untried = [c for c in item["candidates"] if (item["kind"] == "link" or matching.provider(c) not in tried)
                    and self._allowed(item, c)]
-        if untried and item.get("hold") and not upgrade and item["kind"] != "link":
+        if upgrade:
+            untried = [c for c in untried if not c.get("other_artist")]
+        # A YouTube album under another artist's name ("Homework" by Mato for Daft Punk) waits for a choice.
+        if untried and (item.get("hold") or untried[0].get("other_artist")) and not upgrade and item["kind"] != "link":
             chosen = [c for c in untried if c.get("id") == item.get("pick")]
             if not chosen:
                 self._hold(item, untried)
@@ -453,7 +457,21 @@ class Wishlist:
                 if c.get("source") == "youtube" and wanted and f" {wanted} " in title and p >= YOUTUBE_TITLE_FLOOR:
                     best.append({**c, "judged": "model", "reason": verdicts[n]["reason"] + "; exact title on YouTube Music"})
                     break
-        return best[:8]
+        return [self._other_artist(c, artist) for c in best[:8]]
+
+    @staticmethod
+    def _other_artist(c, artist):
+        """A YouTube album credited to someone else than the requested artist (typos allowed) is marked:
+        same-titled records by others pass the model too often (2026-10-16: Viper's "The Money Store")."""
+        if c.get("source") != "youtube":
+            return c
+        wanted = matching.key(matching.clean_artist(artist))
+        credited = {matching.key(matching.clean_artist(re.sub(r"\s*-\s*Topic$", "", str(c.get(f) or ""))))
+                    for f in ("artist", "uploader")} - {""}
+        if not wanted or matching.artist_matches(wanted, credited):
+            return c
+        name = c.get("artist") or re.sub(r"\s*-\s*Topic$", "", str(c.get("uploader") or ""))
+        return {**c, "other_artist": True, "reason": f"{c.get('reason', '')}; credited to {name}, not {artist}".lstrip("; ")}
 
     @staticmethod
     def _eligible(c, avoid):
