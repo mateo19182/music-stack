@@ -3,7 +3,7 @@
 The active code is `acquisition/`.
 
 For music requests, use the tools in [acquisition/AGENTS.md](acquisition/AGENTS.md).
-Agents are the main way in, through nine MCP tools: a request stops at the copies
+Agents are the main way in, through ten MCP tools: a request stops at the copies
 it found and the agent chooses one, asking the user only when editions or versions
 differ; the agent also answers Soulseek human checks. Downloads and LLM advice stop at review. Publication needs the user's explicit
 say-so: in the web app, through `decide_review` with an agent token that has

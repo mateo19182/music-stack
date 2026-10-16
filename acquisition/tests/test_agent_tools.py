@@ -49,6 +49,8 @@ def initialize(instance):
     ("decide_review", {"id": "job", "action": "reject"}, "POST", "/api/jobs/job/reject", {}),
     ("answer_check", {"username": "peer", "message": "watermelon"}, "POST", "/api/soulseek/checks/peer/reply", {"message": "watermelon"}),
     ("library", {"q": "Sauna", "genre": "Funk", "key": "Cm", "bpm_min": 90, "bpm_max": 110, "page": 2, "sort": "album"}, "GET", "/api/library", {"q": "Sauna", "genre": "Funk", "key": "Cm", "bpm_min": "90", "bpm_max": "110", "page": "2", "sort": "album"}),
+    ("library_action", {"action": "unshare", "file_ids": ["f1", "f2"]}, "POST", "/api/library/unshare", {"file_ids": ["f1", "f2"]}),
+    ("library_action", {"action": "delete", "file_ids": ["f1"]}, "POST", "/api/library/delete", {"file_ids": ["f1"]}),
     ("request_approval_token", {"name": "reviewer", "can_approve": True}, "POST", "/api/agents/requests", {"name": "reviewer", "can_approve": True}),
     ("claim_approval_token", {"id": "abc"}, "GET", "/api/agents/requests/abc", {}),
 ])
@@ -75,6 +77,7 @@ def test_tools_use_exact_api_contract(bridge, name, args, method, path, payload)
     ("decide_review", {"id": "j"}), ("decide_review", {"id": "j", "action": "approve"}), ("decide_review", {"id": "j", "action": "add", "keep_existing": "yes"}),
     ("decide_review", {"id": "j", "action": "skip", "file_ids": []}), ("decide_review", {"id": "j", "action": "add", "files": []}),
     ("answer_check", {"username": "peer", "message": ""}), ("answer_check", {"username": "peer", "message": "x" * 201}),
+    ("library_action", {"action": "erase", "file_ids": ["f1"]}), ("library_action", {"action": "remove"}), ("library_action", {"action": "remove", "file_ids": []}),
     ("library", {"page": True}), ("library", {"bpm_min": float("inf")}), ("library", {"page": 0}),
     ("health", {}), ("import_files", {"paths": ["x"]}), ("search_music", {"query": "x"}), ("get_job", {"id": "x"}), ("approve_review", {"id": "job"}),
 ])
@@ -134,7 +137,7 @@ def test_handshake_registry_notifications_and_invalid_requests(bridge):
     initialize(instance)
     assert instance.handle({"jsonrpc": "2.0", "id": 2, "method": "ping"})["result"] == {}
     registry = instance.handle({"jsonrpc": "2.0", "id": 3, "method": "tools/list"})["result"]["tools"]
-    assert len(registry) == 9
+    assert len(registry) == 10
     assert [item["name"] for item in registry if "review" in item["name"]] == ["decide_review"]
     assert not any(any(word in item["name"] for word in ["publish", "delete", "sharing", "approve"]) for item in registry)
     for item in registry:

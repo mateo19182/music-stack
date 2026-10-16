@@ -1007,6 +1007,37 @@ def test_an_agent_answers_human_checks_and_an_approver_agent_skips_tracks(backen
     assert main.store.get("jobs", "job")["stage"] == "rejected"
 
 
+def test_an_approver_agent_unshares_removes_and_deletes_library_files(backend, monkeypatch):
+    main, client = backend
+    approver = {"Authorization": "Bearer " + main.mint_agent("mateo", "hermes", True, "owner")["token"]}
+    watcher = {"Authorization": "Bearer " + main.mint_agent("mateo", "watcher", False, "owner")["token"]}
+    album = main.LIBRARY / "Artist" / "Album"
+    album.mkdir(parents=True)
+    for name in ["one", "two"]:
+        (album / f"{name}.flac").write_bytes(name.encode())
+        (album / f"{name}.flac.provenance.json").write_text("{}")
+        main.store.put("files", name, {"title": name}, path=str(album / f"{name}.flac"), published=1)
+    seed_review(main)
+    main.sharing.reconcile()
+    shared = main.sharing.root / "Artist" / "Album" / "one.flac"
+    assert shared.exists()
+    assert client.post("/api/library/remove", json={"file_ids": ["one"]}, headers=watcher).status_code == 403
+    assert client.post("/api/library/erase", json={"file_ids": ["one"]}, headers=approver).status_code == 404
+    assert client.post("/api/library/remove", json={"file_ids": ["file"]}, headers=approver).status_code == 400   # still in review
+    assert client.post("/api/library/remove", json={"file_ids": ["one", "missing"]}, headers=approver).status_code == 400
+    assert client.post("/api/library/unshare", json={"file_ids": ["one", "two"]}, headers=approver).status_code == 200
+    assert not shared.exists() and (album / "one.flac").exists()
+    assert client.post("/api/library/share", json={"file_ids": ["one"]}, headers=approver).status_code == 200
+    assert shared.exists()
+    assert client.post("/api/library/remove", json={"file_ids": ["one"]}, headers=approver).json()["trash"] is True
+    assert not (album / "one.flac").exists() and not shared.exists() and main.store.get("files", "one") is None
+    assert [p.read_bytes() for p in (main.STATE / "trash").rglob("one.flac")] == [b"one"]
+    assert client.post("/api/library/delete", json={"file_ids": ["two"]}, headers=approver).json()["trash"] is False
+    assert not album.exists() and main.store.get("files", "two") is None
+    assert not list((main.STATE / "trash").rglob("two.flac*"))
+    assert main.store.get("files", "file")["published"] == 0
+
+
 def test_requests_import_list_retry_skip_and_ownership(backend, monkeypatch):
     main, client = backend
     signin(main, client, monkeypatch)
@@ -1069,6 +1100,42 @@ def test_an_expired_youtube_premium_login_alerts_once(backend, monkeypatch):
     assert len(sent) == 1   # checked at most every few hours
     tick()
     assert "works again" in sent[-1]
+
+
+def test_expired_login_alert_is_limited_for_24_hours_across_recovery_and_restart(backend, monkeypatch):
+    main, _ = backend
+    sent = []
+    working = [False]
+    monkeypatch.setattr(main.Sources, "youtube_premium", lambda self: working[0])
+    monkeypatch.setattr(main, "_premium", {"checked": -main.PREMIUM_CHECK_SECONDS, "alerted": False})
+
+    def tick(now):
+        main.youtube_premium_alert(lambda text: sent.append(text) or True, clock=lambda: now)
+
+    tick(0)
+    working[0] = True
+    tick(6 * 3600)
+    working[0] = False
+    tick(12 * 3600)
+    assert sum("expired" in text for text in sent) == 1
+    # A process restart must retain the daily limit.
+    main._premium.update(checked=0, alerted=False)
+    tick(18 * 3600)
+    assert sum("expired" in text for text in sent) == 1
+    tick(24 * 3600)
+    assert sum("expired" in text for text in sent) == 2
+
+
+def test_failed_expired_login_alert_can_retry(backend, monkeypatch):
+    main, _ = backend
+    monkeypatch.setattr(main.Sources, "youtube_premium", lambda self: False)
+    monkeypatch.setattr(main, "_premium", {"checked": -main.PREMIUM_CHECK_SECONDS, "alerted": False})
+    main.youtube_premium_alert(lambda text: False, clock=lambda: 0)
+    assert not (main.STATE / "youtube-premium-alert.json").exists()
+    sent = []
+    main.youtube_premium_alert(lambda text: sent.append(text) or True,
+                               clock=lambda: main.PREMIUM_CHECK_SECONDS)
+    assert len(sent) == 1
 
 
 def test_a_published_download_leaves_one_copy_and_undo_moves_it_back(backend, monkeypatch):

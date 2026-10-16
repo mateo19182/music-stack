@@ -256,23 +256,30 @@ def needs_you_alerts(send=None, clock=time.time):
 
 
 PREMIUM_CHECK_SECONDS = 6 * 3600
+PREMIUM_ALERT_SECONDS = 24 * 3600
 _premium = {"checked": 0.0, "alerted": False, "working": None}
 
 
 def youtube_premium_alert(send=None, clock=time.time):
-    """Telegram once when the YouTube Premium login stops working (downloads fall back to
-    ~130 kbps), and once more when it works again."""
-    if clock() - _premium["checked"] < PREMIUM_CHECK_SECONDS:
+    """Telegram at most once per 24 hours for an expired login, even across restarts."""
+    now = clock()
+    if now - _premium["checked"] < PREMIUM_CHECK_SECONDS:
         return
-    _premium["checked"] = clock()
+    _premium["checked"] = now
     working = Sources(config).youtube_premium()
     if working is not None:
         _premium["working"] = working
     send = send or (lambda text: telegram(config, text))
-    if working is False and not _premium["alerted"]:
-        _premium["alerted"] = bool(send("⚠️ The YouTube Premium login expired: albums are no longer taken from YouTube.\n"
+    path = STATE / "youtube-premium-alert.json"
+    last_alert = json.loads(path.read_text())["sent_at"] if path.exists() else None
+    if working is False and (last_alert is None or now - last_alert >= PREMIUM_ALERT_SECONDS):
+        if send("⚠️ The YouTube Premium login expired: albums are no longer taken from YouTube.\n"
                                         "Export new cookies (private window, music.youtube.com) and send them to update "
-                                        "youtube-cookies.txt."))
+                                        "youtube-cookies.txt."):
+            temporary = path.with_suffix(".tmp")
+            temporary.write_text(json.dumps({"sent_at": now}))
+            temporary.replace(path)
+            _premium["alerted"] = True
     elif working and _premium["alerted"]:
         send("✅ The YouTube Premium login works again: YouTube downloads are 256 kbps.")
         _premium["alerted"] = False
@@ -2329,6 +2336,52 @@ def configure_file_sharing(id: str, body: FileSharing, user=Depends(check_user))
         return {"shared": sharing.selected(path), **status}
     except (OSError, ValueError):
         raise HTTPException(503, "Sharing change saved but could not be applied; the app will retry") from None
+
+
+@app.post("/api/library/{action}")
+def library_action(action: str, body: FileChoice, user=Depends(check_user)):
+    """Share, unshare, remove (to trash) or delete (erase) published library files.
+
+    Humans need admin rights; agents a token with approval rights. Undo cannot bring
+    removed files back; restoring from trash is by hand, and delete is final.
+    """
+    if action not in {"share", "unshare", "remove", "delete"}:
+        raise HTTPException(404, "Unknown library action")
+    require_approver(user)
+    if not user["isAdmin"]:
+        raise HTTPException(403, "Administrator access required")
+    records = [store.get("files", id) for id in dict.fromkeys(body.file_ids or [])]
+    if not records or any(not r or not r["published"] for r in records):
+        raise HTTPException(400, "Choose files from the library")
+    paths = []
+    for record in records:
+        path = Path(record["path"]).resolve()
+        if not path.is_relative_to(LIBRARY) or not path.is_file() or Path(record["path"]).is_symlink():
+            raise HTTPException(404, "Library file not found")
+        paths.append(path)
+    try:
+        if action in {"share", "unshare"}:
+            for path in paths:
+                sharing.configure(path=path, shared=action == "share")
+            return {"ok": True, "files": len(paths), **sharing.status()}
+    except (OSError, ValueError):
+        raise HTTPException(503, "Sharing change saved but could not be applied; the app will retry") from None
+    ingestor = Ingestor(config)
+    trash = STATE / "trash" / f"{action}-{uid()}"
+    with library_lock:
+        for record, path in zip(records, paths):
+            entry = ingestor.retire(path, trash)
+            with store.db() as db:
+                db.execute("DELETE FROM files WHERE id=?", (record["id"],))
+            if action == "delete":
+                gone = Path(entry["trash"])
+                gone.unlink(missing_ok=True)
+                gone.with_name(gone.name + ".provenance.json").unlink(missing_ok=True)
+    if action == "delete":
+        shutil.rmtree(trash, ignore_errors=True)
+    sharing.reconcile()
+    log.info("%s %d library file(s) for %s", action, len(paths), user.get("name") or user["username"])
+    return {"ok": True, "files": len(paths), "trash": action == "remove", "detail": request_scan("Removed" if action == "remove" else "Deleted")}
 
 
 @app.get("/api/files/{id}/download")
