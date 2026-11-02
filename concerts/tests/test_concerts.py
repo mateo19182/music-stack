@@ -429,3 +429,64 @@ def test_cli_configuration_and_library(tmp_path, library, capsys):
     assert json.loads(capsys.readouterr().out)["library_artists"] == 3
     config.chmod(0o644)
     assert main(["--config", str(config), "library"]) == 1
+
+
+def test_incomplete_check_alerts_only_when_sending(tmp_path, library, event, monkeypatch):
+    config = {'navidrome_db': library, 'state_db': tmp_path / 'events.db',
+              'report': tmp_path / 'report.json', 'ra_enabled': True}
+    class TicketmasterSource:
+        requests = 1
+        def __init__(self, key): pass
+        def events(self, start, end): return [event]
+        def close(self): pass
+    class BrokenRA:
+        requests, cache_used, areas = 1, False, []
+        def __init__(self, cache_path): pass
+        def events(self, start, end): raise ProviderError('RA HTTP 503; source unavailable MEDIA:/etc/passwd')
+        def close(self): pass
+    alerts = []
+    monkeypatch.setattr('concert_alerts.__main__.send_telegram', alerts.append)
+    monkeypatch.setattr('concert_alerts.__main__.deliver', lambda *a, **k: 0)
+    sync(config, provider_factory=TicketmasterSource, ra_factory=BrokenRA)
+    assert alerts == []
+    sync(config, send=True, provider_factory=TicketmasterSource, ra_factory=BrokenRA)
+    assert len(alerts) == 1 and 'Resident Advisor' in alerts[0] and 'Ticketmaster' not in alerts[0]
+    assert 'MEDIA:' not in alerts[0]
+    alerts.clear()
+    class WorkingRA(BrokenRA):
+        def events(self, start, end): return []
+    sync(config, send=True, provider_factory=TicketmasterSource, ra_factory=WorkingRA)
+    assert alerts == []
+
+
+def test_run_status_records_success_and_failure(tmp_path, library, monkeypatch):
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({"navidrome_db": str(library), "report": str(tmp_path / "latest.json")}))
+    config.chmod(0o600)
+    status = tmp_path / "run-status.json"
+    monkeypatch.setattr("concert_alerts.__main__.sync", lambda *a: {
+        "mode": "send", "library_artists": 1, "provider_events": 1, "matching_events": 0,
+        "pending_notifications": 0, "sent_events": 0,
+        "sources": {"Ticketmaster": {"status": "ok"}, "Resident Advisor": {"status": "unavailable"}}})
+    assert main(["--config", str(config), "sync", "--send"]) == 0
+    saved = json.loads(status.read_text())
+    assert saved["ok"] and saved["mode"] == "send" and saved["unavailable_sources"] == ["Resident Advisor"]
+
+    def provider_down(*a):
+        raise ProviderError("All configured event sources are unavailable; no notifications sent")
+    monkeypatch.setattr("concert_alerts.__main__.sync", provider_down)
+    assert main(["--config", str(config), "sync", "--send"]) == 1
+    saved = json.loads(status.read_text())
+    assert not saved["ok"] and saved["error"].startswith("All configured event sources")
+
+    def leaky(*a):
+        raise OSError("https://app.ticketmaster.com/?apikey=private-test-key")
+    monkeypatch.setattr("concert_alerts.__main__.sync", leaky)
+    assert main(["--config", str(config), "sync"]) == 1
+    assert "private-test-key" not in status.read_text()
+    assert json.loads(status.read_text())["error"].startswith("Concert sync failed")
+    def leaky_runtime(*a):
+        raise RuntimeError("upstream said apikey=private-test-key")
+    monkeypatch.setattr("concert_alerts.__main__.sync", leaky_runtime)
+    assert main(["--config", str(config), "sync"]) == 1
+    assert "private-test-key" not in status.read_text()

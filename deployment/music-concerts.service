@@ -2,6 +2,8 @@
 Description=Concert alerts for music-stack library artists
 After=network-online.target
 Wants=network-online.target
+# Crashes, timeouts and failed runs alert through Telegram instead of only the journal.
+OnFailure=music-concerts-failure.service
 
 [Service]
 Type=oneshot

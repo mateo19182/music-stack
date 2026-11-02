@@ -19,6 +19,10 @@ MAX_REPORT_BYTES = 20 * 1024 * 1024
 DEFAULT_SETTINGS = {"lookahead_days": 365, "max_nationwide_dates": 3}
 
 
+def current_time():
+    return datetime.now(timezone.utc)
+
+
 def name_key(value):
     # Same identity as concert_alerts.library.name_key.
     return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", str(value)).casefold()).strip()
@@ -66,12 +70,37 @@ def load_report(path):
     return report, None
 
 
-def checked_time(report):
+def parse_time(value):
     try:
-        checked = datetime.fromisoformat(str(report.get("checked_at", "")))
+        moment = datetime.fromisoformat(str(value or ""))
     except ValueError:
         return None
-    return checked if checked.tzinfo else checked.replace(tzinfo=timezone.utc)
+    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+
+def checked_time(report):
+    return parse_time(report.get("checked_at"))
+
+
+def load_run(path):
+    """The worker's last run outcome (run-status.json), or None when absent or unreadable."""
+    try:
+        run = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+    finished = parse_time(run.get("finished_at")) if isinstance(run, dict) else None
+    if not finished:
+        return None
+    return {"ok": run.get("ok") is True, "finished_at": finished.isoformat(),
+            "mode": text(run.get("mode"), 20), "error": text(run.get("error"), 300)}
+
+
+def run_notice(run, checked):
+    if not run or run["ok"] or (checked and parse_time(run["finished_at"]) < checked):
+        return ""
+    when = parse_time(run["finished_at"]).astimezone(ZONE).strftime("%a %d %b %H:%M")
+    shown = " Showing the previous report." if checked else ""
+    return f"The last concert check failed ({when}): {run['error'] or 'unknown error'}.{shown}"
 
 
 def clean_event(raw):
@@ -96,7 +125,8 @@ def clean_event(raw):
 
 
 def source_name(source_id):
-    return "Resident Advisor" if str(source_id).startswith("ra:") else "Ticketmaster"
+    prefix = str(source_id).split(":", 1)[0] if ":" in str(source_id) else ""
+    return {"ra": "Resident Advisor", "dice": "DICE"}.get(prefix, "Ticketmaster")
 
 
 def restricted_ids(events, max_dates):
@@ -127,6 +157,7 @@ def sources_view(report):
         view.append({"name": text(name, 80), "status": "ok" if info.get("status") == "ok" else "unavailable",
                      "events": info.get("events") if isinstance(info.get("events"), int) else None,
                      "cached": bool(info.get("cached")),
+                     "pending": info.get("pending") if isinstance(info.get("pending"), int) else 0,
                      "error": "" if re.search(r"https?:|apikey|token|key=", error, re.I) else error})
     return view
 
@@ -137,8 +168,8 @@ def group_order(group):
     return not group["dates"], first["date_unknown"], first["date"], first["time"], group["artists"].casefold()
 
 
-def build_view(report, *, now=None, area="all", q="", days=0):
-    now = now or datetime.now(timezone.utc)
+def build_view(report, *, now=None, area="all", q="", days=0, run=None):
+    now = now or current_time()
     settings = {**DEFAULT_SETTINGS}
     for key in settings:
         value = (report.get("settings") or {}).get(key) if isinstance(report.get("settings"), dict) else None
@@ -187,14 +218,19 @@ def build_view(report, *, now=None, area="all", q="", days=0):
 
     checked = checked_time(report)
     stale = checked is None or now - checked > STALE_AFTER
+    sources = sources_view(report)
+    down = [s["name"] for s in sources if s["status"] != "ok"]
+    notices = [run_notice(run, checked),
+               "The last concert check is more than a day old; these listings may be out of date." if stale else "",
+               f"{' and '.join(down)} {'was' if len(down) == 1 else 'were'} unavailable at the last check; "
+               "listings from it may be missing." if down else ""]
     return {
         "status": "stale" if stale else "ok",
-        "message": "The last concert check is more than a day old; the daily check may have failed. "
-                   "These listings may be out of date." if stale else "",
+        "notices": [n for n in notices if n], "last_run": run,
         "checked_at": checked.isoformat() if checked else None,
         "next_check": next_check(now).isoformat(),
         "schedule": f"Daily at {CHECK_HOUR}:00 Europe/Madrid",
-        "sources": sources_view(report), "settings": settings,
+        "sources": sources, "settings": settings,
         "coverage": text(report.get("coverage"), 400),
         "counts": {"matching": len(events), "listings": sum(len(g["dates"]) + len(g["hidden"]) for g in view),
                    "shown": shown, "hidden": sum(len(g["hidden"]) for g in view), "groups": len(view)},
@@ -202,9 +238,10 @@ def build_view(report, *, now=None, area="all", q="", days=0):
     }
 
 
-def empty_view(status, message, now=None):
-    now = now or datetime.now(timezone.utc)
-    return {"status": status, "message": message, "checked_at": None,
+def empty_view(status, message, now=None, run=None):
+    now = now or current_time()
+    notices = [n for n in (run_notice(run, None), message) if n]
+    return {"status": status, "notices": notices, "last_run": run, "checked_at": None,
             "next_check": next_check(now).isoformat(), "schedule": f"Daily at {CHECK_HOUR}:00 Europe/Madrid",
             "sources": [], "settings": dict(DEFAULT_SETTINGS), "coverage": "",
             "counts": {"matching": 0, "listings": 0, "shown": 0, "hidden": 0, "groups": 0}, "groups": []}

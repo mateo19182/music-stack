@@ -1665,3 +1665,9 @@ fieldset.segmented {
     justify-content: start;
   }
 }
+.concert-notice p {
+  margin: 0;
+}
+.concert-notice p + p {
+  margin-top: 6px;
+}

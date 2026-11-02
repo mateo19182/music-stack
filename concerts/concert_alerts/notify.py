@@ -115,6 +115,15 @@ def batches(entries, limit=3800, lookahead_days=365, catalogue=None, max_nationw
         yield page_entries, text + (footer if index == len(pages) else "")
 
 
+def source_alert(sources):
+    down = [(name, info.get("error", "")) for name, info in sorted(sources.items()) if info.get("status") != "ok"]
+    if not down:
+        return None
+    lines = [f"• {telegram_html(name, 80)}: {telegram_html(error or 'unavailable', 200)}" for name, error in down]
+    return ("<b>Concerts: check incomplete</b>\n" + "\n".join(lines)
+            + "\nListings from these sources may be missing until the next successful check.")
+
+
 def send_telegram(text, executable="hermes"):
     command = shutil.which(executable)
     if not command:

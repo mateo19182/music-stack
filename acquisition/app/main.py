@@ -2568,10 +2568,11 @@ def concert_listings(user=Depends(check_user), area: Literal["all", "preferred"]
                      q: str = Query("", max_length=100), days: int = Query(0, ge=0, le=730)):
     """The concert worker's latest report, filtered; read-only, no provider calls."""
     require_manual(user)
+    run = concerts.load_run(CONCERTS_REPORT.with_name("run-status.json"))
     report, problem = concerts.load_report(CONCERTS_REPORT)
     if problem:
-        return concerts.empty_view(*problem)
-    return concerts.build_view(report, area=area, q=q, days=days)
+        return concerts.empty_view(*problem, run=run)
+    return concerts.build_view(report, area=area, q=q, days=days, run=run)
 
 
 app.mount(

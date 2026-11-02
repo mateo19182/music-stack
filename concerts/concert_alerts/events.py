@@ -164,6 +164,48 @@ def select_ra_events(raw_events, index, start=None, end=None):
     return selected, unresolved, unknown_locations
 
 
+def select_dice_events(raw_events, index, start=None, end=None):
+    selected, unresolved, unknown_locations = [], [], []
+    provinces = {"15": "C", "27": "LU", "32": "OU", "36": "PO", "28": "M", "08": "B"}
+    for raw in raw_events:
+        id = "dice:" + raw["url"].rstrip("/").rsplit("/", 1)[-1].split("-", 1)[0]
+        try:
+            actual_start = datetime.fromisoformat(raw["start"])
+            if actual_start.tzinfo is None:
+                actual_start = actual_start.replace(tzinfo=ZoneInfo("Europe/Madrid"))
+        except (ValueError, TypeError):
+            unknown_locations.append(id)
+            continue
+        if start is not None and (actual_start < start or (end is not None and actual_start > end)):
+            continue
+        if raw.get("country") != "ES":
+            if not raw.get("country"):
+                unknown_locations.append(id)
+            continue
+        artists = {}
+        for artist in raw.get("artists") or []:
+            match, issue = index.match({"id": "dice:" + (artist.get("id") or artist["name"]), "name": artist["name"]})
+            if match:
+                artists[match.id] = match.name
+            elif issue:
+                unresolved.append(issue)
+        if not artists:
+            continue
+        postal = re.search(r"\b(\d{5})\b", raw.get("postal") or raw.get("address") or "")
+        province = provinces.get(postal.group(1)[:2], "") if postal else ""
+        city = raw.get("locality") or ""
+        # startDate is the venue's wall-clock time with its offset.
+        selected.append({
+            "id": id, "name": raw["name"], "date": raw["start"][:10], "time": raw["start"][11:19], "date_unknown": False, "time_unknown": not raw["start"][11:19],
+            "timezone": "Europe/Madrid", "status": raw.get("status") or "listed",
+            "venue": raw.get("venue") or "", "venue_id": "", "city": city, "country": "ES",
+            "highlight": highlights({"city": {"name": city}, "state": {"stateCode": province}}),
+            "artists": dict(sorted(artists.items())), "url": safe_url(raw["url"]),
+            "source": "DICE", "lineup_complete": False,
+        })
+    return selected, unresolved, unknown_locations
+
+
 def telegram_text(text, units=800):
     # Hermes interprets MEDIA: as a local attachment, even inside message text.
     text = re.sub(r"MEDIA:", "MEDIA∶", text, flags=re.IGNORECASE)

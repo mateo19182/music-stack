@@ -6,5 +6,8 @@
   "lookahead_days": 365,
   "max_nationwide_dates": 3,
   "ra_enabled": false,
-  "artist_overrides": {}
+  "artist_overrides": {},
+  "dice_enabled": false,
+  "dice_notify": false,
+  "dice_page_budget": 150
 }

@@ -1,0 +1,9 @@
+[Unit]
+Description=Telegram alert when the concert check fails
+
+[Service]
+Type=oneshot
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/.local/bin/hermes send -q --to telegram "music-stack: concerts check failed. Details: journalctl --user -u music-concerts -n 50, or the last error in Acquire's Concerts tab."
+UMask=0077
+NoNewPrivileges=true

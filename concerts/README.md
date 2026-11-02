@@ -8,6 +8,8 @@ installed automatically.
 Ticketmaster is enabled by default. Set `ra_enabled` to `true` in the private
 configuration to add Resident Advisor. It uses the same library matching,
 location rules and Telegram delivery; no RA account, key or browser is needed.
+Set `dice_enabled` to add DICE (see below); its dates reach Telegram only once
+`dice_notify` is also `true`.
 
 Artists with more than three known upcoming dates are restricted to preferred
 areas in Telegram: Galicia, Madrid and Barcelona. Artists with three or fewer
@@ -82,6 +84,20 @@ For offline development, `sync --events-file /path/to/events.json` accepts a JSO
 array of Ticketmaster event objects. This mode cannot be combined with `--send`.
 Use a separate configuration/state database for synthetic events.
 
+## Failures
+
+Failures are reported, not only logged:
+
+- A failed run (all sources down, delivery failure, crash or timeout) triggers
+  `music-concerts-failure.service` through `OnFailure=`, which sends a short
+  Telegram alert pointing at the journal.
+- A run where one source is unavailable still sends the digest, followed by a
+  "check incomplete" alert naming the source and its error.
+- Every sync writes `run-status.json` beside the report (time, mode, fixed error
+  text, unavailable sources). Acquire's Concerts tab shows a failed last run,
+  unavailable sources and stale reports, which also covers Telegram itself
+  being down.
+
 ## Web view
 
 Acquire's Concerts tab (any signed-in web user; not agent tokens) shows
@@ -96,12 +112,46 @@ fall back to 365 days and 3 dates.
 
 ## Scheduling
 
-`deployment/music-concerts.service` and `.timer` are user-systemd templates for
+`deployment/music-concerts.service`, `.timer` and `music-concerts-failure.service`
+(install all three) are user-systemd templates for
 this checkout location. The timer runs daily at 18:00 Europe/Madrid without a
 random delay; daylight-saving changes follow Madrid local time. The
 service runs a dry-run. Install them only when ready to schedule the worker.
 Review the real report before adding `--send` to `ExecStart`. Hermes must be
 available in the user service's PATH, with its Telegram destination configured.
+
+## DICE
+
+Used with DICE's permission (confirmed by DICE support, 2026-11-02). DICE's
+official API only covers a promoter's own events, so the reader uses the
+sitemaps published in `robots.txt` to discover events, then each event page's
+schema.org `MusicEvent` data for performers, venue, postcode, start time and
+status. It identifies itself in the User-Agent and waits two seconds between
+requests.
+
+Each run reads the sitemap index and its shards (about 8 requests), keeps event
+URLs naming a Spanish place, and fetches only new pages or pages whose `lastmod`
+changed, at most `dice_page_budget` (default 150) per run to stay inside the
+service timeout. Pages left over are fetched on later runs and appear as
+"pages still to read" for the source; nothing is silently dropped. Results are
+cached in `dice-cache.json` beside the state database, saved even when a run
+fails. Fill the cache once, outside the timer, with:
+
+```sh
+.venv/bin/python -m concert_alerts dice-cache --pages 1500
+```
+
+Performer names are matched exactly like RA's linked artists; overrides use
+`dice:<artist-slug>` from the DICE artist URL. IDs are `dice:<short-id>`.
+Countries are confirmed from the page, and postcodes identify preferred
+provinces. DICE marks many ordinary events `EventRescheduled`, so a
+rescheduling counts only when a previous start date is given; cancellations
+and postponements are used as given. Coverage limit: events whose URL names no
+known Spanish place are not read.
+
+`dice_notify` (default `false`) keeps DICE dates in the report and the Concerts
+tab but out of Telegram, so matches can be reviewed first. Held dates are not
+marked delivered; enabling it sends them in the next digest.
 
 ## Matching and coverage
 
@@ -181,8 +231,8 @@ Additional sources evaluated on 2026-11-02; none is connected yet:
 - [Official festival lineups](https://www.resurrectionfest.es/en/tag/line-up/)
   can fill gaps in ticket-provider artist lists. Keep festival dates distinct
   from unconfirmed individual performance days.
-- DICE and Entradium event-page fetches returned 403 in this check. Keep them as
-  candidates rather than assuming an available public API or reliable scraper.
+- Entradium event-page fetches returned 403 in this check. Keep it as a
+  candidate rather than assuming an available public API or reliable scraper.
 
 Prefer RSS, JSON-LD or public page data, with caching and low request rates. Each
 adapter should produce the same event/artist/venue records and retain its source

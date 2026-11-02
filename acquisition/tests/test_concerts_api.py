@@ -25,6 +25,7 @@ def backend(tmp_path, monkeypatch):
 
     main = importlib.reload(main)
     main.login_attempts.clear()
+    monkeypatch.setattr(concerts, "current_time", lambda: NOW)
     return main, TestClient(main.app), report
 
 
@@ -112,8 +113,30 @@ def test_missing_invalid_and_stale_reports(backend, monkeypatch):
     path.write_text(json.dumps({"events": "nope"}))
     assert client.get("/api/concerts").json()["status"] == "invalid"
     view = concerts.build_view(report(catalogue(), checked=NOW - timedelta(hours=30)), now=NOW)
-    assert view["status"] == "stale" and view["message"] and view["groups"]
+    assert view["status"] == "stale" and "more than a day old" in view["notices"][0] and view["groups"]
     assert concerts.build_view(report(catalogue()), now=NOW)["status"] == "ok"
+
+
+def test_failures_are_visible(backend, monkeypatch):
+    main, client, path = backend
+    signin(main, client, monkeypatch)
+    path.parent.mkdir()
+    status = path.with_name("run-status.json")
+    status.write_text(json.dumps({"finished_at": NOW.isoformat(), "ok": False, "mode": "send",
+                                  "error": "All configured event sources are unavailable; no notifications sent"}))
+    # No report yet: the failure explains why.
+    data = client.get("/api/concerts").json()
+    assert data["status"] == "missing" and "failed" in data["notices"][0] and data["last_run"]["ok"] is False
+    path.write_text(json.dumps(report(catalogue(), checked=NOW - timedelta(hours=2))))
+    notices = client.get("/api/concerts").json()["notices"]
+    assert "All configured event sources" in notices[0] and "previous report" in notices[0]
+    # One unavailable source is a warning even when the run succeeded.
+    assert any("Resident Advisor was unavailable" in n for n in notices)
+    # A later successful report supersedes an older failure.
+    path.write_text(json.dumps(report(catalogue(), checked=NOW + timedelta(minutes=5))))
+    assert not any("failed" in n for n in client.get("/api/concerts").json()["notices"])
+    status.write_text("{broken")
+    assert client.get("/api/concerts").json()["last_run"] is None
 
 
 def test_long_tour_restriction_and_shared_bills():
@@ -129,7 +152,7 @@ def test_long_tour_restriction_and_shared_bills():
     assert view["counts"] == {"matching": 9, "listings": 8, "shown": 3, "hidden": 5, "groups": 3}
     assert [s["name"] for s in view["sources"]] == ["Resident Advisor", "Ticketmaster"]
     assert view["sources"][0] == {"name": "Resident Advisor", "status": "unavailable", "events": None,
-                                  "cached": False, "error": "RA HTTP 503; source unavailable"}
+                                  "cached": False, "pending": 0, "error": "RA HTTP 503; source unavailable"}
 
 
 def test_filters_area_text_and_window():
@@ -158,6 +181,7 @@ def test_unsafe_links_and_malformed_events_are_dropped():
     assert set(dates) == {"a", "b", "c"}
     assert dates["a"]["url"] == "" and dates["b"]["url"] == ""
     assert dates["a"]["alternates"] == [{"source": "Resident Advisor", "url": "https://ra.co/events/9"}]
+    assert concerts.source_name("dice:xe8o2l") == "DICE" and concerts.source_name("123") == "Ticketmaster"
     assert dates["c"]["date_unknown"] and view["groups"][-1]["dates"][0]["id"] == "c"
 
 

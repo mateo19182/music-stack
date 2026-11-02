@@ -2006,14 +2006,14 @@ async function loadConcerts() {
   const data = await api(`/api/concerts?${query}`);
   if (generation !== state.concertsGeneration) return;
   const sources = data.sources.map((s) =>
-    s.status === "ok" ? `${s.name}: ok${s.cached ? " (cached)" : ""}` : `${s.name}: unavailable${s.error ? ` (${s.error})` : ""}`);
+    s.status === "ok" ? `${s.name}: ok${s.cached ? " (cached)" : ""}${s.pending ? ` (${s.pending} pages still to read)` : ""}` : `${s.name}: unavailable${s.error ? ` (${s.error})` : ""}`);
   $("#concerts-check").textContent = [
     data.checked_at ? `Last checked ${madridTime(data.checked_at)}` : "Not checked yet",
     `next check ${madridTime(data.next_check)} (${data.schedule})`,
     ...sources,
   ].join(" · ");
-  $("#concerts-notice").hidden = !data.message;
-  $("#concerts-notice").textContent = data.message || "";
+  $("#concerts-notice").hidden = !data.notices.length;
+  $("#concerts-notice").innerHTML = data.notices.map((n) => `<p>${esc(n)}</p>`).join("");
   const c = data.counts;
   const limit = data.settings.max_nationwide_dates;
   $("#concerts-summary").textContent = data.status === "ok" || data.status === "stale"
