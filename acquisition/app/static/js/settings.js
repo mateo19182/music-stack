@@ -133,7 +133,7 @@ document.addEventListener("click", (e) => {
 });
 views.settings = {
   load: async () => {
-    await Promise.all([loadAutoAdd(), state.isAdmin && loadSharing().catch(showSharingError), state.isAdmin && loadAnalysis()]);
+    await Promise.all([loadAutoAdd(), state.isAdmin && loadUsers(), state.isAdmin && loadSharing().catch(showSharingError), state.isAdmin && loadAnalysis()]);
   },
   poll: async () => {
     if (state.isAdmin && !$("#sharing-enabled").disabled) await loadSharing().catch(showSharingError);

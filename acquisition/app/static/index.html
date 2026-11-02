@@ -6,20 +6,21 @@
     <meta name="color-scheme" content="light" />
     <title>Acquire</title>
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v=20261005-2" />
-    <link rel="stylesheet" href="/static/style.css?v=20261102-1" />
-    <script defer src="/static/js/core.js?v=20261102-1"></script>
-    <script defer src="/static/js/player.js?v=20261102-1"></script>
-    <script defer src="/static/js/search.js?v=20261102-1"></script>
-    <script defer src="/static/js/library.js?v=20261102-1"></script>
-    <script defer src="/static/js/jobs.js?v=20261102-1"></script>
-    <script defer src="/static/js/review.js?v=20261102-1"></script>
-    <script defer src="/static/js/needs.js?v=20261102-1"></script>
-    <script defer src="/static/js/requests.js?v=20261102-1"></script>
-    <script defer src="/static/js/unrequested.js?v=20261102-1"></script>
-    <script defer src="/static/js/overview.js?v=20261102-1"></script>
-    <script defer src="/static/js/settings.js?v=20261102-1"></script>
-    <script defer src="/static/js/concerts.js?v=20261102-1"></script>
-    <script defer src="/static/js/main.js?v=20261102-1"></script>
+    <link rel="stylesheet" href="/static/style.css?v=20261102-2" />
+    <script defer src="/static/js/core.js?v=20261102-2"></script>
+    <script defer src="/static/js/player.js?v=20261102-2"></script>
+    <script defer src="/static/js/search.js?v=20261102-2"></script>
+    <script defer src="/static/js/library.js?v=20261102-2"></script>
+    <script defer src="/static/js/jobs.js?v=20261102-2"></script>
+    <script defer src="/static/js/review.js?v=20261102-2"></script>
+    <script defer src="/static/js/needs.js?v=20261102-2"></script>
+    <script defer src="/static/js/requests.js?v=20261102-2"></script>
+    <script defer src="/static/js/unrequested.js?v=20261102-2"></script>
+    <script defer src="/static/js/overview.js?v=20261102-2"></script>
+    <script defer src="/static/js/users.js?v=20261102-2"></script>
+    <script defer src="/static/js/settings.js?v=20261102-2"></script>
+    <script defer src="/static/js/concerts.js?v=20261102-2"></script>
+    <script defer src="/static/js/main.js?v=20261102-2"></script>
   </head>
   <body>
     <div id="toast" role="status" aria-live="polite" hidden></div>
@@ -278,10 +279,15 @@
         <section id="settings-view" hidden>
           <h1>Settings</h1>
           <section class="settings-block">
-            <h2>Automatic adding</h2>
+            <h2>Your automatic adding</h2>
             <p class="muted">Add downloads to the library on their own when nothing needs you. What the review model is unsure of still waits in Needs you.</p>
             <label class="checkbox"><input type="checkbox" data-auto-add="search" />Requests (yours and your agent's)</label>
             <label class="checkbox"><input type="checkbox" data-auto-add="import" />Inbox imports</label>
+          </section>
+          <section id="users-settings" class="settings-block" data-admin hidden>
+            <h2>Users</h2>
+            <p class="muted">Accounts, passwords and admin rights live in Navidrome; new accounts can listen there but cannot use Acquire until you allow them here. Admins always can. <a id="navidrome-users" href="#" target="_blank" rel="noopener">Manage accounts in Navidrome ↗</a></p>
+            <div id="users"></div>
           </section>
           <section id="sharing-settings" class="settings-block" data-admin hidden>
             <h2>Soulseek sharing</h2>

@@ -1845,3 +1845,17 @@ table.lists .bar-col {
   align-items: center;
   gap: 6px 12px;
 }
+table.users th,
+table.users td {
+  text-align: left;
+}
+#navidrome-users {
+  text-decoration: underline;
+}
+table.users .checkbox {
+  display: inline-flex;
+}
+table.users tr.no-access th,
+table.users tr.no-access td {
+  color: var(--muted);
+}

@@ -26,7 +26,9 @@ def backend(tmp_path, monkeypatch):
     return main, TestClient(main.app)
 
 
-def signin(main, client, monkeypatch, name="mateo", admin=True):
+def signin(main, client, monkeypatch, name="mateo", admin=True, granted=True):
+    if not admin and granted:
+        main.write_json(main.ACCESS, {**main.acquire_access(), name: True})
     upstream = Mock()
     upstream.json.return_value = {"username": name, "isAdmin": admin}
     upstream.status_code = 200
@@ -1378,3 +1380,63 @@ def test_a_playlist_link_requests_each_track_and_links_are_read(backend, monkeyp
     monkeypatch.setattr(main.Sources, "identify_link", identify)
     assert client.post("/api/links", json={"url": "https://open.spotify.com/track/x"}).json()["artist"] == "Burial"
     assert client.post("/api/links", json={"url": "https://example.com"}).json()["detail"].startswith("Paste a Spotify")
+
+
+def navidrome_accounts(main, *rows):
+    import sqlite3
+    db = sqlite3.connect(main.config["navidrome_db"])
+    db.execute("CREATE TABLE IF NOT EXISTS user (user_name TEXT, name TEXT, is_admin INTEGER, last_login_at TEXT)")
+    db.executemany("INSERT INTO user VALUES (?, ?, ?, ?)", rows)
+    db.commit()
+    db.close()
+
+
+def test_only_admins_and_allowed_users_can_use_acquire(backend, monkeypatch):
+    main, client = backend
+    main.wishlist.add("paulo", "Artist", "Album", "Requests")
+    assert main.acquire_access() == {"paulo": True}   # the first time: whoever already used it keeps access
+    upstream = Mock(status_code=200)
+    upstream.json.return_value = {"username": "pedro", "isAdmin": False}
+    monkeypatch.setattr(main.httpx, "post", lambda *a, **k: upstream)
+    denied = client.post("/api/login", json={"username": "pedro", "password": "private-test"})
+    assert denied.status_code == 403 and "cannot use Acquire" in denied.json()["detail"]
+    signin(main, client, monkeypatch, name="paulo", admin=False, granted=False)
+    assert client.get("/api/me").status_code == 200
+    main.write_json(main.ACCESS, {"paulo": False})
+    assert client.get("/api/me").status_code == 401   # a revoked session ends at its next request
+    signin(main, client, monkeypatch)
+    assert client.get("/api/me").status_code == 200   # admins always
+
+
+def test_admins_manage_who_uses_acquire_and_their_automatic_adding(backend, monkeypatch):
+    main, client = backend
+    navidrome_accounts(main, ("mateo", "Mateo", 1, "2026-11-02"), ("paulo", "Paulo", 0, "2026-10-18"), ("pedro", "Pedro", 0, None))
+    main.wishlist.add("paulo", "Artist", "Album", "Requests")
+    seed_review(main, owner="paulo")
+    signin(main, client, monkeypatch)
+    users = {u["username"]: u for u in client.get("/api/users").json()["users"]}
+    assert [users[n]["access"] for n in ("mateo", "paulo", "pedro")] == [True, True, False]
+    assert (users["paulo"]["requests"], users["paulo"]["reviews"], users["mateo"]["is_admin"]) == (1, 1, True)
+    assert client.post("/api/users/pedro", json={"access": True, "search": True}).json() == {
+        "username": "pedro", "access": True, "auto_add": {"search": True, "import": False}}
+    assert main.auto_add_settings("pedro") == {"search": True, "import": False}
+    assert client.post("/api/users/mateo", json={"access": False}).status_code == 400
+    assert client.post("/api/users/nobody", json={"access": True}).status_code == 404
+    agent = {"Authorization": "Bearer " + main.mint_agent("mateo", "hermes", True, "owner")["token"]}
+    assert client.post("/api/users/pedro", json={"access": False}, headers=agent).status_code == 403
+    signin(main, client, monkeypatch, name="paulo", admin=False)
+    assert client.get("/api/users").status_code == 403
+
+
+def test_rejecting_with_stop_stops_the_request_instead_of_trying_another_copy(backend, monkeypatch):
+    main, client = backend
+    signin(main, client, monkeypatch)
+    seed_review(main)
+    item = main.wishlist.add("mateo", "Artist", "", "Requests", kind="track", title="Song")
+    item.update(status="review", job_id="job")
+    main.wishlist.save(item)
+    job = main.store.get("jobs", "job")
+    main.store.update_job("job", candidate={**job["candidate"], "wishlist_id": item["id"]})
+    assert client.post("/api/jobs/job/reject", json={"stop": True}).json() == {"ok": True}
+    saved = main.store.get("wishlist", item["id"])
+    assert (saved["status"], saved["job_id"]) == ("skipped", None)

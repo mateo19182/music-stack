@@ -257,7 +257,9 @@ function renderReviewJob(job) {
       : "";
   const [origin, ...details] = jobOrigin(job);
   const link = job.request?.source_url ? ` <a href="${safeLink(job.request.source_url)}" target="_blank" rel="noopener">Open source ↗</a>` : "";
-  return `<article class="card review-card" data-review-job="${esc(job.id)}" data-default-filter="${esc(filter)}"><details class="review-disclosure" ${open ? "open" : ""}><summary><span class="review-title"><strong>${esc(jobTitle(job))}</strong><span class="muted">${esc([origin, ...details, `${files.length} track${multi ? "s" : ""}`].join(" · "))}${link}</span></span>${adviceBadge(job)}<span class="status status-${status}">${status === "check" ? (counts.check ? `${counts.check} need${counts.check === 1 ? "s" : ""} you` : "Check") : "Ready"}</span></summary>${renderConcerns(job, summary)}${filters}<div class="track-list">${groupHtml}</div><div class="review-bar"><label class="checkbox" ${multi ? "" : "hidden"}><input type="checkbox" data-select-all>Include all</label><span class="muted" data-selected-count></span><details class="more-actions"><summary aria-label="More review actions">⋯</summary><div><button class="quiet" data-approve="${esc(job.id)}" data-keep="true">Add with original tags</button>${adviceAction(job)}</div></details><button class="quiet" data-reject="${esc(job.id)}" title="Nothing is added. The download is kept privately.">Reject</button>${multi && counts.check && counts.ready ? `<button class="quiet" data-add-ready>Add ready</button>` : ""}<button data-approve="${esc(job.id)}">Add</button></div></details></article>`;
+  return `<article class="card review-card" data-review-job="${esc(job.id)}" data-default-filter="${esc(filter)}"><details class="review-disclosure" ${open ? "open" : ""}><summary><span class="review-title"><strong>${esc(jobTitle(job))}</strong><span class="muted">${esc([origin, ...details, `${files.length} track${multi ? "s" : ""}`].join(" · "))}${link}</span></span>${adviceBadge(job)}<span class="status status-${status}">${status === "check" ? (counts.check ? `${counts.check} need${counts.check === 1 ? "s" : ""} you` : "Check") : "Ready"}</span></summary>${renderConcerns(job, summary)}${filters}<div class="track-list">${groupHtml}</div><div class="review-bar"><label class="checkbox" ${multi ? "" : "hidden"}><input type="checkbox" data-select-all>Include all</label><span class="muted" data-selected-count></span><details class="more-actions"><summary aria-label="More review actions">⋯</summary><div><button class="quiet" data-approve="${esc(job.id)}" data-keep="true">Add with original tags</button>${adviceAction(job)}</div></details>${job.request?.wishlist_id
+    ? `<button class="quiet" data-reject="${esc(job.id)}" data-stop="true" title="Nothing is added, and its request stops: nothing else is downloaded for it.">Reject and stop</button><button class="quiet" data-reject="${esc(job.id)}" title="Nothing is added; its request tries its next copy.">Reject, try another copy</button>`
+    : `<button class="quiet" data-reject="${esc(job.id)}" title="Nothing is added. The download is kept privately.">Reject</button>`}${multi && counts.check && counts.ready ? `<button class="quiet" data-add-ready>Add ready</button>` : ""}<button data-approve="${esc(job.id)}">Add</button></div></details></article>`;
 }
 function adviceBadge(job) {
   const advice = job.advice;
@@ -561,8 +563,9 @@ document.addEventListener("click", (e) => {
     busy(button, () => approveReview(button.dataset.approve, button.dataset.keep === "true"));
   else if (button.dataset.reject)
     busy(button, async () => {
-      await api(`/api/jobs/${path(button.dataset.reject)}/reject`, {});
-      toast("Rejected. Source files retained.");
+      const stop = button.dataset.stop === "true";
+      await api(`/api/jobs/${path(button.dataset.reject)}/reject`, { stop });
+      toast(stop ? "Rejected, and its request stopped." : "Rejected. Nothing was added; a request tries its next copy.");
       clearReviewEdits(button.dataset.reject);
       await loadReview();
       await loadSummary();

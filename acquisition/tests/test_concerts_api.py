@@ -30,6 +30,8 @@ def backend(tmp_path, monkeypatch):
 
 
 def signin(main, client, monkeypatch, admin=True):
+    if not admin:
+        main.write_json(main.ACCESS, {"mateo": True})
     upstream = Mock(status_code=200)
     upstream.json.return_value = {"username": "mateo", "isAdmin": admin}
     monkeypatch.setattr(main.httpx, "post", lambda *a, **k: upstream)

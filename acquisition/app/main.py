@@ -364,6 +364,8 @@ def check_user(request: Request, bearer_credentials=Depends(HTTPBearer(auto_erro
         raise HTTPException(401, "Use a dedicated agent token")
     if not bearer and s.get("kind") == "agent":
         raise HTTPException(401, "Agent tokens require Bearer authentication")
+    if not can_use_acquire(s["username"], s.get("isAdmin")):
+        raise HTTPException(401, NO_ACCESS)
     return s
 
 
@@ -1141,6 +1143,8 @@ def login(body: Login, request: Request, response: Response):
             503, "Navidrome is unavailable; try again shortly"
         ) from None
     data = {"username": upstream["username"], "isAdmin": upstream["isAdmin"]}
+    if not can_use_acquire(data["username"], data["isAdmin"]):
+        raise HTTPException(403, NO_ACCESS)
     token = secrets.token_urlsafe(32)
     store.put(
         "sessions",
@@ -1557,12 +1561,20 @@ def retry(id: str, body: Retry, user=Depends(check_user)):
     return {"ok": True}
 
 
+class Rejection(BaseModel):
+    stop: bool = False   # also stop the request, instead of trying its next copy
+
+
 @app.post("/api/jobs/{id}/reject")
-def reject(id: str, user=Depends(check_user)):
+def reject(id: str, body: Rejection | None = None, user=Depends(check_user)):
     require_approver(user)   # rejecting publishes nothing and keeps the download privately
     job = owned_job(id, user)
     if job["stage"] != "review":
         raise HTTPException(409, "Job is not awaiting review")
+    request = store.get("wishlist", (job.get("candidate") or {}).get("wishlist_id") or "")
+    if body and body.stop and request and request.get("job_id") == id:
+        request.update(status="skipped", job_id=None, note="Stopped when its download was rejected")
+        wishlist.save(request)
     if not store.transition_job(
         id, {"review"}, "rejected", detail="Rejected; downloaded source retained",
         rejected_by=f"agent:{user.get('name')}" if user.get("kind") == "agent" else user["username"],
@@ -1802,10 +1814,96 @@ def set_auto_add(body: AutoAdd, user=Depends(check_user)):
     except (OSError, ValueError):
         saved = {}
     saved[user["username"]] = {"search": body.search, "import": body.imports}
-    temporary = AUTO_ADD.with_name(AUTO_ADD.name + ".tmp")
-    temporary.write_text(json.dumps(saved, indent=2))
-    os.replace(temporary, AUTO_ADD)
+    write_json(AUTO_ADD, saved)
     return auto_add_settings(user["username"])
+
+
+def write_json(path, data):
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(json.dumps(data, indent=2))
+    os.replace(temporary, path)
+
+
+# Users: accounts and roles live in Navidrome; Acquire only decides who may use it.
+ACCESS = STATE / "access.json"
+NO_ACCESS = "Your account can listen in Navidrome but cannot use Acquire. Ask the owner for access."
+
+
+def acquire_access():
+    """Non-admins allowed to use Acquire. The first time, everyone who already used it keeps access."""
+    try:
+        return json.loads(ACCESS.read_text())
+    except FileNotFoundError:
+        with store.db() as db:
+            owners = {r[0] for r in db.execute("SELECT owner FROM wishlist UNION SELECT owner FROM jobs")}
+        granted = {name: True for name in sorted(owners)}
+        write_json(ACCESS, granted)
+        return granted
+    except (OSError, ValueError):
+        return {}
+
+
+def can_use_acquire(username, is_admin):
+    return bool(is_admin) or bool(acquire_access().get(username))
+
+
+def navidrome_users():
+    db = sqlite3.connect(f"file:{config.get('navidrome_db', '/navidrome/navidrome.db')}?mode=ro", uri=True)
+    try:
+        return [{"username": u, "name": n, "is_admin": bool(a), "last_login": l}
+                for u, n, a, l in db.execute("SELECT user_name, name, is_admin, last_login_at FROM user ORDER BY user_name")]
+    finally:
+        db.close()
+
+
+@app.get("/api/users")
+def list_users(user=Depends(check_user)):
+    """Navidrome's accounts, with what Acquire lets each do and how much each has going on."""
+    require_admin(user)
+    try:
+        accounts = navidrome_users()
+    except sqlite3.Error:
+        raise HTTPException(503, "Navidrome's user list is unavailable") from None
+    access = acquire_access()
+    with store.db() as db:
+        requests = dict(db.execute("SELECT owner, COUNT(*) FROM wishlist WHERE json_extract(data,'$.status')!='suggested' GROUP BY owner"))
+        reviews = dict(db.execute("SELECT owner, COUNT(*) FROM jobs WHERE stage='review' GROUP BY owner"))
+    return {"navidrome_url": navidrome_public_url(), "users": [
+        {**a, "access": a["is_admin"] or bool(access.get(a["username"])), "auto_add": auto_add_settings(a["username"]),
+         "requests": requests.get(a["username"], 0), "reviews": reviews.get(a["username"], 0)} for a in accounts]}
+
+
+class UserSettings(BaseModel):
+    access: bool | None = None
+    search: bool | None = None
+    imports: bool | None = Field(default=None, alias="import")
+
+
+@app.post("/api/users/{username}")
+def update_user(username: str, body: UserSettings, user=Depends(check_user)):
+    """Who may use Acquire, and each user's automatic adding. Only the owner, never an agent."""
+    require_admin(user)
+    require_manual(user)
+    account = next((a for a in navidrome_users() if a["username"] == username), None)
+    if not account:
+        raise HTTPException(404, "No such Navidrome user")
+    if body.access is not None:
+        if account["is_admin"]:
+            raise HTTPException(400, "Navidrome admins always have access")
+        access = acquire_access()
+        access[username] = body.access
+        write_json(ACCESS, access)
+    if body.search is not None or body.imports is not None:
+        try:
+            saved = json.loads(AUTO_ADD.read_text())
+        except (OSError, ValueError):
+            saved = {}
+        current = auto_add_settings(username)
+        saved[username] = {"search": current["search"] if body.search is None else body.search,
+                           "import": current["import"] if body.imports is None else body.imports}
+        write_json(AUTO_ADD, saved)
+    return {"username": username, "access": account["is_admin"] or bool(acquire_access().get(username)),
+            "auto_add": auto_add_settings(username)}
 
 
 def auto_add(id):
