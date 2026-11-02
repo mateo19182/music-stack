@@ -1,0 +1,10 @@
+{
+  "navidrome_db": "../navidrome/navidrome.db",
+  "state_db": "../../state/concerts/events.db",
+  "report": "../../state/concerts/latest.json",
+  "ticketmaster_api_key": "",
+  "lookahead_days": 365,
+  "max_nationwide_dates": 3,
+  "ra_enabled": false,
+  "artist_overrides": {}
+}

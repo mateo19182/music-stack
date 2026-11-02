@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily library concert check
+
+[Timer]
+OnCalendar=*-*-* 18:00:00 Europe/Madrid
+RandomizedDelaySec=0
+AccuracySec=1s
+Persistent=true
+Unit=music-concerts.service
+
+[Install]
+WantedBy=timers.target

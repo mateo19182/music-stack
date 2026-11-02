@@ -138,9 +138,10 @@ class Sharing:
                 self.error = 'Could not update Soulseek shares. Your library is unchanged; the app will retry.'
                 raise
 
-    def refresh(self):
+    def refresh(self, *, reconcile=True):
         with self.lock:
-            self.reconcile()
+            if reconcile:
+                self.reconcile()
             if self.data['scan_pending'] and self.scan:
                 try:
                     if self.scan():

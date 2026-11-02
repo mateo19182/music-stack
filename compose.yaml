@@ -22,7 +22,7 @@ services:
     image: nginx:alpine@sha256:df221db836e1754089190208cee7eeda94f233197056426eda74a43ab1abeac2
     container_name: music-redirect
     volumes:
-    - ${REDIRECT_CONF:-./deployment/aurral-redirect.conf}:/etc/nginx/conf.d/default.conf:ro
+    - ${REDIRECT_CONF:-./deployment/music-redirect.conf}:/etc/nginx/conf.d/default.conf:ro
     ports:
     - 127.0.0.1:3015:8080
     restart: unless-stopped
@@ -42,6 +42,8 @@ services:
     - ${MUSIC_DATA_ROOT:-/mnt/data/music-library}/incoming/acquisition:/staging
     - ${MUSIC_DATA_ROOT:-/mnt/data/music-library}/downloads/slskd:/downloads/slskd:ro
     - ${MUSIC_DATA_ROOT:-/mnt/data/music-library}/downloads/torrents:/downloads/torrents:ro
+    # Concert worker report (latest.json); a directory mount so atomic report replacement is seen.
+    - ${CONCERTS_STATE_DIR:-./state/concerts}:/concerts:ro
     ports:
     - 127.0.0.1:4534:4534
     networks:
@@ -63,4 +65,4 @@ networks:
   lidarr:
     external: true
     name: ${SOURCE_NETWORK:-lidarr_default}
-name: aurral
+name: music-stack

@@ -97,7 +97,9 @@ album releases. Existing album tags are retained and can be corrected in review.
 ## Layout
 
 - `acquisition/`: FastAPI app, workers, classic frontend, tests and MCP bridge.
-- `compose.yaml`: acquisition, Navidrome and the Aurral redirect. Project `aurral`.
+- `concerts/`: library-based concert alerts across Spain; see [setup and coverage](concerts/README.md).
+  Acquire's Concerts tab (all signed-in users) reads its report through a read-only mount.
+- `compose.yaml`: acquisition, Navidrome and the legacy URL redirect. Project `music-stack`.
 - `compose.sources.yaml`: slskd, Gluetun, Deemix, web proxy and optional Beets.
   Project `lidarr`; its network is `lidarr_default`.
 - `examples/`: configuration templates with placeholders for secrets.
@@ -114,9 +116,11 @@ the work folders and paths that files move between are configured through the
 symlinks to folders on the music disk. Undo moves a track back to Review; tag
 edits made at approval are not restored.
 
-The project and network names (`aurral`, `lidarr`) are historical: this stack
-replaced an earlier Aurral + Lidarr setup. The old Aurral fork remains at
-https://github.com/mateo19182/aurral.
+This stack replaced an earlier Aurral + Lidarr setup. The download-service
+project retains the historical name `lidarr`; acquisition and playback use `music-stack`.
+The project name is a compatibility label; it does not run the Lidarr application.
+Both Compose projects are operated from this repository. Private source-service
+state paths are configured through `.env`.
 
 ## Deploying changes
 

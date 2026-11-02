@@ -15,6 +15,35 @@ def setup(tmp_path, scan=None):
     return Sharing(library, tmp_path / 'shared', tmp_path / 'state', scan), audio
 
 
+def test_idle_refresh_does_not_walk_library_or_rewrite_state(tmp_path, monkeypatch):
+    sharing, audio = setup(tmp_path, lambda: True)
+    sharing.refresh()
+    before = sharing.path.stat().st_mtime_ns
+
+    def unexpected_reconcile():
+        pytest.fail('Idle refresh must not reconcile the library')
+
+    monkeypatch.setattr(sharing, 'reconcile', unexpected_reconcile)
+    sharing.refresh(reconcile=False)
+    assert sharing.path.stat().st_mtime_ns == before
+
+
+def test_pending_scan_retries_without_reconciling(tmp_path, monkeypatch):
+    attempts = []
+
+    def scan():
+        attempts.append(1)
+        return len(attempts) > 1
+
+    sharing, audio = setup(tmp_path, scan)
+    sharing.refresh()
+    assert sharing.status()['scan_pending']
+    monkeypatch.setattr(sharing, 'reconcile', lambda: pytest.fail('Unexpected library walk'))
+    sharing.refresh(reconcile=False)
+    assert not sharing.status()['scan_pending']
+    assert len(attempts) == 2
+
+
 def test_defaults_exclusions_and_restart_preserve_library(tmp_path):
     sharing, audio = setup(tmp_path)
     sharing.reconcile()

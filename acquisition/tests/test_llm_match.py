@@ -98,3 +98,15 @@ def test_jev_can_answer_none_of_these():
     assert set(sent[0]["questions"]["best"]["criteria"]) == {"c0", "c1", "none"}
     response.json.return_value["answers"]["best"] = {"type": "choice", "choice": "c0"}
     assert j.verdicts("A", "B", CANDIDATES)[0]["match"] is True
+
+
+def test_track_verdicts_show_each_file_with_its_length_and_the_reference():
+    j, calls = judge(reply([{"id": "c0", "match": True, "problem": "none", "reason": "ok"}]))
+    found = j.track_verdicts("100 gecs", "hand crushed by a mallet (Remix)",
+                             [{"source": "soulseek", "filename": "Music\\gecs\\05 hand crushed.flac", "duration": 175}],
+                             "1000 gecs and The Tree of Clues", {"title": "1000 gecs and The Tree of Clues", "tracks": [("hand crushed", 175)]})
+    assert found[0]["match"] is True
+    sent = json.loads(calls[0]["messages"][0]["content"])
+    assert sent["candidates"]["c0"] == {"source": "soulseek file", "path": "Music/gecs/05 hand crushed.flac", "seconds": 175}
+    assert sent["reference_tracklist"]["tracks"] == [{"title": "hand crushed", "seconds": 175}]
+    assert "recording" in calls[0]["system"]

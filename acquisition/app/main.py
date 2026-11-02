@@ -6,7 +6,7 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 import httpx
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPBearer
@@ -19,7 +19,8 @@ from .sources import Sources, SourceError, SoulseekUnavailable, DownloadCancelle
 from . import matching
 from .wishlist import KINDS, Wishlist
 from .llm_match import Judge
-from typing import List
+from typing import List, Literal
+from . import concerts
 from .health import SoulseekHealth, telegram
 from .ingestion import Ingestor, IngestionCancelled
 from .keys import camelot, key_fields, sort_key
@@ -43,6 +44,7 @@ LIBRARY.mkdir(parents=True, exist_ok=True)
 STAGING.mkdir(parents=True, exist_ok=True)
 store = Store(STATE / "acquisition.db")
 stop = threading.Event()
+sharing_changed = threading.Event()
 worker_threads = []
 reviewer = Reviewer(config)
 advice_lock = threading.Lock()
@@ -134,6 +136,8 @@ class Import(BaseModel):
 class RequestEntry(BaseModel):
     artist: str = Field(default="", max_length=200)
     album: str = Field(default="", max_length=300)
+    kind: str = "album"
+    title: str = Field(default="", max_length=300)
     star: bool = False
     skip: str | None = Field(default=None, max_length=200)
     year: int | None = None
@@ -145,6 +149,10 @@ class RequestImport(BaseModel):
     list: str = Field(min_length=1, max_length=120)
     playlist: bool = False
     list_order: int = 0
+
+
+class LinkLookup(BaseModel):
+    url: str = Field(min_length=1, max_length=2000)
 
 
 class AgentCredential(BaseModel):
@@ -313,10 +321,17 @@ def wishlist_worker():
 
 
 def sharing_worker():
+    needs_reconcile = True
     while not stop.is_set():
+        reconcile = needs_reconcile or sharing_changed.is_set()
+        if reconcile:
+            sharing_changed.clear()
         try:
-            sharing.refresh()
+            sharing.refresh(reconcile=reconcile)
+            needs_reconcile = False
         except Exception:
+            if reconcile:
+                sharing_changed.set()
             log.exception("Could not synchronize Soulseek sharing")
         stop.wait(15)
 
@@ -746,6 +761,9 @@ def do_search(id, user, body):
         )
         results = sources.search(query, body.source, body.kind)
         for candidate in results:
+            candidate["match"], candidate["named"] = matching.relevance(candidate, query)
+        results.sort(key=lambda c: (-c["match"], -c["named"], -(matching.quality(c) or 0)) + matching.availability(c))
+        for candidate in results:
             candidate["id"] = hashlib.sha256(
                 (id + candidate["id"]).encode()
             ).hexdigest()[:32]
@@ -853,6 +871,7 @@ def worker(stages=("queued", "process_queued", "publish_queued"), quick_only=Fal
                 records = ingestor.publish(
                     prepared, job.get("edits", {}), id, progress, cancelled
                 )
+                sharing_changed.set()
                 register_files(records, job, True)
                 with store.db() as db:
                     db.execute(
@@ -1376,6 +1395,15 @@ def _search_library_matches(candidate, published_files, identity_index=None):
         "confirmed_track_count": confirmed_count,
         "listed_track_count": len(tracks),
     }
+
+
+@app.post("/api/links")
+def read_link(body: LinkLookup, user=Depends(check_user)):
+    """What a pasted link is, so the page can offer to find the best copy or download it as given."""
+    try:
+        return Sources(config).identify_link(body.url.strip())
+    except SourceError as exc:
+        raise HTTPException(400, str(exc)) from None
 
 
 @app.get("/api/search/{id}")
@@ -2219,7 +2247,9 @@ def add_request(body: RequestAdd, user=Depends(check_user)):
 
 @app.post("/api/requests/import")
 def import_requests(body: RequestImport, user=Depends(check_user)):
-    added = [wishlist.add(user["username"], e.artist.strip(), e.album.strip(), body.list.strip(), position=n, star=e.star,
+    if any(e.kind not in {"album", "track"} for e in body.items):
+        raise HTTPException(400, "Each request is an album or a track")
+    added = [wishlist.add(user["username"], e.artist.strip(), e.album.strip(), body.list.strip(), kind=e.kind, title=e.title, position=n, star=e.star,
                           playlist=body.playlist, list_order=body.list_order, year=e.year,
                           **({"skip": e.skip} if e.skip else {}), **({"wrong_jobs": e.wrong_jobs} if e.wrong_jobs else {}))
              for n, e in enumerate(body.items)]
@@ -2528,6 +2558,20 @@ def import_files(body: Import, user=Depends(check_user)):
         created_at=now(),
     )
     return job_view(store.get("jobs", id))
+
+
+CONCERTS_REPORT = Path(config.get("concerts_report", "/concerts/latest.json"))
+
+
+@app.get("/api/concerts")
+def concert_listings(user=Depends(check_user), area: Literal["all", "preferred"] = "all",
+                     q: str = Query("", max_length=100), days: int = Query(0, ge=0, le=730)):
+    """The concert worker's latest report, filtered; read-only, no provider calls."""
+    require_manual(user)
+    report, problem = concerts.load_report(CONCERTS_REPORT)
+    if problem:
+        return concerts.empty_view(*problem)
+    return concerts.build_view(report, area=area, q=q, days=days)
 
 
 app.mount(

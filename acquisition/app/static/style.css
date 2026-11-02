@@ -182,31 +182,8 @@ h3 {
 .options label {
   min-width: 150px;
 }
-.search-options {
-  gap: 12px;
-}
-.search-options select {
-  padding: 7px 10px;
-  font-size: 12px;
-}
-.search-options label {
-  min-width: 180px;
-}
 .search-row > button {
   min-height: 39px;
-}
-.url-panel {
-  background: none;
-  border: 0;
-  padding: 0 2px;
-  margin: 15px 0;
-}
-.url-panel > p {
-  margin: 10px 0;
-}
-.url-panel form {
-  padding: 12px 0;
-  max-width: 650px;
 }
 .section-title {
   display: flex;
@@ -437,9 +414,9 @@ progress {
 }
 .result-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 145px auto;
-  gap: 18px;
-  align-items: center;
+  grid-template-columns: 64px minmax(0, 1fr) auto;
+  gap: 16px;
+  align-items: start;
   padding: 14px 4px;
   border-bottom: 1px solid var(--border);
 }
@@ -652,12 +629,6 @@ progress {
     min-width: 120px;
     flex: 1;
   }
-  .search-options {
-    flex-wrap: nowrap;
-  }
-  .search-options label {
-    min-width: 0;
-  }
   .section-title {
     gap: 10px;
   }
@@ -669,18 +640,6 @@ progress {
   }
   .result-tools > .muted {
     display: none;
-  }
-  .result-row {
-    grid-template-columns: minmax(0, 1fr) auto;
-    gap: 8px 12px;
-  }
-  .result-row .quality {
-    grid-column: 1;
-    grid-row: 2;
-  }
-  .result-row > button {
-    grid-column: 2;
-    grid-row: 1/3;
   }
   .library-heading {
     display: none;
@@ -1406,4 +1365,303 @@ body:has(#player-bar:not([hidden])) .review-bar {
 #suggest-list input[type="checkbox"] {
   width: auto;
   flex: none;
+}
+
+/* Find music */
+.finder {
+  margin-bottom: 20px;
+}
+.finder h1 {
+  margin: 0 0 14px;
+}
+.finder-box {
+  display: flex;
+  border: 2px solid var(--accent);
+  background: #fff;
+}
+.finder-box input {
+  border: 0;
+  padding: 14px 16px;
+  font-size: 17px;
+}
+.finder-box input:focus {
+  outline: none;
+}
+.finder-box:focus-within {
+  box-shadow: 0 0 0 3px #d6d5cc;
+}
+.finder-box button {
+  padding: 0 26px;
+  font-size: 15px;
+}
+.finder.has-link .finder-box {
+  border-color: #2f6a3a;
+}
+.finder.has-link .finder-box button {
+  background: #2f6a3a;
+}
+.finder-options {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 16px;
+  margin-top: 12px;
+}
+fieldset.segmented {
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+.segmented.choice label {
+  display: block;
+  font-size: 13px;
+  color: #222;
+}
+.segmented.choice label + label {
+  border-left: 1px solid var(--border);
+}
+.segmented.choice input {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+}
+.segmented.choice span {
+  display: block;
+  padding: 7px 12px;
+  cursor: pointer;
+}
+.segmented.choice input:checked + span {
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+.segmented.choice input:focus-visible + span {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.finder-options .link {
+  margin-left: auto;
+}
+.precise {
+  margin-top: 12px;
+}
+.link-card {
+  border: 1px solid var(--border);
+  border-left: 4px solid #2f6a3a;
+  background: #faf9f5;
+  padding: 16px 18px;
+  margin-bottom: 20px;
+}
+.link-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.link-head button {
+  padding: 3px 8px;
+}
+.link-card h2 {
+  margin: 10px 0 4px;
+  font-size: 22px;
+  overflow-wrap: anywhere;
+}
+.link-fields {
+  max-width: 720px;
+}
+.link-tracks ol {
+  margin: 10px 0 0;
+  padding-left: 22px;
+  max-height: 300px;
+  overflow: auto;
+  font-size: 13px;
+  line-height: 1.8;
+}
+.link-tracks .checkbox {
+  display: flex;
+  flex-direction: row;
+  gap: 8px;
+  align-items: center;
+  color: #222;
+  font-size: 13px;
+}
+.link-tracks .checkbox .muted {
+  margin-left: auto;
+}
+.link-tracks > .checkbox {
+  margin-top: 14px;
+}
+.q-badge {
+  display: block;
+  text-align: center;
+  padding: 6px 4px;
+  font-size: 12px;
+  font-weight: 700;
+  border: 1px solid var(--border);
+  color: #555;
+}
+.q-badge small {
+  display: block;
+  font-weight: 400;
+  font-size: 11px;
+}
+.q-badge.good {
+  color: #222;
+  border-color: #888;
+}
+.q-badge.lossless {
+  background: #2f6a3a;
+  border-color: #2f6a3a;
+  color: #fff;
+}
+.result-row h3 {
+  margin: 0 0 2px;
+  font-size: 15px;
+  overflow-wrap: anywhere;
+}
+.result-row.weak h3 {
+  font-weight: 400;
+}
+.source-line .ok {
+  color: #2f6a3a;
+  font-weight: 600;
+}
+.source-line .path {
+  overflow-wrap: anywhere;
+}
+.result-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.copy-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 0;
+  border-top: 1px dotted var(--border);
+}
+.copy-row button {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+.weak-results {
+  margin-top: 8px;
+}
+.weak-results > summary {
+  padding: 10px 4px;
+}
+#search-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  margin-right: 8px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  vertical-align: -2px;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (max-width: 600px) {
+  .finder-box input {
+    font-size: 15px;
+    padding: 12px;
+  }
+  .finder-box button {
+    padding: 0 14px;
+  }
+  .finder-options .link {
+    margin-left: 0;
+  }
+  .result-row {
+    grid-template-columns: 52px minmax(0, 1fr);
+    gap: 8px 12px;
+  }
+  .result-actions {
+    grid-column: 2;
+  }
+}
+.concert-notice {
+  margin: 0 0 12px;
+}
+.concert-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  align-items: end;
+  margin: 14px 0;
+}
+.concert-filters > label {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+  flex: 1 1 180px;
+  max-width: 280px;
+}
+.concert-card h3 {
+  margin: 0 0 2px;
+}
+.concert-collapsed {
+  background: transparent;
+}
+.concert-dates {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+}
+.concert-date {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr) auto;
+  gap: 4px 14px;
+  align-items: baseline;
+  padding: 8px 0;
+  border-top: 1px solid #e3e2da;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.concert-when span {
+  margin-left: 8px;
+  color: var(--muted);
+}
+.concert-where {
+  overflow-wrap: anywhere;
+}
+.concert-star {
+  color: #9a6b00;
+}
+.concert-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  justify-content: end;
+  font-size: 12px;
+}
+.concert-links a {
+  text-decoration: underline;
+}
+.concert-hidden > summary {
+  margin-top: 10px !important;
+}
+@media (max-width: 700px) {
+  .concert-filters > label {
+    max-width: none;
+  }
+  .concert-date {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .concert-links {
+    justify-content: start;
+  }
 }

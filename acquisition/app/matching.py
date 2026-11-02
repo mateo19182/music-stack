@@ -70,12 +70,23 @@ def library_has_track(library, item):
     return bool(wanted) and any(wanted in a.get('titles', ()) and artist_matches(artist, a['artists']) for a in library.values())
 
 
-def ranked_tracks(results, artist, title, avoid=(), limit=8):
+MIXED = re.compile(r'\s*(?:-\s*mixed|[\(\[]\s*mixed\s*[\)\]])\s*$', re.I)
+
+
+def unmixed(title):
+    """The song a DJ-mix track is cut from: "Yeh - Mixed" is a slice of "Yeh" that is rarely shared on its own."""
+    return MIXED.sub('', title or '').strip() or title
+
+
+def ranked_tracks(results, artist, title, avoid=(), limit=8, album=''):
     """Search results that are this recording, best first: quality, then availability. A file
-    must carry every word of the title and the artist (in its path or tags), and no version
-    word ("remix", "live", "instrumental"...) the request does not have."""
+    must carry every word of the title and the artist (in its path or tags), no version
+    word ("remix", "live", "instrumental"...) the request does not have, and no remixer it does not name."""
+    title = unmixed(title)
     title_words = [w for w in words(re.sub(r'\s*[\(\[]\s*(feat|ft|with)\b.*?[\)\]]', '', title, flags=re.I)) if w not in FILLER] or words(title)
     artist_words = [w for w in words(clean_artist(artist)) if w not in FILLER]
+    album_words = set(words(album))
+    wanted = set(words(title))
     best, seen = [], set()
     scored = []
     for c in results:
@@ -90,10 +101,19 @@ def ranked_tracks(results, artist, title, avoid=(), limit=8):
             continue
         if any(re.search(r'\b' + re.escape(u) + r'(?:e?s)?\b', name.casefold()) and u not in title.casefold() for u in UNWANTED):
             continue
+        # "(Laura Les Remix)" for "(Remix)": someone else's remix is another version.
+        if any(set(words(re.sub(r'\b(?:feat|ft|featuring)\b.*', '', inside, flags=re.I))) - wanted - FILLER - {'remix', 'rmx'}
+               for inside in re.findall(r'[\(\[]([^\)\]]*\b(?:remix|rmx)\b[^\)\]]*)[\)\]]', name, flags=re.I)):
+            continue
         # Brackets ("(feat. X)", "[320]") and the track number aside, the name is the title and
-        # perhaps the artist: "Sauna Time" is another song.
-        bare = words(re.sub(r'\s*[\(\[].*?[\)\]]', '', name))
-        extra = [w for w in bare if not w.isdigit() and w not in FILLER and not any(close(w, t) for t in title_words + artist_words)]
+        # perhaps the artist and album: "Sauna Time" is another song. A part before " - " that
+        # names the artist is credits ("100 gecs feat. Fall Out Boy, … - hand crushed by a mallet").
+        parts = re.sub(r'\s*[\(\[].*?[\)\]]', '', name).split(' - ')
+        parts = [part for n, part in enumerate(parts) if n == len(parts) - 1
+                 or not artist_words or not all(any(close(a, w) for w in words(part)) for a in artist_words)]
+        bare = words(' - '.join(parts))
+        extra = [w for w in bare if not w.isdigit() and w not in FILLER and w not in album_words
+                 and not any(close(w, t) for t in title_words + artist_words)]
         if len(extra) > (1 if len(title_words) >= 4 else 0):
             continue
         scored.append((len(extra), c))
@@ -367,6 +387,23 @@ def pick_youtube(results, album, artist):
         if not best or s > best[0]:
             best = (s, c)
     return best or (None, None)
+
+
+TRACK_NUMBER = re.compile(r"^(?:.*?\s-\s)?\d{1,3}(?:\s*[.\-_]\s*|\s+)(?=\D)")
+
+
+def relevance(c, query):
+    """How well a result answers a search: the share of the searched words its path or names
+    contain, and the share in its own name (a folder, or the song after its track number). Soulseek
+    answers with files that hold any of the words anywhere, so most of what it returns is another song."""
+    wanted = {w for w in words(query) if w not in FILLER} or set(words(query))
+    if not wanted:
+        return 1, 1
+    found = set(words(" ".join(str(c.get(k) or "") for k in ("filename", "directory", "title", "artist", "album", "uploader"))))
+    share = sum(w in found or any(close(w, f) for f in found) for w in wanted) / len(wanted)
+    name = wanted & set(words(c.get("leaf_folder") or TRACK_NUMBER.sub("", str(c.get("title") or ""), count=1)))
+    # None of the words in its own name: another track of a folder that has them.
+    return round(share if name else share / 2, 2), round(len(name) / len(wanted), 2)
 
 
 def quality(c):

@@ -32,6 +32,7 @@ UPGRADE_EVERY = 7 * DAY        # a lossy album or track: look for a better copy 
 UPGRADE_FOR = 28 * DAY         # ...for this long after it arrived
 LOSSLESS = 3                   # matching.quality of a lossless copy
 MAX_ALBUM_FILES = 60           # a bigger Soulseek folder is a collection, not one album
+MAX_TRIED = 16                 # copies tried before a request gives up, over its search and the one that follows
 YOUTUBE_TITLE_FLOOR = 0.2      # 2026-10-09: right albums scored 0.23 and 0.40, same-titled ones by others 0.03-0.18
 ACTIVE = ("queued", "downloading", "process_queued", "processing", "publish_queued", "publishing")
 DONE = ("not_found", "gave_up", "skipped")
@@ -61,6 +62,18 @@ def soulseek_queries(album, artist, year=None):
               f"{name} {year}" if year and len(matching.key(name)) < 5 else None]
     # The app cleans queries the same way; skip rungs that would send an identical search.
     return list({soulseek_query(q): q for q in reversed([q for q in ladder if q]) if soulseek_query(q)}.values())[::-1]
+
+
+def avoided(item):
+    """Uploaders not to ask again: every copy turned down, and those whose download failed since the
+    last retry (a retry gives peers that were offline or busy another chance)."""
+    since = item.get("retried_at") or 0
+    return {t["provider"] for t in item.get("tried", []) if t.get("outcome") != "failed" or (t.get("at") or 0) >= since}
+
+
+def tries(item):
+    since = item.get("retried_at") or 0
+    return sum(1 for t in item.get("tried", []) if (t.get("at") or 0) >= since)
 
 
 def link_candidate(url, kind):
@@ -131,8 +144,8 @@ class Wishlist:
         return item
 
     def retry(self, item):
-        item.update(status="wanted", next_search_at=0, candidates=[], searched_at=None,
-                    note="Retry requested; searching again")
+        item.update(status="wanted", next_search_at=0, candidates=[], searched_at=None, searched_again=False,
+                    retried_at=self.clock(), note="Retry requested; searching again")
         if item.get("kind") == "link":
             item.update(tried=[], candidates=[link_candidate(item["url"], item.get("link_kind", "track"))])
         self.save(item)
@@ -287,7 +300,7 @@ class Wishlist:
     def _next(self, item, jobs, upgrade=False):
         """Try the best untried copy; when the list runs out, the request is missing."""
         now = self.clock()
-        tried = {t["provider"] for t in item["tried"]}
+        tried = avoided(item)
         untried = [c for c in item["candidates"] if (item["kind"] == "link" or matching.provider(c) not in tried)
                    and self._allowed(item, c)]
         if upgrade:
@@ -312,8 +325,11 @@ class Wishlist:
                     item.update(note="Waiting: YouTube is paused")
                     self.save(item)
                 return
-            self._exhausted(item, upgrade, "Your pick failed" if item.get("pinned") else "All copies failed")
-            return
+            if upgrade or item.get("pinned") or item.get("searched_again") or tries(item) >= MAX_TRIED:
+                self._exhausted(item, upgrade, "Your pick failed" if item.get("pinned") else "All copies failed")
+                return
+            # The listed copies all failed: one more search, without the uploaders already tried.
+            item.update(candidates=[], searched_again=True)
         if (upgrade and now < item.get("next_search_at", 0)) or self._searches_left <= 0:
             return
         self._searches_left -= 1
@@ -364,8 +380,8 @@ class Wishlist:
             return [link_candidate(item["url"], item.get("link_kind", "track"))]
         if not self.soulseek_ready():
             return None
-        album, artist, year, title = item["album"], item["artist"], item.get("year"), item.get("title", "")
-        avoid = {t["provider"] for t in item["tried"]}
+        album, artist, year, title = item["album"], item["artist"], item.get("year"), matching.unmixed(item.get("title", ""))
+        avoid = avoided(item)
         first = search_artist(artist)
         track = item["kind"] == "track"
 
@@ -376,7 +392,7 @@ class Wishlist:
             for query in filter(None, queries):
                 found = self.sources().search(query, "soulseek", item["kind"])
                 results += found   # the model may accept folders the rules would not: keep every step's results
-                if (matching.ranked_tracks(found, artist, title, avoid) if track else matching.ranked(found, album, artist, avoid)):
+                if (matching.ranked_tracks(found, artist, title, avoid, album=album) if track else matching.ranked(found, album, artist, avoid)):
                     break
             return results
 
@@ -419,8 +435,42 @@ class Wishlist:
                     return None
                 log.info("Request %s: %s search failed: %s", item["id"], source, str(exc)[:200])
         if track:
-            return matching.ranked_tracks(results, artist, title, avoid)
+            return self._rank_track(item, results, avoid, title)
         return self._rank(item, results, avoid)
+
+    def _rank_track(self, item, results, avoid, title):
+        """The model decides which files are the song; code keeps the facts (quality floor, uploaders
+        tried) and orders the matches by quality and availability. Without a usable answer from the
+        model, the matching rules decide."""
+        artist, album = item["artist"], item.get("album") or ""
+        pool = [c for c in results if c.get("kind") == "track" and matching.quality(c) is not None
+                and matching.provider(c) not in avoid]
+        if not (self.judge and pool):
+            return matching.ranked_tracks(results, artist, title, avoid, album=album)
+        # The files naming most of the request first, one per uploader, so a flood of other songs
+        # cannot push them past what the model sees.
+        wanted = set(matching.words(title)) | set(matching.words(artist))
+        def named(c):
+            leaf = str(c.get("filename") or "").replace("\\", "/").rsplit("/", 1)[-1] or str(c.get("title") or "")
+            return len(wanted & set(matching.words(leaf)))
+        pool.sort(key=lambda c: (-named(c), -matching.quality(c)) + matching.availability(c))
+        seen = set()
+        pool = [c for c in pool if not (matching.provider(c) in seen or seen.add(matching.provider(c)))]
+        if album and "tracklist" not in item:
+            item["tracklist"] = self.tracklist(item) or None
+        reference = item.get("tracklist")
+        if reference and not any(matching.track_key(t) == matching.track_key(title) for t, _ in reference.get("tracks") or []):
+            album, reference = "", None   # the song is not on that album: a hint that would only mislead
+        verdicts = self.judge.track_verdicts(artist, title, pool, album, reference)
+        if verdicts is None:
+            return matching.ranked_tracks(results, artist, title, avoid, album=album)
+        shown = pool[:len(verdicts)]
+        item["rejected"] = [{"source": c.get("source"), "name": c.get("filename") or c.get("title"),
+                             "problem": verdicts[n]["problem"], "reason": verdicts[n]["reason"]}
+                            for n, c in enumerate(shown) if not verdicts[n]["match"]][:8]
+        best = sorted((n for n in range(len(shown)) if verdicts[n]["match"]),
+                      key=lambda n: (-matching.quality(shown[n]),) + matching.availability(shown[n]))
+        return [{**shown[n], "judged": "model", "reason": verdicts[n]["reason"]} for n in best[:8]]
 
     def _rank(self, item, results, avoid):
         """The model decides which results are the album; code orders them by quality and source.
@@ -587,7 +637,7 @@ class Wishlist:
     def detail(self, item, jobs=None):
         """One request with every copy it found, for whoever chooses: the matching model's reasons,
         the files in each copy, what was tried and what the model turned down."""
-        tried = {t["provider"] for t in item.get("tried", [])}
+        tried = avoided(item)
         copies = []
         for c in item.get("candidates", []):
             files = [{"name": str(f.get("filename") or "").replace("\\", "/").rsplit("/", 1)[-1], "size": f.get("size"),

@@ -723,3 +723,66 @@ def test_a_very_long_uploaded_file_name_is_shortened_when_staged():
     name = _staged_name(4, long)
     assert name.startswith("005-05 - Flume") and name.endswith(".flac") and len(name.encode()) <= 230
     assert _staged_name(0, "a\\\\01 Song.mp3") == "001-01 Song.mp3"
+
+
+class FakeLinks:
+    pages = {}
+
+    def __init__(self, options):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def extract_info(self, url, download=False):
+        return self.pages[url]
+
+
+def test_a_spotify_link_is_read_from_its_public_embed_page(monkeypatch):
+    import json, httpx, pytest
+    from app import sources
+    entity = {"type": "album", "name": "Emotion", "subtitle": "Carly Rae Jepsen", "artists": [], "trackList": [
+        {"title": "Run Away With Me", "subtitle": "Carly Rae Jepsen", "duration": 251320},
+        {"title": "Boy Problems", "subtitle": "Carly Rae Jepsen,\xa0Someone", "duration": 197346}]}
+    page = ('<script id="__NEXT_DATA__" type="application/json">'
+            + json.dumps({"props": {"pageProps": {"state": {"data": {"entity": entity}}}}}) + "</script>")
+    asked = []
+    monkeypatch.setattr(sources.httpx, "get", lambda url, **kw: asked.append(url) or httpx.Response(200, text=page, request=httpx.Request("GET", url)))
+    found = Sources({}).identify_link("https://open.spotify.com/intl-es/album/1DFixLWuPkv3KT3TnV35m3?si=x")
+    assert asked == ["https://open.spotify.com/embed/album/1DFixLWuPkv3KT3TnV35m3"]
+    assert (found["kind"], found["artist"], found["album"], found["downloadable"]) == ("album", "Carly Rae Jepsen", "Emotion", False)
+    assert found["tracks"][1] == {"title": "Boy Problems", "artist": "Carly Rae Jepsen", "duration": 197.346}
+    for url in ["https://open.spotify.com/artist/1DFixLWuPkv3KT3TnV35m3", "https://example.com/track/1"]:
+        with pytest.raises(SourceError):
+            Sources({}).identify_link(url)
+
+
+def test_video_titles_album_pages_and_playlists_give_artist_and_title(monkeypatch):
+    FakeLinks.pages = {
+        "https://www.youtube.com/watch?v=dQw4w9WgXcQ": {
+            "title": "Rick Astley - Never Gonna Give You Up (Official Video) (4K Remaster)", "channel": "Rick Astley", "duration": 213},
+        "https://burial.bandcamp.com/album/untrue": {
+            "_type": "playlist", "extractor_key": "BandcampAlbum", "title": "Untrue", "playlist_count": 2,
+            "entries": [{"title": "Archangel"}, {"title": "Near Dark - Edit"}]},
+        "https://www.youtube.com/playlist?list=PLmix": {
+            "_type": "playlist", "extractor_key": "YoutubeTab", "title": "Night bus",
+            "entries": [{"title": "Burial - Archangel [HD]", "channel": "someone"}, {"title": "Kode9", "channel": "Hyperdub - Topic"}]},
+        "https://burial.bandcamp.com/": {"_type": "playlist", "extractor_key": "BandcampUser", "entries": [{}]},
+    }
+    monkeypatch.setattr("app.sources.yt_dlp.YoutubeDL", FakeLinks)
+    monkeypatch.setattr(Sources, "_bandcamp_artist", staticmethod(lambda url: "Burial"))
+    video = Sources({}).identify_link("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+    assert (video["provider"], video["kind"], video["artist"], video["title"]) == ("YouTube", "track", "Rick Astley", "Never Gonna Give You Up")
+    album = Sources({}).identify_link("https://burial.bandcamp.com/album/untrue")
+    assert (album["kind"], album["artist"], album["album"], album["track_count"]) == ("album", "Burial", "Untrue", 2)
+    assert [(t["artist"], t["title"]) for t in album["tracks"]] == [("Burial", "Archangel"), ("Burial", "Near Dark - Edit")]
+    mix = Sources({}).identify_link("https://www.youtube.com/playlist?list=PLmix")
+    assert mix["kind"] == "playlist" and [(t["artist"], t["title"]) for t in mix["tracks"]] == [("Burial", "Archangel"), ("Hyperdub", "Kode9")]
+    import pytest
+    with pytest.raises(SourceError, match="artist page"):
+        Sources({}).identify_link("https://burial.bandcamp.com/")
+    with pytest.raises(SourceError, match="paused"):
+        Sources({"youtube_enabled": False}).identify_link("https://www.youtube.com/watch?v=dQw4w9WgXcQ")

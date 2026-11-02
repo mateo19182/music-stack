@@ -1,0 +1,15 @@
+[Unit]
+Description=Concert alerts for music-stack library artists
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/services/music-stack/concerts
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/services/music-stack/concerts/.venv/bin/python -m concert_alerts sync
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+# Dry-run by default. Add --send only after reviewing a real event report.
+

@@ -1233,3 +1233,40 @@ def test_saved_tracks_can_bring_their_whole_album(backend, monkeypatch):
     assert main.store.get("wishlist", sly) is None and main.store.get("wishlist", vein) is None
     assert main.store.get("wishlist", other)["status"] == "suggested"
     assert main.store.get("wishlist", single)["status"] == "wanted"   # no album named: the track itself
+
+
+def test_search_results_with_every_searched_word_come_first(backend, monkeypatch):
+    main, client = backend
+    signin(main, client, monkeypatch)
+    found = [{"id": "a", "source": "soulseek", "kind": "track", "title": "Lies", "filename": "Local H\\Lies.mp3", "format": "mp3", "bitrate": 320, "free_slots": True},
+             {"id": "b", "source": "soulseek", "kind": "track", "title": "01 Good Lies", "filename": "Overmono\\Good Lies\\01 Good Lies.mp3", "format": "mp3", "bitrate": 320, "free_slots": True},
+             {"id": "c", "source": "soulseek", "kind": "track", "title": "01 Good Lies", "filename": "Overmono\\Good Lies\\01 Good Lies.flac", "format": "flac", "free_slots": False, "queue_length": 3},
+             {"id": "d", "source": "soulseek", "kind": "track", "title": "02 Feelings Plain", "filename": "Overmono\\Good Lies\\02 Feelings Plain.flac", "format": "flac", "free_slots": True}]
+    monkeypatch.setattr(main.Sources, "search", lambda self, query, source, kind: [dict(c) for c in found])
+    id = client.post("/api/search", json={"query": "Overmono - Good Lies"}).json()["id"]
+    for _ in range(100):
+        record = client.get(f"/api/search/{id}").json()
+        if record["status"] != "searching":
+            break
+        time.sleep(0.02)
+    assert [(r["filename"].split("\\")[-1], r["match"]) for r in record["results"]] == [
+        ("01 Good Lies.flac", 1), ("01 Good Lies.mp3", 1), ("02 Feelings Plain.flac", 0.5), ("Lies.mp3", 0.33)]
+
+
+def test_a_playlist_link_requests_each_track_and_links_are_read(backend, monkeypatch):
+    main, client = backend
+    signin(main, client, monkeypatch)
+    body = {"list": "Night bus", "items": [{"kind": "track", "artist": "Burial", "title": "Archangel"}, {"kind": "track", "artist": "Kode9", "title": "9 Samurai"}]}
+    assert client.post("/api/requests/import", json=body).json() == {"count": 2}
+    items = client.get("/api/requests").json()["items"]
+    assert sorted((i["kind"], i["name"], i["list"], i["status"]) for i in items) == [
+        ("track", "9 Samurai", "Night bus", "wanted"), ("track", "Archangel", "Night bus", "wanted")]
+    assert client.post("/api/requests/import", json={"list": "x", "items": [{"kind": "link", "artist": "a"}]}).status_code == 400
+
+    def identify(self, url):
+        if "spotify" not in url:
+            raise main.SourceError("Paste a Spotify, YouTube, Bandcamp or SoundCloud link.")
+        return {"kind": "track", "artist": "Burial", "title": "Archangel", "url": url}
+    monkeypatch.setattr(main.Sources, "identify_link", identify)
+    assert client.post("/api/links", json={"url": "https://open.spotify.com/track/x"}).json()["artist"] == "Burial"
+    assert client.post("/api/links", json={"url": "https://example.com"}).json()["detail"].startswith("Paste a Spotify")

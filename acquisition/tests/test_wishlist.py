@@ -220,6 +220,74 @@ class WishlistTests(unittest.TestCase):
         self.assertTrue(self.queued[-1]["premium_only"])
         self.assertNotIn("torrent", {s for _, s in sources.calls})
 
+    def test_a_track_request_skips_other_remixers_and_reads_credits_and_album_in_names(self):
+        def file(user, name, duration=175):
+            return {"id": f"s-{user}", "source": "soulseek", "kind": "track", "username": user, "free_slots": True,
+                    "filename": f"music\\100 gecs\\{name}.flac", "format": "flac", "duration": duration}
+        title = "hand crushed by a mallet (Remix) [feat. Fall Out Boy, Craig Owens, Nicole Dollanganger]"
+        found = [file("laura", "49 - 100 gecs - hand crushed by a mallet (Laura Les Remix)", 91),
+                 file("nothankyou", "14 hand crushed by a mallet (N0thanky0u Remix)", 160),
+                 file("credits", "100 gecs feat. Fall Out Boy, Craig Owens & Nicole Dollanganger - hand crushed by a mallet (remix)"),
+                 file("album", "100 gecs - 1000 gecs and The Tree of Clues - 05 - hand crushed by a mallet (remix)"),
+                 file("plain", "05 hand crushed by a mallet (Remix)"), file("original", "09 hand crushed by a mallet", 126)]
+        kept = matching.ranked_tracks(found, "100 gecs", title, album="1000 gecs and The Tree of Clues")
+        self.assertEqual({c["username"] for c in kept}, {"credits", "album", "plain"})
+        named = matching.ranked_tracks(found, "100 gecs", "hand crushed by a mallet (Laura Les Remix)")
+        self.assertEqual([c["username"] for c in named], ["laura"])
+        # Credits before " - " are not the title; another song's words still are.
+        pantha = [file("p", "Screama, Asher, Tez Kidd, DJ Pantha, Speckz - Badmans Of Bassline (Original Mix)", 339),
+                  file("q", "DJ Pantha - Badmans Of Bassline Megamix", 339)]
+        self.assertEqual([c["username"] for c in matching.ranked_tracks(pantha, "DJ Pantha", "Badmans Of Bassline")], ["p"])
+
+    def test_a_dj_mix_track_requests_the_song_it_is_cut_from(self):
+        def file(user, name):
+            return {"id": f"s-{user}", "source": "soulseek", "kind": "track", "username": user, "free_slots": True,
+                    "filename": f"music\\Bakey\\Take It Further EP\\{name}.flac", "format": "flac"}
+        sources = FakeSources({"soulseek": [file("full", "01 Bakey - Yeh")]})
+        w = self.wishlist(sources)
+        w.add("mateo", "BAKEY", "Shall Not Fade: Killjoy (DJ Mix)", "Saved tracks", kind="track", title="Yeh - Mixed")
+        w.tick()
+        self.assertEqual(sources.calls[0], ("BAKEY Yeh", "soulseek"))
+        self.assertEqual(self.queued[-1]["username"], "full")
+        self.assertEqual(matching.unmixed("Yeh (Mixed)"), "Yeh")
+        self.assertEqual(matching.unmixed("Mixed"), "Mixed")
+
+    def test_when_every_listed_copy_fails_one_more_search_skips_the_uploaders_tried(self):
+        sources = FakeSources({"soulseek": [slsk("a")]})
+        w = self.wishlist(sources)
+        item = w.add("mateo", "Moor Mother", "Jazz Codes")
+        w.tick()
+        sources.results["soulseek"] = [slsk("a"), slsk("b")]
+        self.finish(item["id"], "failed", failed_stage="download", error="x", progress=0)
+        w.tick()
+        self.assertEqual(self.queued[-1]["username"], "b")
+        calls = len(sources.calls)
+        sources.results["soulseek"] = [slsk("a"), slsk("b"), slsk("c")]
+        self.finish(item["id"], "failed", failed_stage="download", error="x", progress=0)
+        w.tick()
+        self.assertEqual(len(sources.calls), calls)   # once only
+        self.assertEqual(self.store.get("wishlist", item["id"])["status"], "gave_up")
+
+    def test_a_retry_asks_failed_uploaders_again_but_not_rejected_copies(self):
+        sources = FakeSources({"soulseek": [slsk("busy"), slsk("wrong", "mp3", 320)]})
+        w = self.wishlist(sources)
+        item = w.add("mateo", "Moor Mother", "Jazz Codes")
+        w.tick()
+        self.finish(item["id"], "failed", failed_stage="download", error="did not start sending", progress=0)
+        w.tick()
+        self.finish(item["id"], "rejected")
+        w.tick()
+        self.assertEqual(self.store.get("wishlist", item["id"])["status"], "gave_up")
+        self.clock[0] += 60
+        w.retry(self.store.get("wishlist", item["id"]))
+        w.tick()
+        self.assertEqual(self.queued[-1]["username"], "busy")
+        self.finish(item["id"], "failed", failed_stage="download", error="did not start sending", progress=0)
+        w.tick()
+        w.tick()
+        self.assertEqual(self.store.get("wishlist", item["id"])["status"], "gave_up")
+        self.assertEqual([c["username"] for c in self.queued], ["busy", "wrong", "busy"])
+
     def test_a_link_is_downloaded_as_given_once(self):
         w = self.wishlist(FakeSources({}))
         item = w.add("mateo", "", list_name="Requests", kind="link", url="https://youtu.be/dQw4w9WgXcQ", link_kind="track")
@@ -331,6 +399,10 @@ class FakeJudge:
             return None
         return {n: {"match": matching.provider(c) in self.accept, "problem": "none" if matching.provider(c) in self.accept
                     else "other_record", "reason": "test"} for n, c in enumerate(candidates)}
+
+    def track_verdicts(self, artist, title, candidates, album=None, tracklist=None):
+        self.track_request = (title, album, tracklist)
+        return self.verdicts(artist, album, candidates)
 
 
 
@@ -532,3 +604,46 @@ def test_a_held_request_with_a_picked_result_or_a_link_needs_no_choice(tmp_path)
     w.add("mateo", "", "", kind="link", url="https://youtu.be/dQw4w9WgXcQ", link_kind="track", hold=True)
     w.tick()
     assert sorted(c["source"] for c in queued) == ["soulseek", "youtube"]
+
+
+def track_file(user, name, fmt="flac", bitrate=None, free=True):
+    return {"id": f"s-{user}", "source": "soulseek", "kind": "track", "username": user, "free_slots": free,
+            "filename": f"Music\\100 gecs\\{name}.{fmt}", "format": fmt, "bitrate": bitrate, "duration": 175}
+
+
+def test_the_model_decides_which_files_are_the_song_and_code_orders_them(tmp_path):
+    store, queued = Store(tmp_path / "a.db"), []
+    sources = FakeSources({"soulseek": [track_file("mp3", "hand crushed by a mallet (remix)", "mp3", 320),
+                                        track_file("laura", "hand crushed by a mallet (Laura Les Remix)"),
+                                        track_file("odd", "100 gecs - gecgecgec remix of a mallet"),
+                                        track_file("flac", "05 hand crushed by a mallet (Remix)", free=False),
+                                        track_file("low", "hand crushed by a mallet (remix)", "mp3", 128)]})
+    judge = FakeJudge(accept={"mp3", "flac", "odd"})
+    w = _wishlist(store, sources, judge, queued)
+    w.tracklist = lambda item: {"title": "1000 gecs and The Tree of Clues", "tracks": [("hand crushed by a mallet (Remix)", 175)]}
+    item = w.add("mateo", "100 gecs", "1000 gecs and The Tree of Clues", "Requests", kind="track",
+                 title="hand crushed by a mallet (Remix) [feat. Fall Out Boy]")
+    w.tick()
+    saved = store.get("wishlist", item["id"])
+    # Lossless first (a free slot before a queue), then 320; a 128k is never shown; the file naming least goes last.
+    assert [c["username"] for c in saved["candidates"]] == ["odd", "flac", "mp3"]
+    assert "low" not in judge.seen[0] and judge.seen[0][-1] == "odd"
+    assert saved["candidates"][1]["judged"] == "model" and saved["rejected"][0]["name"].endswith("(Laura Les Remix).flac")
+    assert judge.track_request[1] == "1000 gecs and The Tree of Clues"
+
+
+def test_an_album_the_song_is_not_on_is_left_out_and_rules_decide_without_the_model(tmp_path):
+    store, queued = Store(tmp_path / "a.db"), []
+    sources = FakeSources({"soulseek": [track_file("a", "Vulfpeck - Sauna")]})
+    judge = FakeJudge(accept={"a"})
+    w = _wishlist(store, sources, judge, queued)
+    w.tracklist = lambda item: {"title": "The Beautiful Game", "tracks": [("Animal Spirits", 200)]}
+    w.add("mateo", "Vulfpeck", "The Beautiful Game", "Requests", kind="track", title="Sauna")
+    w.tick()
+    assert judge.track_request == ("Sauna", "", None) and queued[-1]["username"] == "a"
+    store2, queued2 = Store(tmp_path / "b.db"), []
+    w = _wishlist(store2, FakeSources({"soulseek": [track_file("a", "Vulfpeck - Sauna"), track_file("b", "Sauna Time")]}),
+                  FakeJudge(fail=True), queued2)
+    w.add("mateo", "Vulfpeck", "", "Requests", kind="track", title="Sauna")
+    w.tick()
+    assert [c["username"] for c in queued2] == ["a"]

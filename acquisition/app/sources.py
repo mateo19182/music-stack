@@ -7,6 +7,8 @@ from hashlib import sha256
 from pathlib import Path, PureWindowsPath
 from urllib.parse import quote, unquote, urlsplit
 import collections
+import html
+import json
 import re
 import shutil
 import threading
@@ -89,6 +91,9 @@ YOUTUBE_PREMIUM_FORMAT = "774/141"
 PREMIUM_FORMATS = {"774", "141"}
 PREMIUM_PROBE = "https://music.youtube.com/watch?v=lYBUbBu4W08"   # any YouTube Music track
 YOUTUBE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be", "www.youtu.be"}
+SPOTIFY_PATH = re.compile(r"^/(?:intl-[\w-]+/)?(track|album|playlist)/([A-Za-z0-9]{10,40})")
+# "(Official Video)", "[4K Remaster]", "(Lyrics)": words around the song in a video title.
+VIDEO_NOISE = re.compile(r"\s*[(\[][^)\]]*\b(?:official|video|audio|lyrics?|visuali[sz]er|remaster(?:ed)?|hd|4k|hq|mv)\b[^)\]]*[)\]]", re.I)
 
 
 class SourceError(RuntimeError):
@@ -267,6 +272,43 @@ def youtube_url(url):
             or parsed.username or parsed.password or port not in {None, 80, 443}):
         raise SourceError("Paste a YouTube, SoundCloud, Bandcamp or Vimeo URL. Other URL hosts are not supported.")
     return url
+
+
+def _artist_title(title, artist=None, channel=None):
+    """A video title is often "Artist - Song (Official Video)"; the channel names the artist otherwise."""
+    title = VIDEO_NOISE.sub("", str(title or "")).strip()
+    if not artist and " - " in title:
+        artist, title = title.split(" - ", 1)
+    return (artist or str(channel or "").removesuffix(" - Topic")).strip(), title.strip()
+
+
+def _first_credit(artists):
+    return re.split(r",\s*", str(artists or "").replace("\xa0", " "))[0].strip()
+
+
+def spotify_link(url):
+    """What a Spotify link is, read from its public embed page (no account needed)."""
+    parts = urlsplit(url)
+    match = SPOTIFY_PATH.match(parts.path)
+    if parts.hostname != "open.spotify.com" or not match:
+        raise SourceError("Paste a Spotify track, album or playlist link (Share → Copy link).")
+    kind, id = match.groups()
+    try:
+        page = httpx.get(f"https://open.spotify.com/embed/{kind}/{id}", timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+        page.raise_for_status()
+        data = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', page.text, re.S)
+        entity = json.loads(data.group(1))["props"]["pageProps"]["state"]["data"]["entity"]
+    except (httpx.HTTPError, AttributeError, KeyError, ValueError):
+        raise SourceError("Spotify did not say what this link is. Try again or search by name.") from None
+    tracks = [{"title": t.get("title"), "artist": _first_credit(t.get("subtitle")), "duration": (t.get("duration") or 0) / 1000 or None}
+              for t in entity.get("trackList") or []]
+    artists = [a.get("name") for a in entity.get("artists") or [] if a.get("name")]
+    year = str((entity.get("releaseDate") or {}).get("isoString") or "")[:4]
+    title = entity.get("name") or entity.get("title")
+    return {"url": url, "provider": "Spotify", "kind": kind, "title": title,
+            "artist": artists[0] if artists else _first_credit(entity.get("subtitle")) if kind == "album" else "",
+            "album": title if kind == "album" else "", "year": int(year) if year.isdigit() else None,
+            "duration": (entity.get("duration") or 0) / 1000 or None, "tracks": tracks, "downloadable": False}
 
 
 def normalize_soulseek(data, kind="track"):
@@ -494,6 +536,61 @@ class Sources:
         except Exception:
             return None
         return any(f.get("format_id") in PREMIUM_FORMATS for f in info.get("formats") or [])
+
+    def identify_link(self, url):
+        """What a pasted link is: kind (track, album or playlist), artist, title and tracks."""
+        host = urlsplit(url).hostname or ""
+        if host == "open.spotify.com":
+            return spotify_link(url)
+        try:
+            url = youtube_url(url)
+        except SourceError:
+            raise SourceError("Paste a Spotify, YouTube, Bandcamp or SoundCloud link.") from None
+        if host in YOUTUBE_HOSTS and not self.config.get("youtube_enabled", True):
+            raise SourceError("YouTube is paused.")
+        single = host.endswith("youtu.be") or "v=" in urlsplit(url).query
+        options = {**self._youtube_options(), "extract_flat": "in_playlist", "skip_download": True,
+                   "noplaylist": single, "playlistend": 300}
+        try:
+            with yt_dlp.YoutubeDL(options) as client:
+                info = client.extract_info(url, download=False) or {}
+        except Exception:
+            raise SourceError("That link could not be read. Check it opens in a browser.") from None
+        extractor = info.get("extractor_key") or ""
+        if extractor == "BandcampUser" or extractor.startswith("YoutubeTab") and not info.get("entries"):
+            raise SourceError("Paste a track, album or playlist link, not an artist page.")
+        provider = next((name for key, name in [("youtube", "YouTube"), ("bandcamp", "Bandcamp"), ("soundcloud", "SoundCloud"),
+                                                 ("vimeo", "Vimeo")] if key in host), host)
+        base = {"url": url, "provider": provider, "year": info.get("release_year"), "downloadable": True}
+        if info.get("_type") != "playlist":
+            artist, title = _artist_title(info.get("track") or info.get("title"), info.get("artist") or (info.get("uploader") if info.get("track") else None),
+                                          info.get("channel") or info.get("uploader"))
+            return {**base, "kind": "track", "title": title, "artist": artist, "album": info.get("album") or "",
+                    "duration": info.get("duration"), "tracks": []}
+        entries = [e for e in info.get("entries") or [] if e]
+        title, artist = info.get("album") or info.get("title") or "", info.get("album_artist") or info.get("artist") or ""
+        album = str(info.get("id", "")).startswith("OLAK5uy_") or info.get("album_type") == "album" or extractor == "BandcampAlbum"
+        if str(info.get("id", "")).startswith("OLAK5uy_"):   # YouTube Music names them "Album - Title"
+            title = title.partition(" - ")[2] or title
+            artist = artist or str((entries[0] if entries else {}).get("channel") or "").removesuffix(" - Topic")
+        if extractor == "BandcampAlbum" and not artist:
+            artist = self._bandcamp_artist(url) or info.get("uploader_id") or ""
+        tracks = [dict(zip(("artist", "title"), _artist_title(e.get("title"), artist if album else None,
+                                                                e.get("channel") or e.get("uploader"))), duration=e.get("duration"))
+                  for e in entries if e.get("title")]
+        return {**base, "kind": "album" if album else "playlist", "title": title, "artist": artist or info.get("uploader") or "",
+                "album": title if album else "", "duration": info.get("duration"), "tracks": tracks,
+                "track_count": info.get("playlist_count") or len(entries)}
+
+    @staticmethod
+    def _bandcamp_artist(url):
+        """Bandcamp album pages say "Untrue, by Burial" in their title; yt-dlp's quick read leaves the artist out."""
+        try:
+            page = httpx.get(url, timeout=15).text
+        except httpx.HTTPError:
+            return ""
+        found = re.search(r'<meta property="og:title" content="[^"]*?, by ([^"]+)"', page)
+        return html.unescape(found.group(1)).strip() if found else ""
 
     def search(self, query, source="all", kind="track"):
         query = query.strip()

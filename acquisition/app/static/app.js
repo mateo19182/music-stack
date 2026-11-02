@@ -16,7 +16,11 @@ const state = {
   searchFormat: "",
   searchQuality: "",
   searchStatus: "complete",
+  searchError: null,
+  searchSource: "all",
+  link: null,
   libraryGeneration: 0,
+  concertsGeneration: 0,
   libraryFiles: {},
   analysisRunning: false,
   reviewSignature: "",
@@ -53,7 +57,9 @@ const sourceLabel = (source) =>
         : String(source || "");
 const duration = (n) =>
   n
-    ? `${Math.floor(n / 60)}:${String(Math.floor(n % 60)).padStart(2, "0")}`
+    ? n >= 3600
+      ? `${Math.floor(n / 3600)} h ${Math.floor((n % 3600) / 60)} min`
+      : `${Math.floor(n / 60)}:${String(Math.floor(n % 60)).padStart(2, "0")}`
     : "";
 const safeLink = (url) => {
   try {
@@ -77,6 +83,7 @@ function loginView() {
   $("#import-existing").hidden = true;
   $("#sharing-settings").hidden = true;
   $("#library-analysis").hidden = true;
+  state.concertsGeneration++;
   state.searchGeneration++;
   state.searchId = null;
   state.reviewDirty = false;
@@ -89,11 +96,14 @@ function loginView() {
   state.reviewerConfigured = false;
   state.queuedCandidates.clear();
   state.results = [];
+  state.link = null;
+  $("#link-card").innerHTML = "";
+  $("#search-results").hidden = true;
   state.searchFormat = "";
   state.searchQuality = "";
   state.jobs = [];
   for (const key of Object.keys(answers)) delete answers[key];
-  for (const id of ["results", "jobs", "reviews", "recent", "library"])
+  for (const id of ["results", "jobs", "reviews", "recent", "library", "concerts"])
     $(`#${id}`).innerHTML = "";
   $("#app").hidden = true;
   $("#login-view").hidden = false;
@@ -211,7 +221,7 @@ async function busy(button, fn) {
 function showTab(tab) {
   if (["review", "inbox"].includes(tab)) tab = "activity";
   state.tab = tab;
-  for (const name of ["search", "activity", "library"]) {
+  for (const name of ["search", "activity", "library", "concerts"]) {
     $(`#${name}-view`).hidden = name !== tab;
     const navButton = $(`nav [data-tab="${name}"]`);
     navButton.classList.toggle("selected", name === tab);
@@ -228,6 +238,7 @@ function showTab(tab) {
       loadAnalysis().catch(() => {});
     }
   }
+  if (tab === "concerts") loadConcerts().catch((e) => toast(e.message, true));
 }
 function meta(items) {
   return `<div class="meta">${items
@@ -293,52 +304,120 @@ function searchLibraryHint(result) {
       "",
     )}${matches.length > 5 ? `<p class="muted">${matches.length - 5} more library matches.</p>` : ""}</details>`;
 }
+const LOSSLESS = new Set(["flac", "alac", "wav", "aiff", "ape", "wv"]);
+const SEARCHING = ["pending", "queued", "running", "searching"];
+function isLossless(r) {
+  return LOSSLESS.has(resultFormat(r));
+}
+function qualityBadge(r) {
+  const format = resultFormat(r).toUpperCase() || "?";
+  if (isLossless(r)) return `<span class="q-badge lossless">${esc(format)}</span>`;
+  const kbps = Number(r.bitrate || 0);
+  return `<span class="q-badge${kbps >= 256 ? " good" : ""}">${esc(format)}${kbps ? ` <small>${kbps}</small>` : ""}</span>`;
+}
+function qualityScore(r) {
+  return isLossless(r) ? 10000 : Number(r.bitrate || 0);
+}
+function availabilityText(r) {
+  if (r.source === "torrent") return r.seeders != null ? `${r.seeders} seeders` : "";
+  if (r.source !== "soulseek") return "";
+  if (r.free_slots) return "Free slot";
+  return r.queue_length ? `Queue ${r.queue_length}` : "Queued";
+}
+function resultFolder(r) {
+  const parts = String(r.directory || r.filename || "").split(/[\\/]/).filter(Boolean);
+  parts.pop();   // the file, or the album folder already shown as the title
+  return parts.slice(r.kind === "album" ? -1 : -2).join(" / ");
+}
+function searchSource(r) {
+  return r.source === "youtube" ? (r.provider === "YouTube Music" ? "YouTube Music" : "YouTube") : sourceLabel(r.source);
+}
+// Copies of one file or folder from different uploaders; "03. A - B" and "03 - A - B" are one name.
+function copyKey(r) {
+  if (r.source !== "soulseek") return r.id;
+  const name = String(r.kind === "album" ? r.leaf_folder || r.album || r.title : r.title || r.filename)
+    .toLowerCase().replace(/^\s*\d{1,3}(?:\s*[.\-_)]\s*|\s+)/, "").replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+  return [r.kind, name, resultFormat(r), r.bitrate || "", r.file_count || 1, Math.round((r.duration || 0) / 5)].join("|");
+}
+function albumLength(r) {
+  const count = r.file_count || r.files?.length || 0;
+  const seconds = (r.files || []).reduce((sum, f) => sum + (Number(f.duration) || 0), 0) || (r.source === "soulseek" ? 0 : r.duration);
+  return [`${count} track${count === 1 ? "" : "s"}`, seconds ? duration(seconds) : ""].filter(Boolean).join(", ");
+}
+function sortResults(results) {
+  const order = {
+    quality: (a, b) => qualityScore(b) - qualityScore(a) || (b.match || 0) - (a.match || 0),
+    availability: (a, b) =>
+      Number(!!b.free_slots) - Number(!!a.free_slots) ||
+      Number(a.queue_length || 0) - Number(b.queue_length || 0) ||
+      qualityScore(b) - qualityScore(a),
+  }[state.searchSort];
+  return order ? [...results].sort(order) : results;
+}
+function groupCopies(results) {
+  const groups = new Map();
+  for (const r of results) {
+    const key = copyKey(r);
+    groups.has(key) ? groups.get(key).push(r) : groups.set(key, [r]);
+  }
+  return [...groups.values()];
+}
+function getButtons(r, primary = true) {
+  const queued = state.queuedCandidates.has(r.id);
+  return `${primary ? quickButton(r) : ""}<button class="${primary ? "" : "quiet"}" data-enqueue="${esc(r.id)}" title="Request this copy. If it fails, the app tries other copies." ${queued ? 'disabled data-queued="true"' : ""}>${queued ? "Requested" : "Get"}</button>`;
+}
+function resultRow([r, ...copies]) {
+  const title = r.kind === "album" ? r.album || r.title : r.title || r.filename;
+  const where = r.source === "soulseek" ? resultFolder(r) : r.uploader || r.provider || "";
+  const files = r.kind === "album" && r.files?.length
+    ? `<details class="source-details"><summary>${esc(r.file_count || r.files.length)} files${r.folder_complete === false ? " listed" : ""}</summary><ul class="file-list">${r.files.map((f) => `<li>${esc(String(f.filename).split(/[\\/]/).pop())} <span class="muted">${esc([duration(f.duration), bytes(f.size)].filter(Boolean).join(" · "))}</span></li>`).join("")}</ul></details>`
+    : "";
+  const more = copies.length
+    ? `<details class="source-details copies"><summary>${copies.length} more ${copies.length === 1 ? "copy" : "copies"}</summary>${copies
+        .map((c) => `<div class="copy-row">${meta([c.username, availabilityText(c), bytes(c.size)])}${getButtons(c, false)}</div>`)
+        .join("")}</details>`
+    : "";
+  return `<article class="result-row${(r.match ?? 1) < 1 ? " weak" : ""}">${qualityBadge(r)}<div class="track-info"><h3>${esc(title || "Untitled")}</h3>${meta([r.artist, r.kind === "album" ? "" : r.album, r.kind === "album" ? albumLength(r) : duration(r.duration), bytes(r.size)])}<div class="meta source-line"><span>${esc(searchSource(r))}${r.username ? ` · ${esc(r.username)}` : ""}</span>${availabilityText(r) ? `<span class="${r.free_slots || r.seeders >= 3 ? "ok" : ""}">${esc(availabilityText(r))}</span>` : ""}${where && where !== r.username ? `<span class="path" title="${esc(r.filename || "")}">${esc(where)}</span>` : ""}</div>${searchLibraryHint(r)}${resultSourceLink(r)}${files}${more}</div><div class="result-actions">${getButtons(r)}</div></article>`;
+}
 function renderResults(data) {
   state.results = data.results || [];
   state.searchStatus = data.status || "complete";
-  const formats = [
-    ...new Set(
-      state.results.flatMap(resultFiles).map(resultFormat).filter(Boolean),
-    ),
-  ].sort();
-  if (state.searchFormat && !formats.includes(state.searchFormat))
-    formats.push(state.searchFormat);
-  const results = state.results.filter((result) =>
-    resultFiles(result).every(
-      (file) =>
-        (!state.searchFormat || resultFormat(file) === state.searchFormat) &&
-        matchesQuality(file, state.searchQuality),
+  if ("error" in data) state.searchError = data.error;
+  $("#search-results").hidden = false;
+  const searching = SEARCHING.includes(state.searchStatus);
+  const formats = [...new Set(state.results.flatMap(resultFiles).map(resultFormat).filter(Boolean))].sort();
+  if (state.searchFormat && !formats.includes(state.searchFormat)) formats.push(state.searchFormat);
+  const shown = sortResults(
+    state.results.filter((r) =>
+      resultFiles(r).every((f) => (!state.searchFormat || resultFormat(f) === state.searchFormat) && matchesQuality(f, state.searchQuality)),
     ),
   );
-  const tools = `<div class="result-tools"><label>File type<select id="result-format"><option value="">All types</option>${formats.map((format) => `<option value="${esc(format)}">${esc(format.toUpperCase())}</option>`).join("")}</select></label><label>Quality<select id="result-quality"><option value="">Any quality</option><option value="lossless">Lossless formats</option><option value="128">128 kbps+ or lossless</option><option value="192">192 kbps+ or lossless</option><option value="256">256 kbps+ or lossless</option><option value="320">320 kbps+ or lossless</option><option value="unknown">Unknown quality</option></select></label><label>Order<select id="result-sort"><option value="relevance">Search order</option><option value="quality">Highest bitrate</option><option value="availability">Available first</option></select></label>${state.searchFormat || state.searchQuality ? '<button class="quiet" id="clear-result-filters">Clear filters</button>' : ""}<span class="muted">Reported quality. Unknown bitrates do not match a minimum.</span></div>`;
-  if (state.searchSort === "quality")
-    results.sort((a, b) => Number(b.bitrate || 0) - Number(a.bitrate || 0));
-  if (state.searchSort === "availability")
-    results.sort(
-      (a, b) =>
-        Number(b.free_slots > 0) - Number(a.free_slots > 0) ||
-        Number(a.queue_length || 0) - Number(b.queue_length || 0),
-    );
-  $("#search-status").textContent =
-    data.status === "failed"
-      ? "Search failed"
-      : `${results.length}${state.searchFormat || state.searchQuality ? ` of ${state.results.length}` : ""} result${state.results.length === 1 ? "" : "s"}${["pending", "queued", "running", "searching"].includes(data.status) ? " · Searching…" : ""}`;
-  $("#results").innerHTML = results.length
-    ? tools +
-      `<div class="result-list">` +
-      results
-        .map(
-          (r) =>
-            `<article class="result-row"><div class="track-info"><h3>${esc(r.title || r.filename || r.album || "Untitled")}</h3>${meta([r.artist, r.album])}${searchLibraryHint(r)}${resultSourceLink(r)}<details class="source-details"><summary>${esc(sourceLabel(r.source))} · ${esc(r.username || r.uploader || r.provider || "Source details")}</summary>${meta([r.provider, r.seeders != null ? `${r.seeders} seeders` : "", r.queue_length != null ? `Queue ${r.queue_length}` : "", r.free_slots != null ? `${r.free_slots} free slots` : "", bytes(r.size)])}${r.folder_complete === false ? '<p class="muted">The full album folder is checked when queued.</p>' : ""}${r.files?.length ? `<ul class="file-list">${r.files.map((f) => `<li>${esc(f.filename)} ${esc(bytes(f.size))}</li>`).join("")}</ul>` : ""}</details></div><div class="quality">${meta([r.format, r.bitrate ? `${r.bitrate} kbps` : "", duration(r.duration)])}${r.files?.length ? `<span class="muted">${esc(r.file_count || r.files.length)} files</span>` : ""}</div>${quickButton(r)}<button class="quiet" data-enqueue="${esc(r.id)}" ${state.queuedCandidates.has(r.id) ? 'disabled data-queued="true"' : ""}>${state.queuedCandidates.has(r.id) ? "Requested" : "Get this"}</button></article>`,
-        )
-        .join("") +
-      "</div>"
-    : tools +
-      `<div class="empty">${state.results.length ? "No results match these filters. Clear them to see all results." : ["pending", "queued", "running", "searching"].includes(data.status) ? "Searching available sources…" : "No results. Try an artist and title, or paste a link."}</div>`;
-  $("#result-sort").value = state.searchSort;
-  $("#result-format").value = state.searchFormat;
-  $("#result-quality").value = state.searchQuality;
-  if (data.error) toast(data.error, true);
+  const strong = groupCopies(shown.filter((r) => (r.match ?? 1) >= 1));
+  const weak = groupCopies(shown.filter((r) => (r.match ?? 1) < 1));
+  const filtered = state.searchFormat || state.searchQuality;
+  const sorts = [["relevance", "Best match"], ["quality", "Best quality"], ["availability", "Fastest"]];
+  const tools = `<div class="result-tools"><div class="segmented" role="group" aria-label="Order">${sorts.map(([value, label]) => `<button type="button" data-result-sort="${value}" aria-pressed="${state.searchSort === value}">${label}</button>`).join("")}</div><label>Quality<select id="result-quality"><option value="">Any</option><option value="lossless">Lossless</option><option value="320">320 kbps+</option><option value="256">256 kbps+</option><option value="192">192 kbps+</option></select></label><label>Type<select id="result-format"><option value="">Any</option>${formats.map((f) => `<option value="${esc(f)}">${esc(f.toUpperCase())}</option>`).join("")}</select></label>${filtered ? '<button class="quiet" id="clear-result-filters">Clear filters</button>' : ""}</div>`;
+  const sources = Object.entries(state.results.reduce((n, r) => ((n[searchSource(r)] = (n[searchSource(r)] || 0) + 1), n), {}));
+  $("#search-status").innerHTML = searching
+    ? `<span class="spinner" aria-hidden="true"></span>Searching${state.searchSource === "youtube" ? "" : "; Soulseek takes about half a minute"}…`
+    : state.searchStatus === "failed"
+      ? `<span class="error">${esc(state.searchError || "Search failed. Try again.")}</span>`
+      : esc(`${strong.length} match${strong.length === 1 ? "" : "es"}${weak.length ? `, ${weak.length} partial` : ""}${sources.length ? ` · ${sources.map(([s, n]) => `${s} ${n}`).join(", ")}` : ""}${filtered ? ` · ${shown.length} of ${state.results.length} files shown` : ""}`);
+  const warning = state.searchStatus !== "failed" && state.searchError ? `<p class="error">${esc(state.searchError)}</p>` : "";
+  const list = (groups) => `<div class="result-list">${groups.map(resultRow).join("")}</div>`;
+  $("#results").innerHTML = searching
+    ? ""
+    : warning +
+      (state.results.length ? tools : "") +
+      (strong.length
+        ? list(strong) + (weak.length ? `<details class="weak-results"><summary>${weak.length} partial match${weak.length === 1 ? "" : "es"}: some words you searched are missing</summary>${list(weak)}</details>` : "")
+        : weak.length
+          ? `<p class="muted">No result has every word you searched. Closest first:</p>${list(weak)}`
+          : `<div class="empty">${state.results.length ? "Nothing matches these filters." : "No results. Try fewer words, or the other kind (track or album)."}</div>`);
+  if ($("#result-format")) {
+    $("#result-format").value = state.searchFormat;
+    $("#result-quality").value = state.searchQuality;
+  }
 }
 async function pollSearch(generation) {
   if (
@@ -537,48 +616,153 @@ $("#logout").addEventListener("click", (e) =>
     loginView();
   }),
 );
+const LINK = /^(?:https?:\/\/|www\.|(?:open\.spotify|soundcloud|youtube|music\.youtube|vimeo)\.com\/|youtu\.be\/|[\w-]+\.bandcamp\.com)/i;
+function searchForm() {
+  return formData($("#search-form"));
+}
+async function runSearch() {
+  const input = searchForm();
+  if (!input.query.trim() && !["artist", "title", "album"].some((name) => input[name].trim())) {
+    $("#search-form [name=query]").focus();
+    return;
+  }
+  const generation = ++state.searchGeneration;
+  state.searchSource = input.source;
+  state.searchError = null;
+  renderResults({ results: [], status: "searching" });
+  const data = await api("/api/search", input).catch((error) => {
+    renderResults({ results: [], status: "failed", error: error.message });
+    throw error;
+  });
+  if (generation !== state.searchGeneration) return;
+  state.searchId = data.id;
+  renderResults(data);
+  if (SEARCHING.includes(data.status)) setTimeout(() => pollSearch(generation), 1500);
+}
+async function readLink(text) {
+  const url = /^https?:\/\//i.test(text) ? text : `https://${text}`;
+  state.searchGeneration++;
+  state.link = null;
+  $("#search-results").hidden = true;
+  $("#link-card").innerHTML = `<div class="link-card"><p class="muted"><span class="spinner" aria-hidden="true"></span>Reading the link…</p></div>`;
+  try {
+    state.link = { ...(await api("/api/links", { url })), requested: {} };
+    renderLink();
+  } catch (e) {
+    $("#link-card").innerHTML = `<div class="link-card"><p class="error">${esc(e.message)}</p></div>`;
+  }
+}
+function linkTracks() {
+  return [...document.querySelectorAll("[data-link-track]:checked")].map((box) => state.link.tracks[Number(box.dataset.linkTrack)]);
+}
+function renderLink() {
+  const l = state.link;
+  if (!l) return ($("#link-card").innerHTML = "");
+  const playlist = l.kind === "playlist";
+  const count = l.track_count || l.tracks.length;
+  const total = l.tracks.reduce((sum, t) => sum + (t.duration || 0), 0) || l.duration;
+  const done = (key, label) => (l.requested[key] ? `<button disabled>${label === "Download as is" ? "Downloading" : "Requested"}</button>` : "");
+  const action = (key, label, attrs, quiet = false) => done(key, label) || `<button type="button" class="${quiet ? "quiet" : ""}" ${attrs}>${esc(label)}</button>`;
+  const fields = playlist
+    ? ""
+    : `<div class="options link-fields"><label class="grow">Artist<input id="link-artist" value="${esc(l.artist)}" /></label><label class="grow">${l.kind === "album" ? "Album" : "Title"}<input id="link-name" value="${esc(l.kind === "album" ? l.album || l.title : l.title)}" /></label></div>`;
+  const tracks = l.tracks.length
+    ? playlist
+      ? `<div class="link-tracks"><label class="checkbox"><input type="checkbox" id="link-all" checked />All ${l.tracks.length} tracks</label><ol>${l.tracks.map((t, i) => `<li><label class="checkbox"><input type="checkbox" data-link-track="${i}" checked /><span>${esc(t.artist)} · ${esc(t.title)}</span><span class="muted">${esc(duration(t.duration))}</span></label></li>`).join("")}</ol></div>`
+      : `<details class="link-tracks"><summary>${l.tracks.length} tracks</summary><ol>${l.tracks.map((t) => `<li>${esc(t.title)} <span class="muted">${esc(duration(t.duration))}</span></li>`).join("")}</ol></details>`
+    : "";
+  const selected = playlist ? linkTracks().length || (document.querySelector("[data-link-track]") ? 0 : l.tracks.length) : 0;
+  const actions = playlist
+    ? (l.tracks.length ? action("tracks", `Find best copies of ${selected} track${selected === 1 ? "" : "s"}`, `data-link="tracks" ${selected ? "" : "disabled"}`) : "")
+    : action("best", "Find best copy", 'data-link="best" title="The app searches every source and takes the best copy, lossless first."') +
+      action("search", "See copies", 'data-link="search" title="Search with these names and choose a copy yourself."', true);
+  $("#link-card").innerHTML = `<article class="link-card"><div class="link-head"><span class="badge">${esc(l.provider)} · ${esc({ track: "Track", album: "Album", playlist: "Playlist" }[l.kind])}</span><button type="button" class="quiet" data-link="close" aria-label="Close link">✕</button></div><h2>${esc(l.title || "Untitled")}</h2>${meta([playlist ? "" : l.artist, l.year, count > 1 ? `${count} tracks` : "", duration(total)])}${fields}${tracks}<div class="actions">${actions}${l.downloadable ? action("as-is", "Download as is", `data-link="as-is" title="Download exactly this ${l.kind} from ${esc(l.provider)} (usually lossy)."`, true) : ""}${Object.keys(l.requested).length ? '<button type="button" class="link" data-tab="activity">Follow it in Requests →</button>' : ""}</div>${playlist && l.tracks.length ? `<p class="muted">Each track becomes a request in the list “${esc(l.title.slice(0, 120))}”.</p>` : ""}</article>`;
+}
+async function linkAction(button) {
+  const l = state.link;
+  const which = button.dataset.link;
+  if (which === "close") {
+    state.link = null;
+    $("#search-form [name=query]").value = "";
+    queryIsLink();
+    return renderLink();
+  }
+  const artist = $("#link-artist")?.value.trim() || l.artist;
+  const name = $("#link-name")?.value.trim() || l.title;
+  if (which === "search") {
+    const field = (name) => $(`#search-form [name=${name}]`);
+    showPrecise(true);
+    field("query").value = "";
+    queryIsLink();
+    field("artist").value = artist;
+    field("title").value = l.kind === "album" ? "" : name;
+    field("album").value = l.kind === "album" ? name : l.album || "";
+    $(`#search-form [name=kind][value=${l.kind === "album" ? "album" : "track"}]`).checked = true;
+    return runSearch();
+  }
+  if (which === "best")
+    await api("/api/requests", l.kind === "album" ? { kind: "album", artist, album: name } : { kind: "track", artist, title: name, album: l.album || "" });
+  else if (which === "tracks") {
+    const items = linkTracks().map((t) => ({ kind: "track", artist: t.artist, title: t.title }));
+    for (let i = 0; i < items.length; i += 500)
+      await api("/api/requests/import", { list: l.title.slice(0, 120) || "Requests", items: items.slice(i, i + 500) });
+  } else await api("/api/requests", { kind: "link", url: l.url, link_kind: l.kind === "track" ? "track" : "album" });
+  l.requested[which] = true;
+  toast(which === "as-is" ? "Downloading the link as given." : "Requested. The app looks for the best copy.");
+  renderLink();
+}
+function showPrecise(open) {
+  $("#search-form .precise").hidden = !open;
+  $("#precise-toggle").setAttribute("aria-expanded", open);
+  $("#precise-toggle").textContent = open ? "One search box" : "Artist and title separately";
+  if (!open) for (const name of ["artist", "title", "album"]) $(`#search-form [name=${name}]`).value = "";
+}
 $("#search-form").addEventListener("submit", (e) => {
   e.preventDefault();
-  busy(e.submitter, async () => {
-    const input = formData(e.target);
-    if (/^https?:\/\//i.test(input.query.trim())) {
-      await api("/api/requests", { kind: "link", url: input.query.trim(), link_kind: input.kind });
-      toast("Link requested.");
-      showTab("activity");
-      return;
-    }
-    const generation = ++state.searchGeneration;
-    $("#search-status").textContent = "Searching…";
-    const data = await api("/api/search", input).catch((error) => {
-      $("#search-status").textContent = "Search failed. Try again.";
-      throw error;
-    });
-    state.searchId = data.id;
-    renderResults(data);
-    if (["pending", "queued", "running", "searching"].includes(data.status))
-      setTimeout(() => pollSearch(generation), 1500);
-  });
+  const query = $("#search-form [name=query]").value.trim();
+  if (LINK.test(query)) return readLink(query);
+  state.link = null;
+  renderLink();
+  busy(e.submitter || $("#search-form button[type=submit]"), runSearch);
 });
-$("#url-form").addEventListener("submit", (e) => {
-  e.preventDefault();
-  busy(e.submitter, async () => {
-    const form = formData(e.target);
-    await api("/api/requests", { kind: "link", url: form.url, link_kind: form.kind });
-    toast("Link requested.");
-    showTab("activity");
-  });
+function queryIsLink() {
+  const link = LINK.test($("#search-form [name=query]").value.trim());
+  $("#search-form button[type=submit]").textContent = link ? "Read link" : "Search";
+  $("#search-form").classList.toggle("has-link", link);
+  return link;
+}
+$("#search-form [name=query]").addEventListener("input", (e) => {
+  // The separate fields name what a result is requested as; a new search in the box replaces them.
+  if (!$("#search-form .precise").hidden) showPrecise(false);
+  if (queryIsLink() && e.inputType === "insertFromPaste") readLink(e.target.value.trim());
+});
+$("#search-form").addEventListener("change", (e) => {
+  if (e.target.name === "source" && e.target.value === "torrent")
+    $("#search-form [name=kind][value=album]").checked = true;
+  if (e.target.name === "kind" && e.target.value === "track" && $("#search-form [name=source][value=torrent]").checked)
+    $("#search-form [name=source][value=all]").checked = true;
+});
+$("#precise-toggle").addEventListener("click", () => showPrecise($("#search-form .precise").hidden));
+$("#link-card").addEventListener("change", (e) => {
+  if (e.target.id === "link-all")
+    document.querySelectorAll("[data-link-track]").forEach((box) => (box.checked = e.target.checked));
+  if (e.target.id === "link-all" || e.target.dataset.linkTrack) {
+    const selected = linkTracks().length;
+    const button = $('#link-card [data-link="tracks"]');
+    if (button) {
+      button.textContent = `Find best copies of ${selected} track${selected === 1 ? "" : "s"}`;
+      button.disabled = !selected;
+    }
+  }
+});
+$("#link-card").addEventListener("click", (e) => {
+  const button = e.target.closest("button[data-link]");
+  if (button) busy(button, () => linkAction(button));
 });
 $("#library-form").addEventListener("submit", (e) => {
   e.preventDefault();
   state.page = 1;
   busy(e.submitter, loadLibrary);
-});
-$("#search-form [name=query]").addEventListener("input", (e) => {
-  $("#search-form button[type=submit]").textContent = /^https?:\/\//i.test(
-    e.target.value.trim(),
-  )
-    ? "Queue link"
-    : "Search";
 });
 let libraryTimer;
 $("#library-form").addEventListener("input", (e) => {
@@ -624,7 +808,6 @@ $("#show-history").addEventListener("change", () =>
 );
 document.addEventListener("change", (e) => {
   const fields = {
-    "result-sort": "searchSort",
     "result-format": "searchFormat",
     "result-quality": "searchQuality",
   };
@@ -642,7 +825,10 @@ document.addEventListener("click", (e) => {
   });
   const button = e.target.closest("button");
   if (!button) return;
-  if (button.id === "clear-result-filters") {
+  if (button.dataset.resultSort) {
+    state.searchSort = button.dataset.resultSort;
+    renderResults({ results: state.results, status: state.searchStatus });
+  } else if (button.id === "clear-result-filters") {
     state.searchFormat = "";
     state.searchQuality = "";
     renderResults({ results: state.results, status: state.searchStatus });
@@ -1789,3 +1975,60 @@ document.addEventListener("click", (e) => {
 setInterval(() => {
   if (state.tab === "activity" && !document.hidden) loadWishlist().catch(() => {});
 }, 20000);
+const CONCERT_STATUS = { offsale: "Not on sale", cancelled: "Cancelled", postponed: "Postponed", rescheduled: "Rescheduled" };
+const concertDay = (value) => {
+  const [y, m, d] = String(value).split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString("en-GB", { timeZone: "UTC", weekday: "short", day: "numeric", month: "short", year: "numeric" });
+};
+const madridTime = (iso) =>
+  iso ? new Date(iso).toLocaleString("en-GB", { timeZone: "Europe/Madrid", weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "";
+function concertRow(e) {
+  const status = ["onsale", "listed"].includes(e.status) ? "" : CONCERT_STATUS[e.status] || e.status;
+  const links = [
+    e.url ? `<a href="${safeLink(e.url)}" target="_blank" rel="noopener noreferrer">Event / tickets ↗</a>` : "",
+    ...e.alternates.map((a) => `<a href="${safeLink(a.url)}" target="_blank" rel="noopener noreferrer">${esc(a.source)} ↗</a>`),
+  ].filter(Boolean).join("");
+  return `<li class="concert-date"><div class="concert-when"><strong>${esc(e.date_unknown ? "Date TBA" : concertDay(e.date))}</strong>${e.time ? `<span>${esc(e.time)}</span>` : ""}</div><div class="concert-where"><div>${e.highlight ? `<span class="concert-star" title="${esc(e.highlight)}">★</span> ` : ""}<strong>${esc(e.city || "Unknown city")}</strong>${e.venue ? ` · ${esc(e.venue)}` : ""}${status ? ` <span class="badge failed">${esc(status)}</span>` : ""}</div>${e.show_title ? `<div class="muted">${esc(e.name)}</div>` : ""}</div><div class="concert-links">${links}<span class="muted">${esc(e.source)}</span></div></li>`;
+}
+function concertCard(g) {
+  const count = g.dates.length;
+  const hidden = g.hidden.length;
+  const info = [g.multi ? "Shared bill" : "", count ? `${count} ${count === 1 ? "date" : "dates"}` : "", hidden ? `${hidden} outside preferred areas` : ""];
+  const more = hidden
+    ? `<details class="concert-hidden"${count ? "" : " open"}><summary>${count ? `Show ${hidden} other ${hidden === 1 ? "date" : "dates"}` : `${hidden} ${hidden === 1 ? "date" : "dates"}, all outside preferred areas`}</summary><ul class="concert-dates">${g.hidden.map(concertRow).join("")}</ul></details>`
+    : "";
+  return `<article class="card concert-card${count ? "" : " concert-collapsed"}"><h3>${esc(g.artists)}${g.title ? ` <span class="muted">— ${esc(g.title)}</span>` : ""}</h3>${meta(info)}${count ? `<ul class="concert-dates">${g.dates.map(concertRow).join("")}</ul>` : ""}${more}</article>`;
+}
+async function loadConcerts() {
+  const generation = ++state.concertsGeneration;
+  const form = formData($("#concerts-form"));
+  const query = new URLSearchParams({ area: form.area, q: form.q.trim(), days: form.days });
+  const data = await api(`/api/concerts?${query}`);
+  if (generation !== state.concertsGeneration) return;
+  const sources = data.sources.map((s) =>
+    s.status === "ok" ? `${s.name}: ok${s.cached ? " (cached)" : ""}` : `${s.name}: unavailable${s.error ? ` (${s.error})` : ""}`);
+  $("#concerts-check").textContent = [
+    data.checked_at ? `Last checked ${madridTime(data.checked_at)}` : "Not checked yet",
+    `next check ${madridTime(data.next_check)} (${data.schedule})`,
+    ...sources,
+  ].join(" · ");
+  $("#concerts-notice").hidden = !data.message;
+  $("#concerts-notice").textContent = data.message || "";
+  const c = data.counts;
+  const limit = data.settings.max_nationwide_dates;
+  $("#concerts-summary").textContent = data.status === "ok" || data.status === "stale"
+    ? [`${c.shown} ${c.shown === 1 ? "date" : "dates"} shown`, c.hidden ? `${c.hidden} hidden` : "",
+       limit ? `artists with more than ${limit} upcoming dates show only Galicia, Madrid and Barcelona; expand a card for the rest` : ""].filter(Boolean).join(" · ")
+    : "";
+  $("#concerts").innerHTML = data.groups.length
+    ? data.groups.map(concertCard).join("") + (data.coverage ? `<p class="muted">${esc(data.coverage)}</p>` : "")
+    : `<p class="empty">${data.status === "ok" || data.status === "stale" ? "No upcoming concerts match these filters." : "No concerts to show."}</p>`;
+}
+let concertsTimer;
+$("#concerts-form").addEventListener("submit", (e) => e.preventDefault());
+$("#concerts-form").addEventListener("change", () => loadConcerts().catch((e) => toast(e.message, true)));
+$("#concerts-form [name=q]").addEventListener("input", () => {
+  clearTimeout(concertsTimer);
+  concertsTimer = setTimeout(() => loadConcerts().catch((e) => toast(e.message, true)), 250);
+});
+$("#refresh-concerts").addEventListener("click", (e) => busy(e.target, loadConcerts));
