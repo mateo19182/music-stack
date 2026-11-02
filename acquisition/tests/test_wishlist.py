@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from app import matching
 from app.store import Store, now, uid
-from app.wishlist import Wishlist, UPGRADE_EVERY, UPGRADE_FOR
+from app.wishlist import Wishlist
 
 
 def slsk(user, fmt="flac", bitrate=None, files=10, folder="Moor Mother - Jazz Codes"):
@@ -113,7 +113,7 @@ class WishlistTests(unittest.TestCase):
         w.tick()
         self.assertEqual(len(sources.calls), calls)
 
-    def test_a_lossy_album_is_upgraded_weekly_for_four_weeks(self):
+    def test_a_lossy_album_is_parked_until_the_owner_searches_all_parked(self):
         sources = FakeSources({"youtube": [yt("Jazz Codes", "Moor Mother - Topic", "OLAK5uy_j", "Moor Mother")]})
         w = self.wishlist(sources)
         item = w.add("mateo", "Moor Mother", "Jazz Codes")
@@ -123,44 +123,51 @@ class WishlistTests(unittest.TestCase):
         w.tick()
         saved = self.store.get("wishlist", item["id"])
         self.assertEqual((saved["status"], saved["quality"]), ("have", 2))
+        self.assertIn("parked", saved["note"])
         calls = len(sources.calls)
-        self.clock[0] += UPGRADE_EVERY - 60
+        self.clock[0] += 60 * 24 * 3600
         w.tick()
-        self.assertEqual(len(sources.calls), calls)   # not before a week
-        # A week later a 320 shows up: no better than Premium YouTube (both 256 kbps and up), so nothing is queued.
+        self.assertEqual(len(sources.calls), calls)   # parked: never searched on its own
+        # A 320 is no better than Premium YouTube (both 256 kbps and up): nothing is queued, and it parks again.
         sources.results["soulseek"] = [slsk("b", "mp3", 320)]
-        self.clock[0] += 60
+        self.assertEqual(w.search_parked("mateo"), (0, 1))
         w.tick()
+        self.assertGreater(len(sources.calls), calls)
         self.assertEqual(len(self.queued), 1)
-        self.assertEqual(self.store.get("wishlist", item["id"])["status"], "have")
-        # The next week a FLAC: queued, and once published the album is lossless.
+        saved = self.store.get("wishlist", item["id"])
+        self.assertEqual((saved["status"], saved["upgrade_wanted"]), ("have", False))
+        calls = len(sources.calls)
+        w.tick()
+        self.assertEqual(len(sources.calls), calls)
+        # The next search all parked finds a FLAC: queued, and once published the album is lossless.
         sources.results["soulseek"] = [slsk("a")]
-        self.clock[0] += UPGRADE_EVERY
+        w.search_parked("mateo")
         w.tick()
         self.assertEqual(self.queued[-1]["username"], "a")
         self.assertEqual(self.store.get("wishlist", item["id"])["status"], "have")
         self.finish(item["id"], "published")
         w.tick()
         saved = self.store.get("wishlist", item["id"])
-        self.assertEqual((saved["quality"], saved["upgrade_until"]), (3, None))
+        self.assertEqual((saved["quality"], saved["upgrade_wanted"]), (3, False))
+        self.assertEqual(w.search_parked("mateo"), (0, 0))   # lossless now: nothing left to look for
 
-    def test_the_upgrade_search_stops_after_four_weeks(self):
-        sources = FakeSources({"youtube": [yt("Jazz Codes", "Moor Mother - Topic", "OLAK5uy_j", "Moor Mother")]})
+    def test_search_all_parked_searches_missing_requests_once_more(self):
+        sources = FakeSources({})
         w = self.wishlist(sources)
         item = w.add("mateo", "Moor Mother", "Jazz Codes")
         w.tick()
-        self.finish(item["id"], "published")
-        w.tick()
-        self.clock[0] += UPGRADE_FOR
-        w.tick()
+        self.assertEqual(self.store.get("wishlist", item["id"])["status"], "not_found")
         calls = len(sources.calls)
-        sources.results["soulseek"] = [slsk("a")]
-        self.clock[0] += UPGRADE_EVERY
+        self.clock[0] += 60 * 24 * 3600
         w.tick()
         self.assertEqual(len(sources.calls), calls)
-        self.assertIn("no better copy", self.store.get("wishlist", item["id"])["note"])
+        sources.results["soulseek"] = [slsk("a")]
+        self.assertEqual(w.search_parked("mateo", "Elsewhere"), (0, 0))   # another list: untouched
+        self.assertEqual(w.search_parked("mateo"), (1, 0))
+        w.tick()
+        self.assertEqual(self.queued[-1]["username"], "a")
 
-    def test_lossy_albums_from_before_join_the_upgrade_search(self):
+    def test_lossy_albums_from_before_are_parked_for_the_lossless_search(self):
         sources = FakeSources({"soulseek": [slsk("a")]})
         w = self.wishlist(sources)
         item = w.add("mateo", "Moor Mother", "Jazz Codes")
@@ -172,8 +179,11 @@ class WishlistTests(unittest.TestCase):
         w.tick()
         saved = self.store.get("wishlist", item["id"])
         self.assertEqual(saved["quality"], 0)
+        self.assertEqual(self.queued, [])
+        w.search_parked("mateo")
+        w.tick()
         self.assertEqual(self.queued[-1]["username"], "a")
-        self.assertEqual(saved["status"], "have")
+        self.assertEqual(self.store.get("wishlist", item["id"])["status"], "have")
 
     def test_albums_in_the_library_before_their_request_get_quality_from_the_files(self):
         sources = FakeSources({"soulseek": [slsk("a")]})
@@ -186,7 +196,9 @@ class WishlistTests(unittest.TestCase):
         w.tick()
         saved = self.store.get("wishlist", item["id"])
         self.assertEqual((saved["status"], saved["quality"]), ("have", 0))
-        self.assertTrue(saved["upgrade_until"])
+        self.assertIn("parked", saved["note"])
+        w.search_parked("mateo")
+        w.tick()
         self.assertEqual(self.queued[-1]["username"], "a")
         self.assertEqual(matching.file_quality("m4a", 987), 3)
         self.assertEqual(matching.file_quality("ogg", 135), 0)
@@ -548,7 +560,7 @@ def test_an_old_youtube_copy_is_upgraded_by_premium_youtube(tmp_path):
                   FakeJudge(fail=True), queued)
     item = w.add("mateo", "Moor Mother", "Jazz Codes")
     saved = store.get("wishlist", item["id"])
-    saved.update(status="have", quality=0, upgrade_until=w.clock() + UPGRADE_FOR, next_search_at=0)
+    saved.update(status="have", quality=0, upgrade_wanted=True)
     w.save(saved)
     w.tick()
     assert queued[-1]["source"] == "youtube" and queued[-1]["premium_only"]

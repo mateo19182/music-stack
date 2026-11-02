@@ -42,23 +42,27 @@ function renderOverview() {
     step("Processing", st.processing, "requests", "progress"),
     step("Review", s.needs_you.reviews, "needs"),
     step("In library", st.have, "requests", "have"),
-  ].join('<span class="arrow" aria-hidden="true">→</span>')}</div><div class="pipeline side">${step("Missing", missing, "requests", "missing", "Searched; nobody had it or every copy failed")}${st.skipped ? step("Skipped", st.skipped, "requests", "skipped") : ""}${s.upgrading ? `<span class="muted">${plural(s.upgrading, "lossy request")} looking for a lossless copy weekly</span>` : ""}</div>`;
+  ].join('<span class="arrow" aria-hidden="true">→</span>')}</div><div class="pipeline side">${step("Parked", missing, "requests", "missing", "Searched once; nobody had it or every copy failed. Searched again only when you search all parked")}${st.skipped ? step("Skipped", st.skipped, "requests", "skipped") : ""}<div class="parked-search"><button class="quiet" data-search-parked="" ${missing || s.lossy ? "" : "disabled"}>Search all parked</button><span class="muted">${[
+    plural(missing, "missing request"),
+    s.lossy ? `${plural(s.lossy, "lossy request")} to look for a lossless copy${s.upgrading ? ` (${s.upgrading.toLocaleString()} searching now)` : ""}` : "",
+    s.parked_searched_at ? `last searched ${relativeTime(s.parked_searched_at)}` : "",
+  ].filter(Boolean).join(" · ")}</span></div></div>`;
   const bar = (l) => {
     const t = l.total || 1;
     const active = WISH_GROUPS.progress.reduce((n, k) => n + l.statuses[k], 0);
     const missing = l.statuses.not_found + l.statuses.gave_up;
     const part = (n, cls, title) => (n ? `<span class="${cls}" data-share="${n / t}" title="${esc(title)}: ${n.toLocaleString()}"></span>` : "");
-    return `<div class="bar">${part(l.statuses.have, "seg-have", "In library")}${part(active, "seg-active", "In progress")}${part(missing, "seg-missing", "Missing")}${part(l.suggested, "seg-todo", "Not requested yet")}</div>`;
+    return `<div class="bar">${part(l.statuses.have, "seg-have", "In library")}${part(active, "seg-active", "In progress")}${part(missing, "seg-missing", "Parked")}${part(l.suggested, "seg-todo", "Not requested yet")}</div>`;
   };
   const num = (n, tab, list, group = "") =>
     n ? `<button class="link" data-tab="${tab}" data-list="${esc(list)}" ${group ? `data-group="${group}"` : ""}>${n.toLocaleString()}</button>` : `<span class="muted">0</span>`;
   $("#overview-lists").innerHTML = s.lists.length
-    ? `<table class="lists"><thead><tr><th>List</th><th class="bar-col"></th><th>In library</th><th>In progress</th><th>Missing</th><th>Not requested yet</th></tr></thead><tbody>${s.lists
+    ? `<table class="lists"><thead><tr><th>List</th><th class="bar-col"></th><th>In library</th><th>In progress</th><th>Parked</th><th>Not requested yet</th></tr></thead><tbody>${s.lists
         .map((l) => {
           const active = WISH_GROUPS.progress.reduce((n, k) => n + l.statuses[k], 0);
           return `<tr><th scope="row">${esc(l.name)}</th><td class="bar-col">${bar(l)}</td><td>${num(l.statuses.have, "requests", l.name, "have")}</td><td>${num(active, "requests", l.name, "progress")}</td><td>${num(l.statuses.not_found + l.statuses.gave_up, "requests", l.name, "missing")}</td><td>${num(l.suggested, "unrequested", l.name)}</td></tr>`;
         })
-        .join("")}</tbody></table><p class="muted legend"><span class="key seg-have"></span>In library <span class="key seg-active"></span>In progress <span class="key seg-missing"></span>Missing <span class="key seg-todo"></span>Not requested yet</p>`
+        .join("")}</tbody></table><p class="muted legend"><span class="key seg-have"></span>In library <span class="key seg-active"></span>In progress <span class="key seg-missing"></span>Parked <span class="key seg-todo"></span>Not requested yet</p>`
     : `<div class="empty">No lists yet.</div>`;
   // The CSP allows no inline style attributes; widths go through the CSSOM.
   for (const part of document.querySelectorAll("#overview-lists [data-share]")) part.style.width = `${100 * part.dataset.share}%`;

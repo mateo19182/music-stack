@@ -1038,7 +1038,7 @@ def test_an_approver_agent_unshares_removes_and_deletes_library_files(backend, m
     assert main.store.get("files", "file")["published"] == 0
 
 
-def test_requests_import_list_retry_skip_and_ownership(backend, monkeypatch):
+def test_requests_import_list_skip_and_ownership(backend, monkeypatch):
     main, client = backend
     signin(main, client, monkeypatch)
     body = {"list": "Blog favorites 2025", "playlist": True, "items": [
@@ -1053,10 +1053,10 @@ def test_requests_import_list_retry_skip_and_ownership(backend, monkeypatch):
     added = client.post("/api/requests", json={"artist": "Puma Blue", "album": "antichamber"}).json()
     assert added["list"] == "Requests" and added["status"] == "wanted" and added["kind"] == "album"
     assert client.post(f"/api/requests/{first}/skip", json={}).status_code == 200
-    assert client.post(f"/api/requests/{first}/retry", json={}).status_code == 200
-    assert main.store.get("wishlist", first)["status"] == "wanted"
+    assert main.store.get("wishlist", first)["status"] == "skipped"
+    assert client.post(f"/api/requests/{first}/retry", json={}).status_code in (404, 405)   # parked requests search again only all at once
     signin(main, client, monkeypatch, name="other")
-    assert client.post(f"/api/requests/{first}/retry", json={}).status_code == 404
+    assert client.post(f"/api/requests/{first}/skip", json={}).status_code == 404
     assert client.post(f"/api/requests/{first}/remove", json={}).status_code == 404
     assert client.get("/api/requests").json()["items"] == []
 
@@ -1255,7 +1255,7 @@ def test_request_summary_counts_statuses_lists_and_what_needs_you(backend, monke
     ids = seed_requests(main)
     main.wishlist.add("other", "Artist", "Elsewhere", "Blog", status="wanted")
     have = main.store.get("wishlist", ids[2])
-    have.update(upgrade_until=time.time() + 60)
+    have.update(quality=1)
     main.wishlist.save(have)
     seed_review(main)
     monkeypatch.setattr(main.Sources, "soulseek_checks", lambda self: [{"username": "peer", "status": "open", "recent": []}])
@@ -1263,7 +1263,8 @@ def test_request_summary_counts_statuses_lists_and_what_needs_you(backend, monke
     summary = client.get("/api/requests/summary").json()
     assert summary["statuses"] == {"wanted": 1, "choice": 1, "queued": 0, "downloading": 0, "processing": 0, "review": 0,
                                    "have": 1, "not_found": 2, "gave_up": 1, "skipped": 1}
-    assert summary["suggested"] == 1 and summary["upgrading"] == 1
+    assert (summary["suggested"], summary["lossy"], summary["upgrading"], summary["parked_searched_at"]) == (1, 1, 0, None)
+    assert summary["lists"][0]["lossy"] == 1
     assert [(l["name"], l["total"], l["suggested"]) for l in summary["lists"]] == [("Blog", 4, 0), ("Requests", 3, 0), ("Saved tracks", 1, 1)]
     assert summary["lists"][0]["statuses"]["not_found"] == 1 and summary["lists"][1]["statuses"]["gave_up"] == 1
     assert sum(summary["lists"][2]["statuses"].values()) == 0 and len(summary["lists"][2]["statuses"]) == 10
@@ -1295,24 +1296,24 @@ def test_requests_filter_by_list_with_status_q_and_limit(backend, monkeypatch):
     assert get(list="Blog", status="suggested")["items"] == [] and get(list="Nope")["total"] == 0
 
 
-def test_bulk_retry_by_status_list_and_ids_skips_running_downloads(backend, monkeypatch):
+def test_search_all_parked_retries_missing_and_lossy_requests_but_not_running_ones(backend, monkeypatch):
     main, client = backend
     signin(main, client, monkeypatch)
     ids = seed_requests(main)
-    status = lambda n: main.store.get("wishlist", ids[n])["status"]
-    assert client.post("/api/requests/retry", json={}).status_code == 400
-    assert client.post("/api/requests/retry", json={"status": "wanted"}).status_code == 422
-    assert client.post("/api/requests/retry", json={"status": "missing", "list": "Blog"}).json() == {"count": 1}
-    assert status(3) == "wanted" and status(4) == "gave_up" and status(6) == "not_found"
-    running = main.store.get("wishlist", ids[6])
+    item = lambda n: main.store.get("wishlist", ids[n])
+    have = item(2)
+    have.update(quality=1)
+    main.wishlist.save(have)
+    assert client.post("/api/requests/search-parked", json={"list": "Blog"}).json() == {"missing": 1, "lossy": 1}
+    assert item(3)["status"] == "wanted" and item(4)["status"] == "gave_up" and item(2)["upgrade_wanted"]
+    running = item(6)
     running["job_id"] = "job"
     main.wishlist.save(running)
-    assert client.post("/api/requests/retry", json={"status": "missing"}).json() == {"count": 1}
-    assert status(4) == "wanted" and status(6) == "not_found"
-    assert client.post("/api/requests/retry", json={"ids": [ids[0], ids[2], ids[5]]}).json() == {"count": 1}
-    assert status(5) == "wanted" and status(2) == "have"
+    assert client.post("/api/requests/search-parked", json={}).json() == {"missing": 1, "lossy": 0}
+    assert item(4)["status"] == "wanted" and item(6)["status"] == "not_found" and item(5)["status"] == "skipped"
+    assert client.get("/api/requests/summary").json()["parked_searched_at"]
     signin(main, client, monkeypatch, name="other")
-    assert client.post("/api/requests/retry", json={"ids": [ids[6]], "status": "not_found"}).json() == {"count": 0}
+    assert client.post("/api/requests/search-parked", json={}).json() == {"missing": 0, "lossy": 0}
 
 
 def test_renaming_a_request_replaces_it_and_searches_again(backend, monkeypatch):

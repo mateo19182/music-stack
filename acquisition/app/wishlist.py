@@ -3,12 +3,13 @@
 A request is an album, a track, or an exact link. For albums and tracks: search every source
 at once, keep what is that record, sort by quality, try the best copy, and take the next one
 when a download fails. One search: when nothing is found, or every copy failed, the request is
-missing until the owner searches again. A copy picked from search results is tried first; if it
-fails, the request searches like any other. A link is downloaded as given, once.
+parked. A copy picked from search results is tried first; if it fails, the request searches like
+any other. A link is downloaded as given, once.
 
-Albums and tracks that came in lossy are searched once a week for a better copy, for four
-weeks; review replaces the lossy tracks. Downloads are jobs (app.main); a request follows one
-job at a time. (The table is still called "wishlist".)
+Albums and tracks that came in lossy are parked too. Nothing parked is searched until the owner
+searches all parked (search_parked): missing requests search again, lossy ones look for a
+lossless copy, which review swaps in. Downloads are jobs (app.main); a request follows one job at
+a time. (The table is still called "wishlist".)
 """
 from __future__ import annotations
 
@@ -28,8 +29,6 @@ from .sources import SourceError, SoulseekUnavailable, soulseek_query, youtube_u
 log = logging.getLogger("acquisition")
 
 DAY = 24 * 3600
-UPGRADE_EVERY = 7 * DAY        # a lossy album or track: look for a better copy this often
-UPGRADE_FOR = 28 * DAY         # ...for this long after it arrived
 LOSSLESS = 3                   # matching.quality of a lossless copy
 MAX_ALBUM_FILES = 60           # a bigger Soulseek folder is a collection, not one album
 MAX_TRIED = 16                 # copies tried before a request gives up, over its search and the one that follows
@@ -80,6 +79,11 @@ def link_candidate(url, kind):
     url = youtube_url(url)
     return {"id": hashlib.sha256((kind + url).encode()).hexdigest(), "source": "youtube", "kind": kind,
             "url": url, "title": url, "files": []}
+
+
+def lossy(item):
+    """In the library below lossless: parked for the next lossless search."""
+    return item.get("kind", "album") != "link" and item.get("quality") is not None and item["quality"] < LOSSLESS
 
 
 def name(item):
@@ -150,6 +154,23 @@ class Wishlist:
             item.update(tried=[], candidates=[link_candidate(item["url"], item.get("link_kind", "track"))])
         self.save(item)
 
+    def search_parked(self, owner, list_name=None):
+        """Search everything parked once: missing requests from scratch, lossy ones for a lossless
+        copy. Returns (missing, lossy) counts."""
+        missing = upgrades = 0
+        for item in self.items(owner):
+            if item.get("job_id") or (list_name is not None and item["list"] != list_name):
+                continue
+            if item["status"] in ("not_found", "gave_up"):
+                self.retry(item)
+                missing += 1
+            elif item["status"] == "have" and lossy(item) and not item.get("upgrade_wanted"):
+                item.update(upgrade_wanted=True, candidates=[], retried_at=self.clock(),
+                            note="In the library (lossy); looking for a lossless copy")
+                self.save(item)
+                upgrades += 1
+        return missing, upgrades
+
     def choose(self, item, candidate_id):
         """The copy to get, from the candidates a held request found. None when it is not one of them."""
         chosen = next((c for c in item.get("candidates", []) if c.get("id") == candidate_id), None)
@@ -193,7 +214,7 @@ class Wishlist:
         if item["status"] == "have":
             if item.get("quality") is None and not item.get("quality_checked"):
                 self._backfill_quality(item, jobs, library)
-            if self._upgrading(item):
+            if item.get("upgrade_wanted"):
                 self._next(item, jobs, upgrade=True)
             return
         if item["status"] in DONE or item["status"] == "choice":
@@ -222,20 +243,9 @@ class Wishlist:
         if quality is None and item["kind"] == "album" and library is not None:
             quality = matching.library_quality(library, item)
         item.update(quality=quality, quality_checked=quality is not None or library is not None)
-        if quality is not None and quality < LOSSLESS and item["kind"] != "link":
-            item.update(upgrade_until=self.clock() + UPGRADE_FOR, next_search_at=0,
-                        note="In the library (lossy); looking for a better copy weekly")
+        if lossy(item):
+            item["note"] = "In the library (lossy); parked for a lossless search"
         self.save(item)
-
-    def _upgrading(self, item):
-        """A lossy copy arrived less than UPGRADE_FOR ago: keep looking for a better copy."""
-        if item.get("quality") is None or item["quality"] >= LOSSLESS or not item.get("upgrade_until"):
-            return False
-        if self.clock() < item["upgrade_until"]:
-            return True
-        item.update(upgrade_until=None, candidates=[], note="In the library (lossy; no better copy turned up in 4 weeks)")
-        self.save(item)
-        return False
 
     def _follow_job(self, item, job):
         """Update the request from its job. True when it needs its next copy."""
@@ -260,13 +270,8 @@ class Wishlist:
             return False
         if stage == "published" and job["id"] not in item.get("wrong_jobs", []):
             quality = matching.quality(job.get("candidate") or {})
-            item.update(status="have", job_id=None, candidates=[], quality=quality, pinned=False)
-            if quality is not None and quality < LOSSLESS and item["kind"] != "link":
-                if not upgrade:
-                    item.update(upgrade_until=self.clock() + UPGRADE_FOR, next_search_at=self.clock() + UPGRADE_EVERY)
-                item["note"] = "Added to the library (lossy); looking for a better copy weekly"
-            else:
-                item.update(upgrade_until=None, note="Added to the library")
+            item.update(status="have", job_id=None, candidates=[], quality=quality, pinned=False, upgrade_wanted=False)
+            item["note"] = "Added to the library (lossy); parked for a lossless search" if lossy(item) else "Added to the library"
             self.save(item)
             return False
         outcome = {"published": "wrong record", "rejected": "rejected in review", "cancelled": "cancelled"}.get(stage, "failed")
@@ -330,7 +335,7 @@ class Wishlist:
                 return
             # The listed copies all failed: one more search, without the uploaders already tried.
             item.update(candidates=[], searched_again=True)
-        if (upgrade and now < item.get("next_search_at", 0)) or self._searches_left <= 0:
+        if self._searches_left <= 0:
             return
         self._searches_left -= 1
         found = self._search(item)
@@ -357,7 +362,6 @@ class Wishlist:
             self.save(item)
 
     def _exhausted(self, item, upgrade, why):
-        now = self.clock()
         item["candidates"] = []
         if item.get("pinned") and item["kind"] != "link":
             # The copy picked from search results failed: search like any other request, now.
@@ -365,7 +369,7 @@ class Wishlist:
             self.save(item)
             return
         if upgrade:
-            item.update(next_search_at=now + UPGRADE_EVERY, note=f"In the library (lossy); {why.lower()} yet, looking again in a week")
+            item.update(upgrade_wanted=False, note=f"In the library (lossy); {why.lower()}; parked")
         elif item["tried"]:
             why = "No other copies found" if why == "Not found" else why
             item.update(status="gave_up", note=f"{why} ({len(item['tried'])} tried)")
@@ -623,7 +627,7 @@ class Wishlist:
                 "album": item.get("album"), "title": item.get("title"), "url": item.get("url"), "list": item["list"],
                 "position": item.get("position", 0), "star": bool(item.get("star")), "status": item["status"],
                 "hold": bool(item.get("hold")),
-                "note": item.get("note"), "quality": item.get("quality"), "upgrading": bool(item.get("upgrade_until")),
+                "note": item.get("note"), "quality": item.get("quality"), "upgrading": bool(item.get("upgrade_wanted")), "lossy": lossy(item),
                 "tries": len(item.get("tried", [])),
                 "tried": [{k: t.get(k) for k in ("source", "provider", "outcome", "error", "at")} for t in item.get("tried", [])[-10:]],
                 "rejected": item.get("rejected", [])[:5],

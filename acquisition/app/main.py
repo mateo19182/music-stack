@@ -17,7 +17,7 @@ from mediafile import MediaFile
 from .store import Store, uid, now
 from .sources import Sources, SourceError, SoulseekUnavailable, DownloadCancelled, youtube_url, _timestamp
 from . import matching
-from .wishlist import KINDS, Wishlist, item_id as wishlist_item_id
+from .wishlist import KINDS, Wishlist, item_id as wishlist_item_id, lossy as wishlist_lossy
 from .llm_match import Judge
 from typing import List, Literal
 from . import concerts
@@ -94,9 +94,7 @@ class RequestChoice(BaseModel):
     album: bool = False   # get the albums the chosen tracks are on, instead of the tracks
 
 
-class RequestRetry(BaseModel):
-    ids: List[str] | None = Field(default=None, max_length=10000)
-    status: Literal["missing", "not_found", "gave_up", "skipped"] | None = None   # missing: not_found and gave_up
+class RequestSearchParked(BaseModel):
     list: str | None = Field(default=None, max_length=120)
 
 
@@ -2098,7 +2096,6 @@ def owned_request(id, user):
 
 REQUEST_SETTLED = ("have", "skipped", "not_found", "gave_up")
 REQUEST_STATUSES = ("wanted", "choice", "queued", "downloading", "processing", "review", "have", "not_found", "gave_up", "skipped")
-RETRYABLE = ("not_found", "gave_up", "skipped")
 
 
 def request_jobs(user):
@@ -2143,9 +2140,9 @@ def request_summary(user=Depends(check_user)):
     """Counts for the overview: requests per status, overall and per list, and what waits for the user."""
     def counts():
         return dict.fromkeys(REQUEST_STATUSES, 0)
-    statuses, lists, suggested, upgrading = counts(), {}, 0, 0
+    statuses, lists, suggested, lossy, upgrading, searched = counts(), {}, 0, 0, 0, None
     for i in wishlist.items(user["username"]):
-        entry = lists.setdefault(i["list"], {"name": i["list"], "statuses": counts(), "suggested": 0, "total": 0})
+        entry = lists.setdefault(i["list"], {"name": i["list"], "statuses": counts(), "suggested": 0, "lossy": 0, "total": 0})
         entry["total"] += 1
         if i["status"] == "suggested":
             suggested += 1
@@ -2153,7 +2150,11 @@ def request_summary(user=Depends(check_user)):
         elif i["status"] in statuses:
             statuses[i["status"]] += 1
             entry["statuses"][i["status"]] += 1
-        upgrading += i["status"] == "have" and bool(i.get("upgrade_until"))
+        if i["status"] == "have" and wishlist_lossy(i):
+            lossy += 1
+            entry["lossy"] += 1
+            upgrading += bool(i.get("upgrade_wanted"))
+        searched = max(searched or 0, i.get("retried_at") or 0) or None
     with store.db() as db:
         # Same scope as /api/review: an admin reviews everyone's downloads.
         reviews = db.execute("SELECT COUNT(*) FROM jobs WHERE stage='review'" + ("" if user["isAdmin"] else " AND owner=?"),
@@ -2162,7 +2163,8 @@ def request_summary(user=Depends(check_user)):
         checks = len(open_checks(user))
     except Exception:
         checks = 0   # slskd unreachable: the overview still loads
-    return {"statuses": statuses, "suggested": suggested, "upgrading": upgrading, "lists": list(lists.values()),
+    return {"statuses": statuses, "suggested": suggested, "lossy": lossy, "upgrading": upgrading,
+            "parked_searched_at": searched, "lists": list(lists.values()),
             "needs_you": {"choices": statuses["choice"], "reviews": reviews, "checks": checks,
                           "agent_requests": len(pending_agent_requests(user))}}
 
@@ -2312,27 +2314,12 @@ def import_requests(body: RequestImport, user=Depends(check_user)):
     return {"count": len(added)}
 
 
-@app.post("/api/requests/{id}/retry")
-def retry_request(id: str, user=Depends(check_user)):
-    item = owned_request(id, user)
-    if item.get("job_id"):
-        raise HTTPException(409, "A download for this request is still running")
-    wishlist.retry(item)
-    return {"ok": True}
-
-
-@app.post("/api/requests/retry")
-def retry_requests(body: RequestRetry, user=Depends(check_user)):
-    """Search again for every request that is missing or stopped, narrowed by ids, status and list."""
-    if not body.ids and not body.status:
-        raise HTTPException(400, "Choose the requests to retry")
-    statuses = {"missing": ("not_found", "gave_up"), None: RETRYABLE}.get(body.status, (body.status,))
-    ids = set(body.ids or ())
-    items = [i for i in wishlist.items(user["username"]) if i["status"] in statuses and i["status"] in RETRYABLE
-             and not i.get("job_id") and (not ids or i["id"] in ids) and (body.list is None or i["list"] == body.list)]
-    for item in items:
-        wishlist.retry(item)
-    return {"count": len(items)}
+@app.post("/api/requests/search-parked")
+def search_parked(body: RequestSearchParked, user=Depends(check_user)):
+    """The one way parked requests search again: every missing request from scratch and every lossy
+    one for a lossless copy, a few per pass. `list` narrows it to one list."""
+    missing, lossy = wishlist.search_parked(user["username"], body.list)
+    return {"missing": missing, "lossy": lossy}
 
 
 @app.post("/api/requests/{id}/rename")

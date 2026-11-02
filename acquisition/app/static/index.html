@@ -128,7 +128,7 @@
           </div>
           <div class="segmented wish-tabs" role="group" aria-label="Show requests">
             <button type="button" data-wish-tab="progress" aria-pressed="true">In progress <span></span></button
-            ><button type="button" data-wish-tab="missing" aria-pressed="false">Missing <span></span></button
+            ><button type="button" data-wish-tab="missing" aria-pressed="false">Parked <span></span></button
             ><button type="button" data-wish-tab="have" aria-pressed="false">In library <span></span></button
             ><button type="button" data-wish-tab="skipped" aria-pressed="false" hidden>Skipped <span></span></button
             ><button type="button" data-wish-tab="other" aria-pressed="false">Other downloads</button>
@@ -136,7 +136,7 @@
           <div id="wish-filters" class="wishlist-filters">
             <label>List<select id="wish-filter-list"><option value="">All lists</option></select></label>
             <label class="grow">Name<input id="wish-filter-text" type="search" placeholder="Artist, album or title" autocomplete="off" /></label>
-            <button id="retry-missing" class="quiet" hidden title="Search again for everything missing in this view, a few at a time">Search all again</button>
+            <button id="search-parked" class="quiet" hidden title="Search again for every parked request in this list, and look for lossless copies of lossy ones">Search all parked</button>
           </div>
           <div id="wishlist"></div>
           <div id="other-downloads" hidden>
