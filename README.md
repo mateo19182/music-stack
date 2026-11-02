@@ -223,7 +223,7 @@ yt-dlp's YouTube JavaScript support.
 ```sh
 uv sync --project acquisition --frozen --group dev
 PYTHONPATH=acquisition acquisition/.venv/bin/pytest -q acquisition/tests
-node --check acquisition/app/static/app.js
+for f in acquisition/app/static/js/*.js; do node --check "$f"; done
 ```
 
 ## Hermes and Telegram

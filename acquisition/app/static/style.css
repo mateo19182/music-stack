@@ -725,19 +725,6 @@ nav button.selected {
   padding: 2px 5px;
   font-size: 11px;
 }
-.utility-section {
-  padding: 12px 0;
-  border-top: 1px solid var(--border);
-  margin: 20px 0;
-}
-.utility-section > summary {
-  color: #222;
-  margin-top: 0 !important;
-  font-weight: bold;
-}
-.utility-section > form {
-  margin-top: 12px;
-}
 .sharing-file-error:empty {
   display: none;
 }
@@ -1180,21 +1167,6 @@ body:has(#player-bar:not([hidden])) .review-bar {
   .group-head {
     flex-wrap: wrap;
   }
-}
-.auto-add {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px 18px;
-  padding: 12px 14px;
-  margin-bottom: 8px;
-  border: 1px solid var(--border);
-  background: #faf9f5;
-  font-size: 14px;
-}
-.auto-add .checkbox {
-  color: #222;
-  font-size: 14px;
 }
 .questions {
   margin: 0 16px 12px 82px;
@@ -1670,4 +1642,200 @@ fieldset.segmented {
 }
 .concert-notice p + p {
   margin-top: 6px;
+}
+
+/* Overview, Needs you, Not requested yet, Settings */
+nav .count:not(:empty) {
+  margin-left: 4px;
+  padding: 1px 6px;
+  background: #e8e7e0;
+  color: #222;
+}
+nav .count.attention:not(:empty) {
+  background: #9c2920;
+  color: #fff;
+}
+.callout {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 16px;
+  margin: 12px 0;
+  border: 1px solid var(--border);
+  background: #faf9f5;
+}
+.callout.attention {
+  border-color: #b0802a;
+  background: #fbf1dc;
+}
+.callout p,
+.callout ul {
+  margin: 4px 0 0;
+}
+.callout ul {
+  padding-left: 18px;
+  font-size: 13px;
+}
+.pipeline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 6px;
+}
+.pipeline.side {
+  align-items: center;
+  margin-top: 10px;
+  gap: 12px;
+}
+.pipeline .arrow {
+  align-self: center;
+  color: var(--muted);
+}
+button.step {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 108px;
+  padding: 10px 12px;
+  background: #faf9f5;
+  color: #222;
+  border: 1px solid var(--border);
+  text-align: left;
+}
+button.step:hover {
+  background: #efeee8;
+  color: #222;
+}
+button.step.zero {
+  opacity: 0.55;
+}
+.step-count {
+  font-size: 20px;
+  font-weight: 600;
+}
+.step-label {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--muted);
+}
+table.lists {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+table.lists th,
+table.lists td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  text-align: right;
+  white-space: nowrap;
+}
+table.lists th:first-child {
+  text-align: left;
+  font-weight: 600;
+  white-space: normal;
+}
+table.lists thead th {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--muted);
+}
+table.lists .bar-col {
+  width: 34%;
+}
+.bar {
+  display: flex;
+  height: 8px;
+  background: #e8e7e0;
+}
+.bar span,
+.legend .key {
+  display: inline-block;
+  height: 100%;
+}
+.seg-have { background: #3d6b45; }
+.seg-active { background: #b0802a; }
+.seg-missing { background: #9c2920; }
+.seg-todo { background: #aaa99f; }
+.legend .key {
+  width: 10px;
+  height: 10px;
+  margin: 0 4px 0 12px;
+  vertical-align: -1px;
+}
+.legend .key:first-child {
+  margin-left: 0;
+}
+.suggest-tools label {
+  flex-direction: row;
+  align-items: center;
+  flex: 0 1 auto;
+}
+.suggest-tools select {
+  width: auto;
+}
+.suggest-tools .spacer {
+  flex: 1;
+}
+.suggest-tools.sticky {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: 8px 0;
+  background: #f5f4ef;
+  border-bottom: 1px solid var(--border);
+}
+.suggest-tracks-wrap > summary {
+  padding-left: 1.6rem;
+  cursor: pointer;
+}
+.add-request > summary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+}
+.add-request[open] {
+  flex-basis: 100%;
+}
+.section-title:has(.add-request[open]) {
+  flex-wrap: wrap;
+}
+.wishlist-filters input[type="search"] {
+  padding: 7px 8px;
+}
+.rename-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: end;
+  margin-top: 12px;
+}
+.rename-form label {
+  flex: 1 1 200px;
+}
+.settings-block {
+  padding: 16px 0;
+  border-top: 1px solid var(--border);
+}
+.settings-block h2 {
+  margin-bottom: 6px;
+}
+.settings-block .checkbox {
+  color: #222;
+  font-size: 14px;
+  margin-top: 8px;
+}
+@media (max-width: 700px) {
+  table.lists .bar-col {
+    display: none;
+  }
+  button.step {
+    min-width: 0;
+    flex: 1 1 40%;
+  }
+  .pipeline .arrow {
+    display: none;
+  }
 }

@@ -28,5 +28,5 @@ Use an explicit file list when staging; check for secrets before pushing.
 
 Run `uv sync --project acquisition --frozen --group dev`, then
 `PYTHONPATH=acquisition acquisition/.venv/bin/pytest -q acquisition/tests`.
-Check JS with `node --check acquisition/app/static/app.js`.
+Check JS with `for f in acquisition/app/static/js/*.js; do node --check "$f"; done`.
 Deploy only reviewed changes, preserving private state and manual review.

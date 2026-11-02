@@ -6,8 +6,20 @@
     <meta name="color-scheme" content="light" />
     <title>Acquire</title>
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v=20261005-2" />
-    <link rel="stylesheet" href="/static/style.css?v=20261019-1" />
-    <script defer src="/static/app.js?v=20261019-1"></script>
+    <link rel="stylesheet" href="/static/style.css?v=20261102-1" />
+    <script defer src="/static/js/core.js?v=20261102-1"></script>
+    <script defer src="/static/js/player.js?v=20261102-1"></script>
+    <script defer src="/static/js/search.js?v=20261102-1"></script>
+    <script defer src="/static/js/library.js?v=20261102-1"></script>
+    <script defer src="/static/js/jobs.js?v=20261102-1"></script>
+    <script defer src="/static/js/review.js?v=20261102-1"></script>
+    <script defer src="/static/js/needs.js?v=20261102-1"></script>
+    <script defer src="/static/js/requests.js?v=20261102-1"></script>
+    <script defer src="/static/js/unrequested.js?v=20261102-1"></script>
+    <script defer src="/static/js/overview.js?v=20261102-1"></script>
+    <script defer src="/static/js/settings.js?v=20261102-1"></script>
+    <script defer src="/static/js/concerts.js?v=20261102-1"></script>
+    <script defer src="/static/js/main.js?v=20261102-1"></script>
   </head>
   <body>
     <div id="toast" role="status" aria-live="polite" hidden></div>
@@ -32,7 +44,7 @@
     </section>
     <div id="app" hidden>
       <header>
-        <a class="brand" href="/">Acquire</a>
+        <a class="brand" href="#overview" data-tab="overview">Acquire</a>
         <div class="account">
           <a id="listen" href="http://localhost:4533" target="_blank" rel="noopener"
             >Listen ↗</a
@@ -43,138 +55,100 @@
       <div id="soulseek-status" class="outage" role="status" hidden></div>
       <main>
         <nav aria-label="Main">
-          <button data-tab="search" class="selected">Search</button
-          ><button data-tab="activity">
-            Requests <span id="active-count"></span></button
+          <button data-tab="overview">Overview</button
+          ><button data-tab="needs">Needs you <span id="nav-needs" class="count attention"></span></button
+          ><button data-tab="unrequested">Not requested yet <span id="nav-unrequested" class="count"></span></button
+          ><button data-tab="requests">Requests <span id="nav-requests" class="count"></span></button
           ><button data-tab="library">Library</button
-          ><button data-tab="concerts">Concerts</button>
+          ><button data-tab="search">Search</button
+          ><button data-tab="concerts">Concerts</button
+          ><button data-tab="settings">Settings</button>
         </nav>
-        <section id="search-view">
-          <form id="search-form" class="finder" autocomplete="off">
-            <h1>Find music</h1>
-            <div class="finder-box">
-              <input
-                name="query"
-                aria-label="Search or paste a link"
-                placeholder="Artist and song or album, or a Spotify, YouTube, Bandcamp or SoundCloud link"
-                required
-              /><button type="submit">Search</button>
-            </div>
-            <div class="finder-options">
-              <fieldset class="segmented choice" aria-label="Looking for">
-                <label><input type="radio" name="kind" value="track" checked /><span>Track</span></label
-                ><label><input type="radio" name="kind" value="album" /><span>Album</span></label>
-              </fieldset>
-              <fieldset class="segmented choice" aria-label="Sources">
-                <label><input type="radio" name="source" value="all" checked /><span>All sources</span></label
-                ><label><input type="radio" name="source" value="soulseek" /><span>Soulseek</span></label
-                ><label><input type="radio" name="source" value="youtube" /><span>YouTube</span></label
-                ><label><input type="radio" name="source" value="torrent" /><span>Torrents</span></label>
-              </fieldset>
-              <button type="button" class="link" id="precise-toggle" aria-expanded="false">Artist and title separately</button>
-            </div>
-            <div class="options precise" hidden>
-              <label class="grow">Artist<input name="artist" /></label
-              ><label class="grow"><span id="precise-name">Title</span><input name="title" /></label
-              ><label class="grow">Album<input name="album" /></label>
-            </div>
-          </form>
-          <div id="link-card"></div>
-          <div id="search-results" hidden>
-            <div class="section-title">
-              <h2>Results</h2>
-              <span id="search-status" class="muted"></span>
-            </div>
-            <div id="results"></div>
-          </div>
+
+        <section id="overview-view" hidden>
+          <h1>Overview</h1>
+          <div id="overview-needs"></div>
+          <div class="section-title"><h2>Where everything stands</h2></div>
+          <div id="overview-pipeline"></div>
+          <div class="section-title"><h2>Your lists</h2></div>
+          <div id="overview-lists"></div>
+          <div class="section-title"><h2>Added in the last week</h2></div>
+          <div id="recent"></div>
         </section>
-        <section id="activity-view" hidden>
-          <div class="section-title">
-            <h1>Requests</h1>
-            <button id="refresh-jobs" class="quiet">Refresh</button>
-          </div>
-          <div class="section-title">
-            <h2>Needs you <span id="review-count"></span></h2>
-          </div>
+
+        <section id="needs-view" hidden>
+          <h1>Needs you</h1>
+          <p class="muted">Only what the app, the review model and your agent could not settle on their own.</p>
+          <div id="needs-empty" class="empty" hidden>All clear. Nothing needs you right now.</div>
           <div id="agent-requests"></div>
           <div id="checks"></div>
-          <div class="auto-add">
-            <span>Add to the library automatically when nothing needs you:</span>
-            <label class="checkbox"
-              ><input type="checkbox" data-auto-add="search" />Requests</label
-            >
-            <label class="checkbox"
-              ><input type="checkbox" data-auto-add="import" />Inbox
-              imports</label
-            >
-          </div>
-          <p class="muted review-help">
+          <div id="choices"></div>
+          <p id="review-help" class="muted review-help" hidden>
             Tags, album, cover art, duplicates and better versions are handled
             for you. Answer what's left here, or click a track to edit it.
           </p>
           <div id="reviews"></div>
-          <div class="section-title"><h2>Your requests</h2></div>
-          <form id="wishlist-form" class="wishlist-add">
-            <label>What<select id="wish-kind"><option value="album">Album</option><option value="track">Track</option></select></label>
-            <label>Artist<input name="artist" id="wish-artist" required maxlength="200" autocomplete="off" /></label>
-            <label><span id="wish-name-label">Album</span><input name="album" id="wish-album" required maxlength="300" autocomplete="off" /></label>
-            <label>List<input name="list" id="wish-list" list="wish-lists" value="Requests" required maxlength="120" /></label>
-            <datalist id="wish-lists"></datalist>
-            <button type="submit">Request</button>
-          </form>
-          <div class="wishlist-filters">
+        </section>
+
+        <section id="unrequested-view" hidden>
+          <h1>Not requested yet</h1>
+          <p class="muted">Tracks saved in your lists that are not in your library. Nothing here is searched until you choose it. <strong>Get whole albums</strong> requests each chosen track's album once.</p>
+          <div class="suggest-tools">
+            <input id="unreq-filter" type="search" placeholder="Filter by artist, title or album" aria-label="Filter tracks" />
+            <label>List<select id="unreq-list"><option value="">All lists</option></select></label>
+            <label>Group by<select id="unreq-group"><option value="artist">Artist</option><option value="album">Album</option><option value="list">List</option></select></label>
+          </div>
+          <div class="suggest-tools sticky">
+            <span id="unreq-summary" class="muted"></span>
+            <button id="unreq-select-all" class="quiet">Select all</button>
+            <button id="unreq-clear" class="quiet" disabled>Clear</button>
+            <span id="unreq-selected" class="muted"></span>
+            <span class="spacer"></span>
+            <button id="unreq-get" disabled>Get tracks</button>
+            <button id="unreq-albums" disabled>Get whole albums</button>
+            <button id="unreq-drop" class="quiet" disabled>Not these</button>
+          </div>
+          <div id="unreq-items"></div>
+        </section>
+
+        <section id="requests-view" hidden>
+          <div class="section-title">
+            <h1>Requests</h1>
+            <details class="add-request">
+              <summary>Add a request</summary>
+              <form id="wishlist-form" class="wishlist-add">
+                <label>What<select id="wish-kind"><option value="album">Album</option><option value="track">Track</option></select></label>
+                <label>Artist<input name="artist" id="wish-artist" required maxlength="200" autocomplete="off" /></label>
+                <label><span id="wish-name-label">Album</span><input name="album" id="wish-album" required maxlength="300" autocomplete="off" /></label>
+                <label>List<input name="list" id="wish-list" list="wish-lists" value="Requests" required maxlength="120" /></label>
+                <datalist id="wish-lists"></datalist>
+                <button type="submit">Request</button>
+              </form>
+            </details>
+          </div>
           <div class="segmented wish-tabs" role="group" aria-label="Show requests">
-            <button type="button" data-wish-tab="getting" aria-pressed="true">Getting <span></span></button
+            <button type="button" data-wish-tab="progress" aria-pressed="true">In progress <span></span></button
             ><button type="button" data-wish-tab="missing" aria-pressed="false">Missing <span></span></button
             ><button type="button" data-wish-tab="have" aria-pressed="false">In library <span></span></button
             ><button type="button" data-wish-tab="skipped" aria-pressed="false" hidden>Skipped <span></span></button
-            ><button type="button" data-wish-tab="saved" aria-pressed="false" hidden>Saved tracks <span></span></button>
+            ><button type="button" data-wish-tab="other" aria-pressed="false">Other downloads</button>
           </div>
+          <div id="wish-filters" class="wishlist-filters">
             <label>List<select id="wish-filter-list"><option value="">All lists</option></select></label>
-          </div>
-          <div id="suggest-picker" hidden>
-            <div class="suggest-tools">
-              <input id="suggest-filter" type="search" placeholder="Filter by artist, title or album" aria-label="Filter saved tracks">
-              <button id="suggest-get" disabled>Get selected</button>
-              <button id="suggest-albums" class="quiet" disabled>Get albums</button>
-              <button id="suggest-drop" class="quiet" disabled>Not these</button>
-              <span id="suggest-selected" class="muted"></span>
-            </div>
-            <div id="suggest-list"></div>
+            <label class="grow">Name<input id="wish-filter-text" type="search" placeholder="Artist, album or title" autocomplete="off" /></label>
+            <button id="retry-missing" class="quiet" hidden title="Search again for everything missing in this view, a few at a time">Search all again</button>
           </div>
           <div id="wishlist"></div>
-          <div class="section-title"><h2>Recently added</h2></div>
-          <div id="recent"></div>
-          <div class="section-title"><h2>Other downloads</h2></div>
-          <p class="muted">Inbox imports and downloads from before requests.</p>
-          <label class="checkbox history-toggle"
-            ><input type="checkbox" id="show-history" />Show completed and
-            rejected downloads</label
-          >
-          <div id="jobs"></div>
-          <details id="import-existing" class="utility-section" hidden>
-            <summary>Import existing files</summary>
-            <p class="muted">
-              Files downloaded outside Acquire. Select files to check their tags
-              before adding them to the library.
-            </p>
-            <button id="refresh-inbox" class="quiet" type="button">
-              Refresh files
-            </button>
-            <form id="inbox-form">
-              <div class="panel">
-                <div class="inbox-tools">
-                  <label class="checkbox"
-                    ><input type="checkbox" id="inbox-all" />Select up to 100
-                    files</label
-                  ><span id="inbox-count" class="muted"></span
-                  ><button type="submit">Prepare selected files</button>
-                </div>
-                <div id="inbox"></div>
-              </div>
-            </form>
-          </details>
+          <div id="other-downloads" hidden>
+            <p class="muted">Inbox imports and downloads from before requests.</p>
+            <label class="checkbox history-toggle"
+              ><input type="checkbox" id="show-history" />Show completed and
+              rejected downloads</label
+            >
+            <div id="jobs"></div>
+          </div>
         </section>
+
         <section id="library-view" hidden>
           <div class="section-title">
             <div>
@@ -233,44 +207,50 @@
               </div>
             </details>
           </form>
-          <details id="sharing-settings" class="utility-section" hidden>
-            <summary>Soulseek sharing</summary>
-            <p class="muted">
-              All library music is shared by default. Use More on a track to
-              keep it private.
-            </p>
-            <label class="checkbox"
-              ><input id="sharing-enabled" type="checkbox" />Share the library
-              on Soulseek</label
-            >
-            <p id="sharing-status" class="muted" role="status"></p>
-            <p id="sharing-error" class="error" role="alert"></p>
-          </details>
-          <details id="library-analysis" class="utility-section" hidden>
-            <summary>Tag analysis</summary>
-            <p class="muted">
-              Fills tracks that have no BPM, key, genre, year or mood. Genre and
-              year come from MusicBrainz first, then Discogs and Last.fm; when they have
-              nothing, genre, mood, BPM and key are estimated from the audio.
-              Values already in a file are kept, except that keys are rewritten
-              as Camelot (Am becomes 8A) and genres in one spelling (Hip-Hop
-              becomes Hip Hop). Key tags that are not keys are listed under
-              Key → Not a key for you to fix. BPM and key are not estimated for
-              files longer than 10 minutes; genre and mood are not estimated
-              from audio beyond 20 minutes.
-            </p>
-            <div class="actions">
-              <button type="button" id="start-analysis">
-                Analyze missing tags</button
-              ><button type="button" class="quiet" id="cancel-analysis" hidden>
-                Stop
-              </button>
-            </div>
-            <p id="analysis-status" class="muted" role="status"></p>
-          </details>
           <div id="library"></div>
           <div id="pagination" class="pagination"></div>
         </section>
+
+        <section id="search-view" hidden>
+          <form id="search-form" class="finder" autocomplete="off">
+            <h1>Find music</h1>
+            <div class="finder-box">
+              <input
+                name="query"
+                aria-label="Search or paste a link"
+                placeholder="Artist and song or album, or a Spotify, YouTube, Bandcamp or SoundCloud link"
+                required
+              /><button type="submit">Search</button>
+            </div>
+            <div class="finder-options">
+              <fieldset class="segmented choice" aria-label="Looking for">
+                <label><input type="radio" name="kind" value="track" checked /><span>Track</span></label
+                ><label><input type="radio" name="kind" value="album" /><span>Album</span></label>
+              </fieldset>
+              <fieldset class="segmented choice" aria-label="Sources">
+                <label><input type="radio" name="source" value="all" checked /><span>All sources</span></label
+                ><label><input type="radio" name="source" value="soulseek" /><span>Soulseek</span></label
+                ><label><input type="radio" name="source" value="youtube" /><span>YouTube</span></label
+                ><label><input type="radio" name="source" value="torrent" /><span>Torrents</span></label>
+              </fieldset>
+              <button type="button" class="link" id="precise-toggle" aria-expanded="false">Artist and title separately</button>
+            </div>
+            <div class="options precise" hidden>
+              <label class="grow">Artist<input name="artist" /></label
+              ><label class="grow"><span id="precise-name">Title</span><input name="title" /></label
+              ><label class="grow">Album<input name="album" /></label>
+            </div>
+          </form>
+          <div id="link-card"></div>
+          <div id="search-results" hidden>
+            <div class="section-title">
+              <h2>Results</h2>
+              <span id="search-status" class="muted"></span>
+            </div>
+            <div id="results"></div>
+          </div>
+        </section>
+
         <section id="concerts-view" hidden>
           <div class="section-title">
             <h1>Concerts</h1>
@@ -293,6 +273,73 @@
           </form>
           <p id="concerts-summary" class="muted"></p>
           <div id="concerts"></div>
+        </section>
+
+        <section id="settings-view" hidden>
+          <h1>Settings</h1>
+          <section class="settings-block">
+            <h2>Automatic adding</h2>
+            <p class="muted">Add downloads to the library on their own when nothing needs you. What the review model is unsure of still waits in Needs you.</p>
+            <label class="checkbox"><input type="checkbox" data-auto-add="search" />Requests (yours and your agent's)</label>
+            <label class="checkbox"><input type="checkbox" data-auto-add="import" />Inbox imports</label>
+          </section>
+          <section id="sharing-settings" class="settings-block" data-admin hidden>
+            <h2>Soulseek sharing</h2>
+            <p class="muted">
+              All library music is shared by default. Use More on a track to
+              keep it private.
+            </p>
+            <label class="checkbox"
+              ><input id="sharing-enabled" type="checkbox" />Share the library
+              on Soulseek</label
+            >
+            <p id="sharing-status" class="muted" role="status"></p>
+            <p id="sharing-error" class="error" role="alert"></p>
+          </section>
+          <section id="library-analysis" class="settings-block" data-admin hidden>
+            <h2>Tag analysis</h2>
+            <p class="muted">
+              Fills tracks that have no BPM, key, genre, year or mood. Genre and
+              year come from MusicBrainz first, then Discogs and Last.fm; when they have
+              nothing, genre, mood, BPM and key are estimated from the audio.
+              Values already in a file are kept, except that keys are rewritten
+              as Camelot (Am becomes 8A) and genres in one spelling (Hip-Hop
+              becomes Hip Hop). Key tags that are not keys are listed under
+              Key → Not a key for you to fix. BPM and key are not estimated for
+              files longer than 10 minutes; genre and mood are not estimated
+              from audio beyond 20 minutes.
+            </p>
+            <div class="actions">
+              <button type="button" id="start-analysis">
+                Analyze missing tags</button
+              ><button type="button" class="quiet" id="cancel-analysis" hidden>
+                Stop
+              </button>
+            </div>
+            <p id="analysis-status" class="muted" role="status"></p>
+          </section>
+          <section id="import-existing" class="settings-block" data-admin hidden>
+            <h2>Import existing files</h2>
+            <p class="muted">
+              Files downloaded outside Acquire. Select files to check their tags
+              before adding them to the library.
+            </p>
+            <button id="refresh-inbox" class="quiet" type="button">
+              Refresh files
+            </button>
+            <form id="inbox-form">
+              <div class="panel">
+                <div class="inbox-tools">
+                  <label class="checkbox"
+                    ><input type="checkbox" id="inbox-all" />Select up to 100
+                    files</label
+                  ><span id="inbox-count" class="muted"></span
+                  ><button type="submit">Prepare selected files</button>
+                </div>
+                <div id="inbox"></div>
+              </div>
+            </form>
+          </section>
         </section>
         <div id="player-bar" hidden>
           <div>

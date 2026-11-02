@@ -1206,6 +1206,10 @@ def test_suggested_tracks_wait_for_the_owner_to_choose_them(backend, monkeypatch
     listed = client.get("/api/requests").json()
     assert listed["suggested"] == 2 and listed["items"] == []
     assert sorted(i["title"] for i in client.get("/api/requests/suggested").json()["items"]) == ["Sly", "Vein Melter"]
+    shown = client.get("/api/requests", params={"status": "suggested", "q": "sly"}).json()
+    assert [(i["title"], i["status"]) for i in shown["items"]] == [("Sly", "suggested")] and shown["total"] == 1
+    assert len(client.get("/api/requests", params={"status": "suggested", "limit": 1}).json()["items"]) == 1
+    assert client.get("/api/requests", params={"status": "all"}).json()["items"] == []
     # Never searched while waiting.
     searched = []
     monkeypatch.setattr(main.wishlist, "_advance", lambda item, *a: searched.append(item["id"]))
@@ -1233,6 +1237,109 @@ def test_saved_tracks_can_bring_their_whole_album(backend, monkeypatch):
     assert main.store.get("wishlist", sly) is None and main.store.get("wishlist", vein) is None
     assert main.store.get("wishlist", other)["status"] == "suggested"
     assert main.store.get("wishlist", single)["status"] == "wanted"   # no album named: the track itself
+
+
+def seed_requests(main, owner="mateo"):
+    """One request per status across two lists, and a list of suggestions only."""
+    ids = {}
+    for n, status in enumerate(("wanted", "choice", "have", "not_found", "gave_up", "skipped", "not_found")):
+        item = main.wishlist.add(owner, "Artist", f"Album {n}", "Blog" if n < 4 else "Requests", status=status)
+        ids[n] = item["id"]
+    main.wishlist.add(owner, "Artist", "", "Saved tracks", kind="track", title="Song", status="suggested")
+    return ids
+
+
+def test_request_summary_counts_statuses_lists_and_what_needs_you(backend, monkeypatch):
+    main, client = backend
+    signin(main, client, monkeypatch)
+    ids = seed_requests(main)
+    main.wishlist.add("other", "Artist", "Elsewhere", "Blog", status="wanted")
+    have = main.store.get("wishlist", ids[2])
+    have.update(upgrade_until=time.time() + 60)
+    main.wishlist.save(have)
+    seed_review(main)
+    monkeypatch.setattr(main.Sources, "soulseek_checks", lambda self: [{"username": "peer", "status": "open", "recent": []}])
+    main._checks_cache["at"] = 0.0
+    summary = client.get("/api/requests/summary").json()
+    assert summary["statuses"] == {"wanted": 1, "choice": 1, "queued": 0, "downloading": 0, "processing": 0, "review": 0,
+                                   "have": 1, "not_found": 2, "gave_up": 1, "skipped": 1}
+    assert summary["suggested"] == 1 and summary["upgrading"] == 1
+    assert [(l["name"], l["total"], l["suggested"]) for l in summary["lists"]] == [("Blog", 4, 0), ("Requests", 3, 0), ("Saved tracks", 1, 1)]
+    assert summary["lists"][0]["statuses"]["not_found"] == 1 and summary["lists"][1]["statuses"]["gave_up"] == 1
+    assert sum(summary["lists"][2]["statuses"].values()) == 0 and len(summary["lists"][2]["statuses"]) == 10
+    assert summary["needs_you"] == {"choices": 1, "reviews": 1, "checks": 1, "agent_requests": 0}
+    # A Soulseek error leaves the checks out instead of failing the overview.
+    def down(self):
+        raise RuntimeError("slskd down")
+    monkeypatch.setattr(main.Sources, "soulseek_checks", down)
+    main._checks_cache["at"] = 0.0
+    assert client.get("/api/requests/summary").json()["needs_you"]["checks"] == 0
+    signin(main, client, monkeypatch, name="other", admin=False)
+    other = client.get("/api/requests/summary").json()
+    assert other["statuses"]["wanted"] == 1 and other["needs_you"] == {"choices": 0, "reviews": 0, "checks": 0, "agent_requests": 0}
+
+
+def test_requests_filter_by_list_with_status_q_and_limit(backend, monkeypatch):
+    main, client = backend
+    signin(main, client, monkeypatch)
+    seed_requests(main)
+    get = lambda **params: client.get("/api/requests", params=params).json()
+    blog = get(list="Blog")
+    assert sorted(i["album"] for i in blog["items"]) == ["Album 0", "Album 1", "Album 2", "Album 3"] and blog["total"] == 4
+    assert blog["lists"] == ["Blog", "Requests"]   # every list, for navigation
+    limited = get(list="Blog", limit=2)
+    assert len(limited["items"]) == 2 and limited["total"] == 4
+    assert [i["album"] for i in get(list="Requests", status="not_found")["items"]] == ["Album 6"]
+    assert [i["album"] for i in get(list="Blog", q="album 3")["items"]] == ["Album 3"]
+    assert [i["title"] for i in get(list="Saved tracks", status="suggested")["items"]] == ["Song"]
+    assert get(list="Blog", status="suggested")["items"] == [] and get(list="Nope")["total"] == 0
+
+
+def test_bulk_retry_by_status_list_and_ids_skips_running_downloads(backend, monkeypatch):
+    main, client = backend
+    signin(main, client, monkeypatch)
+    ids = seed_requests(main)
+    status = lambda n: main.store.get("wishlist", ids[n])["status"]
+    assert client.post("/api/requests/retry", json={}).status_code == 400
+    assert client.post("/api/requests/retry", json={"status": "wanted"}).status_code == 422
+    assert client.post("/api/requests/retry", json={"status": "missing", "list": "Blog"}).json() == {"count": 1}
+    assert status(3) == "wanted" and status(4) == "gave_up" and status(6) == "not_found"
+    running = main.store.get("wishlist", ids[6])
+    running["job_id"] = "job"
+    main.wishlist.save(running)
+    assert client.post("/api/requests/retry", json={"status": "missing"}).json() == {"count": 1}
+    assert status(4) == "wanted" and status(6) == "not_found"
+    assert client.post("/api/requests/retry", json={"ids": [ids[0], ids[2], ids[5]]}).json() == {"count": 1}
+    assert status(5) == "wanted" and status(2) == "have"
+    signin(main, client, monkeypatch, name="other")
+    assert client.post("/api/requests/retry", json={"ids": [ids[6]], "status": "not_found"}).json() == {"count": 0}
+
+
+def test_renaming_a_request_replaces_it_and_searches_again(backend, monkeypatch):
+    main, client = backend
+    signin(main, client, monkeypatch)
+    old = main.wishlist.add("mateo", "Blawn", "Long Distnce", "Blog", star=True, position=5, list_order=2, year=2024,
+                            status="not_found")
+    renamed = client.post(f"/api/requests/{old['id']}/rename", json={"artist": "Blawan", "name": "Long Distance"}).json()
+    assert renamed["id"] != old["id"] and main.store.get("wishlist", old["id"]) is None
+    new = main.store.get("wishlist", renamed["id"])
+    assert (new["artist"], new["album"], new["list"], new["status"], new["next_search_at"]) == ("Blawan", "Long Distance", "Blog", "wanted", 0)
+    assert (new["star"], new["position"], new["list_order"], new["year"]) == (True, 5, 2, 2024)
+    # Only the spelling changes: the same request, searched again.
+    same = client.post(f"/api/requests/{new['id']}/rename", json={"artist": "BLAWAN", "name": "Long Distance"}).json()
+    assert same["id"] == new["id"] and same["artist"] == "BLAWAN"
+    track = main.wishlist.add("mateo", "Herbie", "Head Hunters", "Requests", kind="track", title="Sli", status="gave_up")
+    fixed = client.post(f"/api/requests/{track['id']}/rename", json={"artist": "Herbie Hancock", "name": "Sly"}).json()
+    assert (fixed["kind"], fixed["title"], fixed["album"], fixed["status"]) == ("track", "Sly", "Head Hunters", "wanted")
+    link = main.wishlist.add("mateo", "", "", "Requests", kind="link", url="https://youtu.be/dQw4w9WgXcQ")
+    assert client.post(f"/api/requests/{link['id']}/rename", json={"artist": "A", "name": "B"}).status_code == 400
+    running = main.store.get("wishlist", fixed["id"])
+    running["job_id"] = "job"
+    main.wishlist.save(running)
+    assert client.post(f"/api/requests/{fixed['id']}/rename", json={"artist": "A", "name": "B"}).status_code == 409
+    assert client.post(f"/api/requests/{renamed['id']}/rename", json={"artist": "", "name": "B"}).status_code == 422
+    signin(main, client, monkeypatch, name="other")
+    assert client.post(f"/api/requests/{renamed['id']}/rename", json={"artist": "A", "name": "B"}).status_code == 404
 
 
 def test_search_results_with_every_searched_word_come_first(backend, monkeypatch):

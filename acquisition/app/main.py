@@ -17,7 +17,7 @@ from mediafile import MediaFile
 from .store import Store, uid, now
 from .sources import Sources, SourceError, SoulseekUnavailable, DownloadCancelled, youtube_url, _timestamp
 from . import matching
-from .wishlist import KINDS, Wishlist
+from .wishlist import KINDS, Wishlist, item_id as wishlist_item_id
 from .llm_match import Judge
 from typing import List, Literal
 from . import concerts
@@ -92,6 +92,17 @@ class RequestChoice(BaseModel):
     ids: List[str] = Field(min_length=1, max_length=2000)
     get: bool
     album: bool = False   # get the albums the chosen tracks are on, instead of the tracks
+
+
+class RequestRetry(BaseModel):
+    ids: List[str] | None = Field(default=None, max_length=10000)
+    status: Literal["missing", "not_found", "gave_up", "skipped"] | None = None   # missing: not_found and gave_up
+    list: str | None = Field(default=None, max_length=120)
+
+
+class RequestRename(BaseModel):
+    artist: str = Field(min_length=1, max_length=200)
+    name: str = Field(min_length=1, max_length=300)
 
 
 class Retry(BaseModel):
@@ -2086,6 +2097,8 @@ def owned_request(id, user):
 
 
 REQUEST_SETTLED = ("have", "skipped", "not_found", "gave_up")
+REQUEST_STATUSES = ("wanted", "choice", "queued", "downloading", "processing", "review", "have", "not_found", "gave_up", "skipped")
+RETRYABLE = ("not_found", "gave_up", "skipped")
 
 
 def request_jobs(user):
@@ -2094,17 +2107,23 @@ def request_jobs(user):
 
 
 @app.get("/api/requests")
-def list_requests(user=Depends(check_user), q: str = "", status: str = "", limit: int = 0):
-    """Everything by default (the web app's Requests tab). `status` narrows to one status, or
-    `active` (not settled); `q` matches artist, album or title; `limit` caps the items."""
+def list_requests(user=Depends(check_user), q: str = "", status: str = "", limit: int = 0,
+                  list_name: str = Query("", alias="list", max_length=120)):
+    """Everything but suggestions by default (the web app's Requests tab). `status` narrows to one
+    status (`suggested` too), or `active` (not settled); `list` to one list; `q` matches artist, album
+    or title; `limit` caps the items."""
     everything = wishlist.items(user["username"])
     items = [i for i in everything if i["status"] != "suggested"]
     suggested = len(everything) - len(items)
     lists = list(dict.fromkeys(i["list"] for i in items))
-    if status == "active":
+    if status == "suggested":
+        items = [i for i in everything if i["status"] == "suggested"]
+    elif status == "active":
         items = [i for i in items if i["status"] not in REQUEST_SETTLED]
     elif status and status != "all":
         items = [i for i in items if i["status"] == status]
+    if list_name:
+        items = [i for i in items if i["list"] == list_name]
     if q.strip():
         words = q.casefold().split()
         items = [i for i in items if all(w in f"{i['artist']} {i.get('album') or ''} {i.get('title') or ''}".casefold()
@@ -2117,6 +2136,35 @@ def list_requests(user=Depends(check_user), q: str = "", status: str = "", limit
                 "cost_usd": round(match_judge.cost(), 4)}   # since the app started
     return {"lists": lists, "items": [wishlist.view(i, jobs) for i in items], "total": total, "matching": matching,
             "suggested": suggested}
+
+
+@app.get("/api/requests/summary")
+def request_summary(user=Depends(check_user)):
+    """Counts for the overview: requests per status, overall and per list, and what waits for the user."""
+    def counts():
+        return dict.fromkeys(REQUEST_STATUSES, 0)
+    statuses, lists, suggested, upgrading = counts(), {}, 0, 0
+    for i in wishlist.items(user["username"]):
+        entry = lists.setdefault(i["list"], {"name": i["list"], "statuses": counts(), "suggested": 0, "total": 0})
+        entry["total"] += 1
+        if i["status"] == "suggested":
+            suggested += 1
+            entry["suggested"] += 1
+        elif i["status"] in statuses:
+            statuses[i["status"]] += 1
+            entry["statuses"][i["status"]] += 1
+        upgrading += i["status"] == "have" and bool(i.get("upgrade_until"))
+    with store.db() as db:
+        # Same scope as /api/review: an admin reviews everyone's downloads.
+        reviews = db.execute("SELECT COUNT(*) FROM jobs WHERE stage='review'" + ("" if user["isAdmin"] else " AND owner=?"),
+                             () if user["isAdmin"] else (user["username"],)).fetchone()[0]
+    try:
+        checks = len(open_checks(user))
+    except Exception:
+        checks = 0   # slskd unreachable: the overview still loads
+    return {"statuses": statuses, "suggested": suggested, "upgrading": upgrading, "lists": list(lists.values()),
+            "needs_you": {"choices": statuses["choice"], "reviews": reviews, "checks": checks,
+                          "agent_requests": len(pending_agent_requests(user))}}
 
 
 @app.get("/api/requests/suggested")
@@ -2192,6 +2240,15 @@ def choose_request(id: str, body: CopyChoice, user=Depends(check_user)):
     return wishlist.view(item, request_jobs(user))
 
 
+def open_checks(user):
+    return [c for c in soulseek_checks(user)["checks"] if c.get("status") == "open"] if user["isAdmin"] else []
+
+
+def pending_agent_requests(user):
+    return [agent_request_view(r) for r in store.list("sessions", "expires>?", (time.time(),))
+            if r.get("kind") == "agent_request" and r.get("status") == "pending"] if user["isAdmin"] else []
+
+
 @app.get("/api/pending")
 def pending(user=Depends(check_user)):
     """What waits for a decision: requests holding at their copies, reviews with open questions,
@@ -2200,9 +2257,8 @@ def pending(user=Depends(check_user)):
     choices = [wishlist.view(i, jobs) for i in wishlist.items(user["username"]) if i["status"] == "choice"]
     reviews = [review_questions(j) for j in store.list("jobs", "stage='review' AND owner=?", (user["username"],),
                                                        order="created_at")]
-    checks = [c for c in soulseek_checks(user)["checks"] if c.get("status") == "open"] if user["isAdmin"] else []
-    asks = [agent_request_view(r) for r in store.list("sessions", "expires>?", (time.time(),))
-            if r.get("kind") == "agent_request" and r.get("status") == "pending"] if user["isAdmin"] else []
+    checks = open_checks(user)
+    asks = pending_agent_requests(user)
     return {"choices": choices, "reviews": reviews, "checks": checks,
             "agent_requests": [{k: a.get(k) for k in ("id", "name", "can_approve", "requested_by", "created_at")} for a in asks]}
 
@@ -2263,6 +2319,47 @@ def retry_request(id: str, user=Depends(check_user)):
         raise HTTPException(409, "A download for this request is still running")
     wishlist.retry(item)
     return {"ok": True}
+
+
+@app.post("/api/requests/retry")
+def retry_requests(body: RequestRetry, user=Depends(check_user)):
+    """Search again for every request that is missing or stopped, narrowed by ids, status and list."""
+    if not body.ids and not body.status:
+        raise HTTPException(400, "Choose the requests to retry")
+    statuses = {"missing": ("not_found", "gave_up"), None: RETRYABLE}.get(body.status, (body.status,))
+    ids = set(body.ids or ())
+    items = [i for i in wishlist.items(user["username"]) if i["status"] in statuses and i["status"] in RETRYABLE
+             and not i.get("job_id") and (not ids or i["id"] in ids) and (body.list is None or i["list"] == body.list)]
+    for item in items:
+        wishlist.retry(item)
+    return {"count": len(items)}
+
+
+@app.post("/api/requests/{id}/rename")
+def rename_request(id: str, body: RequestRename, user=Depends(check_user)):
+    """Fix a request's artist or album/title; the corrected request is searched now."""
+    item = owned_request(id, user)
+    kind = item.get("kind", "album")
+    if kind not in ("album", "track"):
+        raise HTTPException(400, "Only albums and tracks can be renamed")
+    if item.get("job_id"):
+        raise HTTPException(409, "A download for this request is still running")
+    artist, name = body.artist.strip(), body.name.strip()
+    if not artist or not name:
+        raise HTTPException(400, "Enter an artist and " + ("an album" if kind == "album" else "a title"))
+    album, title = (name, "") if kind == "album" else (item.get("album") or "", name)
+    if wishlist_item_id(user["username"], item["list"], artist, album, kind, title) == id:
+        item.update(artist=artist, album=album, title=title)
+        wishlist.retry(item)
+        return wishlist.view(item)
+    extra = {k: item[k] for k in ("star", "position", "list_order", "playlist", "year", "hold") if item.get(k) is not None}
+    new = wishlist.add(user["username"], artist, album, item["list"], kind=kind, title=title, renew=True, **extra)
+    if new["status"] == "suggested":
+        new.update(status="wanted", note="Waiting to search", next_search_at=0)
+        wishlist.save(new)
+    with store.db() as db:
+        db.execute("DELETE FROM wishlist WHERE id=?", (id,))
+    return wishlist.view(new)
 
 
 def _stop_download(item):

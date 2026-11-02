@@ -37,6 +37,7 @@ def initialize(instance):
     ("request_music", {"kind": "track", "artist": "Vulfpeck", "title": "Sauna", "hold": False}, "POST", "/api/requests", {"kind": "track", "artist": "Vulfpeck", "title": "Sauna", "hold": False}),
     ("requests", {}, "GET", "/api/requests", {"status": "active", "limit": 50}),
     ("requests", {"q": "blawan", "status": "all", "limit": 5}, "GET", "/api/requests", {"q": "blawan", "status": "all", "limit": 5}),
+    ("requests", {"status": "suggested"}, "GET", "/api/requests", {"status": "suggested", "limit": 50}),
     ("requests", {"id": "r"}, "GET", "/api/requests/r", {"status": "active", "limit": 50}),
     ("request_action", {"id": "r", "action": "choose", "candidate_id": "c"}, "POST", "/api/requests/r/choose", {"candidate_id": "c"}),
     ("request_action", {"id": "r", "action": "retry"}, "POST", "/api/requests/r/retry", {}),
