@@ -48,8 +48,10 @@ function renderUnrequested() {
         return `<div class="suggest-artist"><div class="unreq-head"><label class="checkbox"><input type="checkbox" data-unreq-group="${n}" ${all ? "checked" : ""}> <strong>${esc(name)}</strong> <span class="muted">${plural(tracks.length, "track")}${lists ? ` · ${esc(lists)}` : ""}</span></label><button class="link" data-unreq-discard-group="${n}" title="Remove these tracks from Not requested yet for good">${tracks.length === 1 ? "Discard" : `Discard all ${tracks.length}`}</button></div><details class="suggest-tracks-wrap" data-unreq-key="${esc(name)}" ${tracks.length <= 6 || unreq.open.has(name) ? "open" : ""}><summary class="muted">Tracks</summary><div class="suggest-tracks">${tracks
           .map((t) => {
             const inAlbum = unreq.albums.get(albumKey(t)) || 0;
-            const album = by !== "album" && inAlbum > 1
-              ? `<button class="link" data-unreq-album="${esc(t.id)}" title="Select all ${inAlbum} not-yet-requested tracks from ${esc(t.album)}">Whole album (${inAlbum})</button>` : "";
+            const select = by !== "album" && inAlbum > 1
+              ? `<button class="link" data-unreq-album="${esc(t.id)}" title="Tick the ${inAlbum} tracks from ${esc(t.album)} that are in your lists">Select ${inAlbum} saved from album</button>` : "";
+            const album = t.album
+              ? `<button class="link" data-unreq-full-album="${esc(t.id)}" title="Request the complete album ${esc(t.album)}, every track on it, not only the ones you saved">Get full album</button>${select}` : "";
             return `<div class="unreq-track"><label class="checkbox"><input type="checkbox" data-unreq="${esc(t.id)}" ${unreq.selected.has(t.id) ? "checked" : ""}> <span>${trackLabel(t)}</span></label>${album}<button class="link" data-unreq-discard="${esc(t.id)}" title="Remove this track from Not requested yet for good">Discard</button></div>`;
           })
           .join("")}</div></details></div>`;
@@ -107,6 +109,13 @@ $("#unreq-items").addEventListener("click", (e) => {
     for (const t of tracks) all ? unreq.selected.delete(t.id) : unreq.selected.add(t.id);
     toast(all ? `${plural(tracks.length, "track")} unselected.` : `Selected ${plural(tracks.length, "track")} from ${tracks[0].album}.`);
     renderUnrequested();
+  } else if (button.dataset.unreqFullAlbum) {
+    const item = unreq.items.find((i) => i.id === button.dataset.unreqFullAlbum);
+    busy(button, async () => {
+      await api("/api/requests/choose", { ids: [item.id], get: true, album: true });
+      toast(`Requested the full album ${item.album}. Follow it in Requests.`);
+      await Promise.all([loadUnrequested(true), loadSummary()]);
+    });
   } else if (button.dataset.unreqDiscard) {
     discardUnrequested([button.dataset.unreqDiscard], button);
   } else if (button.dataset.unreqDiscardGroup) {

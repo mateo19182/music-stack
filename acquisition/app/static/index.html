@@ -6,21 +6,21 @@
     <meta name="color-scheme" content="light" />
     <title>Acquire</title>
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v=20261005-2" />
-    <link rel="stylesheet" href="/static/style.css?v=20261103-1" />
-    <script defer src="/static/js/core.js?v=20261103-1"></script>
-    <script defer src="/static/js/player.js?v=20261103-1"></script>
-    <script defer src="/static/js/search.js?v=20261103-1"></script>
-    <script defer src="/static/js/library.js?v=20261103-1"></script>
-    <script defer src="/static/js/jobs.js?v=20261103-1"></script>
-    <script defer src="/static/js/review.js?v=20261103-1"></script>
-    <script defer src="/static/js/needs.js?v=20261103-1"></script>
-    <script defer src="/static/js/requests.js?v=20261103-1"></script>
-    <script defer src="/static/js/unrequested.js?v=20261103-1"></script>
-    <script defer src="/static/js/overview.js?v=20261103-1"></script>
-    <script defer src="/static/js/users.js?v=20261103-1"></script>
-    <script defer src="/static/js/settings.js?v=20261103-1"></script>
-    <script defer src="/static/js/concerts.js?v=20261103-1"></script>
-    <script defer src="/static/js/main.js?v=20261103-1"></script>
+    <link rel="stylesheet" href="/static/style.css?v=20261103-2" />
+    <script defer src="/static/js/core.js?v=20261103-2"></script>
+    <script defer src="/static/js/player.js?v=20261103-2"></script>
+    <script defer src="/static/js/search.js?v=20261103-2"></script>
+    <script defer src="/static/js/library.js?v=20261103-2"></script>
+    <script defer src="/static/js/jobs.js?v=20261103-2"></script>
+    <script defer src="/static/js/review.js?v=20261103-2"></script>
+    <script defer src="/static/js/needs.js?v=20261103-2"></script>
+    <script defer src="/static/js/requests.js?v=20261103-2"></script>
+    <script defer src="/static/js/unrequested.js?v=20261103-2"></script>
+    <script defer src="/static/js/overview.js?v=20261103-2"></script>
+    <script defer src="/static/js/users.js?v=20261103-2"></script>
+    <script defer src="/static/js/settings.js?v=20261103-2"></script>
+    <script defer src="/static/js/concerts.js?v=20261103-2"></script>
+    <script defer src="/static/js/main.js?v=20261103-2"></script>
   </head>
   <body>
     <div id="toast" role="status" aria-live="polite" hidden></div>
@@ -93,7 +93,7 @@
 
         <section id="unrequested-view" hidden>
           <h1>Not requested yet</h1>
-          <p class="muted">Tracks saved in your lists that are not in your library. Nothing here is searched until you choose it. <strong>Get whole albums</strong> requests each chosen track's album once; <strong>Whole album</strong> on a track selects the rest of its album. <strong>Discard</strong> removes tracks for good.</p>
+          <p class="muted">Tracks saved in your lists that are not in your library. Nothing here is searched until you choose it. <strong>Get full album</strong> on a track, or <strong>Get full albums</strong> for the ticked tracks, requests the complete album, every track on it. <strong>Select saved from album</strong> only ticks the album's tracks in your lists. <strong>Discard</strong> removes tracks for good.</p>
           <div class="suggest-tools">
             <input id="unreq-filter" type="search" placeholder="Filter by artist, title or album" aria-label="Filter tracks" />
             <label>List<select id="unreq-list"><option value="">All lists</option></select></label>
@@ -106,7 +106,7 @@
             <span id="unreq-selected" class="muted"></span>
             <span class="spacer"></span>
             <button id="unreq-get" disabled>Get tracks</button>
-            <button id="unreq-albums" disabled>Get whole albums</button>
+            <button id="unreq-albums" disabled title="Request the complete album of each ticked track, every track on it">Get full albums</button>
             <button id="unreq-drop" class="quiet" disabled title="Remove the selected tracks for good; they are not offered again">Discard selected</button>
           </div>
           <div id="unreq-items"></div>
