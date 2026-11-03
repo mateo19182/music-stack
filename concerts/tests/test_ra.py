@@ -78,6 +78,39 @@ def test_repeated_page_stops_instead_of_looping(ra_event):
         reader(handle).events(START, START + timedelta(days=365))
 
 
+def _listing_pages(ra_event, pages, total):
+    def handle(request):
+        payload = json.loads(request.content)
+        if 'countries' in payload['query']:
+            return httpx.Response(200, json=area_response())
+        ids = pages[payload['variables']['page'] - 1] if payload['variables']['page'] <= len(pages) else []
+        rows = [{'listingDate': ra_event['date'], 'event': {**ra_event, 'id': str(i)}} for i in ids]
+        return httpx.Response(200, json={'data': {'eventListings': {'totalResults': total, 'data': rows}}})
+    return handle
+
+
+def test_row_repeated_across_pages_is_complete_and_counted(tmp_path, ra_event):
+    # RA's ordering can shift between pages: 4 rows arrive for totalResults=4, one twice.
+    p = reader(_listing_pages(ra_event, [[1, 2], [2, 3]], 4), tmp_path / 'cache.json')
+    events = p.events(START, START + timedelta(days=365))
+    assert sorted(e['id'] for e in events) == ['1', '2', '3']
+    assert p.duplicate_rows == 1 and p.requests == 3
+    cached = reader(lambda _: pytest.fail('fresh cache should not request RA'), tmp_path / 'cache.json')
+    cached.events(START, START + timedelta(days=365))
+    assert cached.duplicate_rows == 1
+
+
+def test_many_repeated_rows_are_still_incomplete(ra_event):
+    with pytest.raises(ProviderError, match='repeated too many'):
+        reader(_listing_pages(ra_event, [[1, 2, 3, 4, 5, 6, 7], [1, 2, 3, 4, 5, 6, 8]], 14)).events(
+            START, START + timedelta(days=365))
+
+
+def test_short_result_with_empty_page_is_incomplete(ra_event):
+    with pytest.raises(ProviderError, match='incomplete area or event data'):
+        reader(_listing_pages(ra_event, [[1, 2]], 3)).events(START, START + timedelta(days=365))
+
+
 def test_ra_errors_are_bounded():
     p = reader(lambda _: httpx.Response(503), budget=2)
     with pytest.raises(ProviderError, match='budget'):

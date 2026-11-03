@@ -133,6 +133,19 @@ def test_notification_retry_change_and_missing_event(tmp_path, library, event):
     state.close()
 
 
+def test_going_on_sale_is_not_another_alert(tmp_path, library, event):
+    # Already announced as "Not on sale": tickets opening later is not a new or changed date.
+    event["dates"]["status"]["code"] = "offsale"
+    state = State(tmp_path / "events.db")
+    events = select_events([event], ArtistIndex(read_library(library)))[0]
+    state.delivered(state.observe(events))
+    events[0]["status"] = "onsale"
+    assert state.observe(events) == []
+    events[0]["status"] = "postponed"
+    assert state.observe(events)[0][1] is True
+    state.close()
+
+
 def test_each_successful_batch_is_retained_after_later_failure(tmp_path, library, event):
     base = select_events([event], ArtistIndex(read_library(library)))[0][0]
     events = []

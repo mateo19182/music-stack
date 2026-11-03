@@ -98,7 +98,8 @@ def same_show(left, right):
 
 def notification_signature(event):
     # Source attribution, title wording and URL changes alone do not warrant another alert.
-    status = "listed" if event["status"] in {"onsale", "listed"} else event["status"]
+    # Nor does a sale-window change (not on sale -> on sale): the date was already announced.
+    status = "listed" if event["status"] in {"onsale", "listed", "offsale"} else event["status"]
     return (event["date"], event["time"][:5], event["date_unknown"], event["time_unknown"],
             place_key(event["venue"]), place_key(event["city"]), sorted(event["artists"]), status)
 

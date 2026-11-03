@@ -70,7 +70,8 @@ def sync(config, raw_events=None, send=False, provider_factory=Ticketmaster, ra_
                 try:
                     ra_events = provider.events(start, end)
                     sources["Resident Advisor"] = {"status": "ok", "events": len(ra_events),
-                                                    "cached": provider.cache_used, "areas": provider.areas}
+                                                    "cached": provider.cache_used, "areas": provider.areas,
+                                                    "duplicate_rows": getattr(provider, "duplicate_rows", 0)}
                 except (ProviderError, OSError) as error:
                     message = str(error) if isinstance(error, ProviderError) else "RA cache unavailable"
                     sources["Resident Advisor"] = {"status": "unavailable", "error": message}

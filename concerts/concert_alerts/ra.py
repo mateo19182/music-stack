@@ -36,6 +36,7 @@ class ResidentAdvisor:
         self.requests = 0
         self.cache_used = False
         self.areas = []
+        self.duplicate_rows = 0
 
     def close(self):
         if self.owns_client:
@@ -77,6 +78,7 @@ class ResidentAdvisor:
                 if cache["dates"] == dates and 0 <= age < 6 * 3600 and isinstance(cache["events"], list):
                     self.cache_used = True
                     self.areas = cache["areas"]
+                    self.duplicate_rows = cache.get("duplicate_rows", 0)
                     return cache["events"]
             except (OSError, ValueError, KeyError, TypeError):
                 pass
@@ -86,7 +88,7 @@ class ResidentAdvisor:
             area_ids = [int(area["id"]) for area in self.areas]
             if not area_ids:
                 raise ValueError
-            found, listings, page, total = {}, set(), 1, None
+            found, listings, page, total, received = {}, set(), 1, None, 0
             while True:
                 data = self._query(EVENTS_QUERY, {
                     "filters": {"areas": {"any": area_ids}, "listingDate": {"gte": dates[0], "lte": dates[1]}},
@@ -97,8 +99,9 @@ class ResidentAdvisor:
                     raise ProviderError("RA result count changed; source incomplete")
                 total = count
                 rows = data["data"]
-                if not isinstance(rows, list) or (len(listings) < total and not rows):
+                if not isinstance(rows, list) or (received < total and not rows):
                     raise ValueError
+                received += len(rows)
                 previous = len(listings)
                 for row in rows:
                     event = row["event"]
@@ -109,10 +112,15 @@ class ResidentAdvisor:
                     # Multi-day listings can repeat the same event on different days.
                     listings.add((event["id"], row.get("listingDate", event["date"])))
                     found[str(event["id"])] = event
-                if len(listings) >= total:
-                    break
-                if len(listings) == previous:
+                if len(listings) == previous and len(listings) < total:
                     raise ProviderError("RA pagination made no progress; source incomplete")
+                # RA's page order is not stable: a listing can appear on two pages, so another one
+                # may have been skipped. Stop on rows received, and record the repeats.
+                if received >= total:
+                    self.duplicate_rows = received - len(listings)
+                    if self.duplicate_rows > max(5, total // 50):
+                        raise ProviderError("RA repeated too many listings across pages; source incomplete")
+                    break
                 page += 1
         except (KeyError, TypeError, ValueError, StopIteration):
             raise ProviderError("RA returned incomplete area or event data") from None
@@ -120,7 +128,8 @@ class ResidentAdvisor:
         if self.cache_path:
             self.cache_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             temporary = self.cache_path.with_suffix(".tmp")
-            temporary.write_text(json.dumps({"saved_at": time.time(), "dates": dates, "areas": self.areas, "events": events}))
+            temporary.write_text(json.dumps({"saved_at": time.time(), "dates": dates, "areas": self.areas,
+                                             "duplicate_rows": self.duplicate_rows, "events": events}))
             temporary.chmod(0o600)
             temporary.replace(self.cache_path)
         return events
