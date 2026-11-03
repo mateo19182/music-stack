@@ -1859,3 +1859,18 @@ table.users tr.no-access th,
 table.users tr.no-access td {
   color: var(--muted);
 }
+.unreq-head,
+.unreq-track {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+.unreq-track button.link,
+.unreq-head button.link {
+  color: var(--muted);
+  white-space: nowrap;
+}
+.unreq-track button.link:hover,
+.unreq-head button.link:hover {
+  color: inherit;
+}
