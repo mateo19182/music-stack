@@ -2,8 +2,9 @@
 
 A self-hosted music setup: Navidrome for listening, an acquisition app
 for search and review, and Soulseek downloads through AirVPN. The app processes
-private copies with Beets, FFmpeg and Essentia. OpenRouter gives metadata advice;
-the user approves publication manually.
+private copies with Beets, FFmpeg and Essentia. A model (Claude Haiku through the
+owner's cliproxy) matches search results and gives metadata advice; the user
+approves publication manually.
 
 This repository contains application source, both Compose projects, pinned
 container images, configuration templates, agent tools, and deployment notes.
@@ -58,8 +59,8 @@ SoundCloud, Bandcamp and Vimeo URLs are supported.
    otherwise the new track is added alongside it.
 4. With automatic adding on (Requests, separately for requests and inbox
    imports), tracks with nothing to decide go straight into the library. The
-   open questions below go to a strong model first (`review_model`, default
-   `openai/gpt-6-luna` at high effort, through OpenRouter); it adds, replaces or
+   open questions below go to a model first (`review_model`, default
+   `claude-haiku-5-5` with `review_effort` high); it adds, replaces or
    skips each track from the metadata and your rules (best copy only, skip
    instrumentals, keep other versions), and its reason is kept on the job.
    **Needs you** then holds only what the model was unsure of, each with one-click answers:
@@ -69,7 +70,7 @@ SoundCloud, Bandcamp and Vimeo URLs are supported.
    - a library version that may be a different recording
    **Recently added** lists the last week's additions. **Undo** takes tracks back
    to Review and restores any version they replaced. Albums, mixed inbox batches,
-   filters, tag editing and OpenRouter advice still work as before.
+   filters, tag editing and model advice still work as before.
 5. Added tracks are published. Tracks left out stay in Review; skipped ones remain private. Navidrome
    scans the accepted library, and the Soulseek share tree gets managed audio
    links. Everything accepted is shared by default; admins can exclude tracks or
@@ -160,8 +161,9 @@ media root with ownership that permits that user to write:
 
 Run `./scripts/init-config.sh`, then edit the private files under `config/`:
 
-- `acquisition/config.json`: slskd API key, optional OpenRouter key, model and
-  site URLs, optional `discogs_token` and `lastfm_api_key` for genre and year
+- `acquisition/config.json`: slskd API key, optional model key (`llm_api_key`,
+  a cliproxy `cpa_` key; `llm_base_url` defaults to `https://ai.m19182.dev/v1`)
+  and site URLs, optional `discogs_token` and `lastfm_api_key` for genre and year
   lookups. Its slskd key must match the key in `slskd/slskd.yml`.
 - `slskd/slskd.yml`: Soulseek account, admin credentials and API key. Share only
   `/data/shared`; pending or rejected downloads must stay private.
@@ -188,8 +190,8 @@ curl --fail http://127.0.0.1:4534/api/health
 Create Navidrome users through its first-run/admin interface. Acquisition uses
 their credentials for browser sign-in. Optional `navidrome_scan` credentials in
 acquisition config request an immediate scan; otherwise the scheduled scan runs
-every five minutes. The OpenRouter key enables automatic metadata advice;
-without a key the app still supports manual review.
+every five minutes. The model key enables matching by model, the review model
+and metadata advice; without a key the matching rules and manual review still work.
 
 Genre and mood estimates need Essentia's models (about 23 MB, CC BY-NC-ND 4.0)
 in the acquisition state directory. Run `./scripts/fetch-models.sh`; it uses
@@ -240,15 +242,18 @@ to the agent's operating instructions, then start a new conversation with `/new`
 to refresh them.
 
 Ask Hermes to find a track or album, compare sources, queue your chosen source,
-check download progress, or summarize pending reviews. It can request OpenRouter
+check download progress, or summarize pending reviews. It can request model
 advice and report deterministic album/duplicate concerns. Publication remains a
 manual action in Acquire. The tool allowlist and backend agent permissions exclude
 approval, rejection and sharing changes. Dedicated credentials stay in the
 mode-0600 file named by `--credentials`; provision a replacement in Acquire if its
 90-day token expires.
 
-The example config leaves the OpenRouter key blank. The default review model is
-`meta/muse-spark-1.3-contributor`, independent of Hermes's chat model.
+The example config leaves the model key blank. Every model call goes to one
+OpenAI-compatible endpoint (`llm_base_url`); `match_model`, `review_model` and
+`advice_model` all default to `claude-haiku-5-5`, independent of Hermes's chat model.
+The container reaches cliproxy through its public URL because the proxy's host
+port is bound to 127.0.0.1.
 
 ## State and backups
 

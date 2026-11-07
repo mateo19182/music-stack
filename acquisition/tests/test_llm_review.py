@@ -5,7 +5,9 @@ from unittest.mock import patch
 import httpx
 import pytest
 
-from app.llm_review import ENDPOINT, Reviewer, ReviewError, TAG_FIELDS
+from app.llm_review import Reviewer, ReviewError, TAG_FIELDS
+
+ENDPOINT = 'https://ai.m19182.dev/v1/chat/completions'
 
 
 def payload(count=1):
@@ -29,14 +31,14 @@ def response(result, status=200):
 
 
 def reviewer():
-    return Reviewer({'openrouter_api_key': 'secret-config-key', 'openrouter_model': 'test/model'})
+    return Reviewer({'llm_api_key': 'secret-config-key', 'advice_model': 'test/model'})
 
 
 def test_key_configuration_and_missing_config_does_not_request_provider(monkeypatch):
-    monkeypatch.setenv('OPENROUTER_API_KEY', 'environment-key')
+    monkeypatch.setenv('LLM_API_KEY', 'environment-key')
     assert Reviewer({}).configured
     assert reviewer()._key == 'secret-config-key'
-    monkeypatch.delenv('OPENROUTER_API_KEY')
+    monkeypatch.delenv('LLM_API_KEY')
     with patch('app.llm_review.httpx.post') as post, pytest.raises(ReviewError, match='not configured'):
         Reviewer({}).review(payload())
     post.assert_not_called()
@@ -58,7 +60,7 @@ def test_request_redaction_instruction_boundaries_and_read_only_inputs():
     request = post.call_args.kwargs
     assert request['timeout'] == 60
     assert request['json']['response_format']['json_schema']['strict'] is True
-    assert request['json']['provider']['require_parameters'] is True
+    assert request['json']['reasoning_effort'] == 'none' and 'provider' not in request['json']
     content = request['json']['messages'][1]['content']
     for private in ['DO-NOT-SEND', 'PRIVATE-OWNER', '/library/secret.mp3', 'PRIVATE-HASH', 'PRIVATE-PEER', 'secret-config-key', '/mnt/private', 'private.example']:
         assert private not in content
@@ -122,7 +124,7 @@ def test_exact_duplicate_advice_is_allowed_only_with_evidence():
     assert result['status'] == 'skip_duplicate'
 
 
-@pytest.mark.parametrize('code,expected', [(401, 'API key'), (402, 'credits'), (429, 'rate limit'), (500, 'HTTP 500')])
+@pytest.mark.parametrize('code,expected', [(401, 'API key'), (402, 'spending limit'), (429, 'rate limit'), (500, 'HTTP 500')])
 def test_provider_error_messages_do_not_leak_response_body(code, expected):
     error = httpx.Response(code, text='secret-config-key private provider stack', request=httpx.Request('POST', ENDPOINT))
     with patch('app.llm_review.httpx.post', return_value=error), pytest.raises(ReviewError, match=expected) as exc:

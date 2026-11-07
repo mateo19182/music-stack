@@ -1496,7 +1496,7 @@ def request_advice(id: str, user=Depends(check_user)):
     if job["stage"] != "review":
         raise HTTPException(409, "Job is not awaiting review")
     if not reviewer.configured:
-        raise HTTPException(503, "OpenRouter review advice is not configured")
+        raise HTTPException(503, "AI review advice is not configured")
     with advice_lock:
         latest = owned_job(id, user)
         if latest["stage"] != "review":

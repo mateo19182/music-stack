@@ -97,7 +97,7 @@ def test_advice_provider_failure_keeps_manual_review_available(backend, monkeypa
     seed_review(main)
     def failed(payload):
         main.stop.set()
-        raise main.ReviewError('OpenRouter is unavailable.')
+        raise main.ReviewError('AI review is unavailable.')
     monkeypatch.setattr(main, 'reviewer', SimpleNamespace(configured=True, model='test', review=failed))
     client.post('/api/jobs/job/advice',json={})
     main.stop.clear()

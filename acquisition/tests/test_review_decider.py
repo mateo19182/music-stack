@@ -38,13 +38,13 @@ def test_the_model_sees_metadata_only_and_its_answers_are_checked():
             {"id": "a", "action": "skip", "replace": [], "reason": "a repeated id is ignored"},
             {"id": "x", "action": "add", "replace": [], "reason": "an invented id is ignored"}]}))
 
-    decider = Decider({"openrouter_api_key": "k"}, post=post)
+    decider = Decider({"llm_api_key": "k"}, post=post)
     job = {"candidate": {"requested_artist": "Overmono", "requested_album": "Good Lies", "source": "soulseek"}}
     decisions = decider.decide(job, records(), PLANS)
     assert decisions["a"]["action"] == "replace" and decisions["a"]["replace"][0]["path"].endswith("Good Lies.mp3")
     assert decisions["b"]["action"] == "unsure"   # left out by the model: the owner decides
     request = sent[0]
-    assert request["model"] == "openai/gpt-6-luna" and request["reasoning"] == {"effort": "high"}
+    assert request["model"] == "claude-haiku-5-5" and request["reasoning_effort"] == "high"
     data = json.loads(request["messages"][1]["content"])
     assert data["tracks"][0]["kbps"] == 900 and data["tracks"][0]["seconds"] == 160
     assert "/library" not in request["messages"][1]["content"]   # library paths stay on the server
@@ -52,11 +52,11 @@ def test_the_model_sees_metadata_only_and_its_answers_are_checked():
 
 def test_replace_without_a_library_copy_and_an_unreachable_model_leave_it_to_the_owner():
     answer = {"decisions": [{"id": "a", "action": "replace", "replace": ["L9"], "reason": "x"}]}
-    decider = Decider({"openrouter_api_key": "k"}, post=lambda url, **kw: Response(json.dumps(answer)))
+    decider = Decider({"llm_api_key": "k"}, post=lambda url, **kw: Response(json.dumps(answer)))
     assert decider.decide({}, records()[:1], PLANS)["a"]["action"] == "unsure"
 
     def down(url, **kw):
         raise httpx.ConnectError("down")
 
-    assert Decider({"openrouter_api_key": "k"}, post=down).decide({}, records(), PLANS) is None
+    assert Decider({"llm_api_key": "k"}, post=down).decide({}, records(), PLANS) is None
     assert not Decider({}).enabled

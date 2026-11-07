@@ -8,8 +8,9 @@ from app.llm_match import Judge
 
 def reply(verdicts, status=200):
     response = Mock(status_code=status)
-    response.json.return_value = {"content": [{"type": "tool_use", "input": {"verdicts": verdicts}}],
-                                  "usage": {"input_tokens": 1000, "output_tokens": 100}}
+    response.json.return_value = {"choices": [{"message": {"tool_calls": [{"function": {
+        "name": "record_verdicts", "arguments": json.dumps({"verdicts": verdicts})}}]}}],
+        "usage": {"prompt_tokens": 1000, "completion_tokens": 100}}
     response.raise_for_status = (lambda: None) if status == 200 else Mock(side_effect=httpx.HTTPStatusError(
         "bad", request=Mock(), response=Mock(status_code=status)))
     return response
@@ -21,7 +22,7 @@ CANDIDATES = [{"source": "soulseek", "directory": "Music\\A - B", "file_count": 
 
 def judge(response):
     calls = []
-    j = Judge({"anthropic_api_key": "k"}, post=lambda *a, **k: calls.append(k["json"]) or response)
+    j = Judge({"llm_api_key": "k"}, post=lambda *a, **k: calls.append(k["json"]) or response)
     return j, calls
 
 
@@ -30,8 +31,9 @@ def test_verdicts_for_every_candidate_and_the_cost():
                             {"id": "c1", "match": False, "problem": "chapter_or_part", "reason": "chapter"}]))
     found = j.verdicts("A", "B", CANDIDATES, 2024)
     assert found[0]["match"] is True and found[1]["problem"] == "chapter_or_part"
-    sent = json.loads(calls[0]["messages"][0]["content"])
-    assert set(sent["candidates"]) == {"c0", "c1"} and "temperature" not in calls[0]
+    sent = json.loads(calls[0]["messages"][1]["content"])
+    assert set(sent["candidates"]) == {"c0", "c1"} and calls[0]["model"] == "claude-haiku-5-5"
+    assert calls[0]["tool_choice"]["function"]["name"] == "record_verdicts"
     assert round(j.cost(), 6) == round((1000 * 0.10 + 100 * 0.50) / 1e6, 6)
 
 
@@ -50,54 +52,21 @@ def test_api_errors_and_a_missing_key_fall_back():
     j, _ = judge(reply([], status=400))
     assert j.verdicts("A", "B", CANDIDATES) is None
     assert Judge({}).verdicts("A", "B", CANDIDATES) is None
-    assert Judge({"anthropic_api_key": "k", "llm_matching": False}).enabled is False
+    assert Judge({"llm_api_key": "k", "llm_matching": False}).enabled is False
 
 
-def test_openrouter_tool_calls_and_reported_cost():
-    response = Mock(status_code=200, raise_for_status=lambda: None)
-    response.json.return_value = {"choices": [{"message": {"tool_calls": [{"function": {"name": "record_verdicts", "arguments": json.dumps(
-        {"verdicts": [{"id": "c0", "match": True, "problem": "none", "reason": ""},
-                      {"id": "c1", "match": False, "problem": "other_artist", "reason": "x"}]})}}]}}],
-        "usage": {"prompt_tokens": 900, "completion_tokens": 80, "cost": 0.0021}}
+def test_endpoint_model_and_confidence_come_from_config():
     sent = []
-    j = Judge({"match_provider": "openrouter", "openrouter_api_key": "k"}, post=lambda url, **k: sent.append((url, k)) or response)
-    assert j.model == "typesafe/jev-router"
-    found = j.verdicts("A", "B", CANDIDATES)
-    assert found[1]["problem"] == "other_artist"
-    assert sent[0][0].startswith("https://openrouter.ai/") and sent[0][1]["json"]["tool_choice"]["function"]["name"] == "record_verdicts"
-    assert j.cost() == 0.0021
-
-
-def test_decisions_api_one_yes_no_question_per_candidate():
-    response = Mock(status_code=200, raise_for_status=lambda: None)
-    response.json.return_value = {"answers": {"c0": {"type": "noul", "noul": 0.93}, "c1": {"type": "noul", "noul": 0.08}},
-                                  "usage": {"input_tokens": 600, "output_tokens": 4, "cost": 0.000025}}
-    sent = []
-    j = Judge({"match_provider": "decisions", "openrouter_api_key": "k"}, post=lambda url, **k: sent.append((url, k["json"])) or response)
-    assert j.model == "~typesafe/jev-latest"
-    found = j.verdicts("A", "B", CANDIDATES)
-    assert found[0]["match"] is True and found[1]["match"] is False and found[0]["reason"] == "93% likely the album"
-    url, body = sent[0]
-    assert url.endswith("/api/alpha/decisions") and set(body["questions"]) == {"c0", "c1"}
-    assert body["questions"]["c0"]["type"] == "noul" and "candidates" in body["state"]
-    assert j.cost() == 0.000025
-    response.json.return_value = {"answers": {"c0": {"type": "noul", "noul": 0.9}}, "usage": {}}   # one missing
-    assert j.verdicts("A", "B", CANDIDATES) is None
-
-
-def test_jev_can_answer_none_of_these():
-    response = Mock(status_code=200, raise_for_status=lambda: None)
-    response.json.return_value = {"answers": {"c0": {"type": "noul", "noul": 0.6}, "c1": {"type": "noul", "noul": 0.1},
-                                              "best": {"type": "choice", "choice": "none", "probabilities": {"c0": 0.3, "c1": 0, "none": 0.7}}},
-                                  "usage": {"cost": 0.00002}}
-    sent = []
-    j = Judge({"match_provider": "decisions", "openrouter_api_key": "k", "match_none_option": True},
-              post=lambda url, **k: sent.append(k["json"]) or response)
-    found = j.verdicts("A", "B", CANDIDATES)
-    assert not any(v["match"] for v in found.values()) and found[0]["problem"] == "none_chosen"
-    assert set(sent[0]["questions"]["best"]["criteria"]) == {"c0", "c1", "none"}
-    response.json.return_value["answers"]["best"] = {"type": "choice", "choice": "c0"}
-    assert j.verdicts("A", "B", CANDIDATES)[0]["match"] is True
+    response = reply([{"id": "c0", "match": False, "problem": "other_artist", "p_wanted": 0.3, "reason": "x"},
+                      {"id": "c1", "match": True, "problem": "none", "p_wanted": 7, "reason": "y"},
+                      {"id": "c2", "match": False, "problem": "version", "p_wanted": 0.9, "reason": "z"}])
+    j = Judge({"llm_api_key": "k", "llm_base_url": "http://proxy/v1/", "match_model": "m"},
+              post=lambda url, **k: sent.append((url, k)) or response)
+    found = j.verdicts("A", "B", CANDIDATES + [{"source": "youtube", "title": "B"}])
+    assert sent[0][0] == "http://proxy/v1/chat/completions" and sent[0][1]["json"]["model"] == "m"
+    assert sent[0][1]["headers"]["Authorization"] == "Bearer k"
+    assert found[0]["probability"] == 0.3
+    assert found[1]["probability"] is None and found[2]["probability"] is None   # out of range, or disagrees with the verdict
 
 
 def test_track_verdicts_show_each_file_with_its_length_and_the_reference():
@@ -106,7 +75,7 @@ def test_track_verdicts_show_each_file_with_its_length_and_the_reference():
                              [{"source": "soulseek", "filename": "Music\\gecs\\05 hand crushed.flac", "duration": 175}],
                              "1000 gecs and The Tree of Clues", {"title": "1000 gecs and The Tree of Clues", "tracks": [("hand crushed", 175)]})
     assert found[0]["match"] is True
-    sent = json.loads(calls[0]["messages"][0]["content"])
+    sent = json.loads(calls[0]["messages"][1]["content"])
     assert sent["candidates"]["c0"] == {"source": "soulseek file", "path": "Music/gecs/05 hand crushed.flac", "seconds": 175}
     assert sent["reference_tracklist"]["tracks"] == [{"title": "hand crushed", "seconds": 175}]
-    assert "recording" in calls[0]["system"]
+    assert "recording" in calls[0]["messages"][0]["content"]

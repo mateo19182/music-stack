@@ -1,14 +1,14 @@
-"""Metadata-only OpenRouter advice. Never changes files or approves publication."""
+"""Metadata-only model advice. Never changes files or approves publication."""
 from __future__ import annotations
 
 import json
 import math
-import os
 import re
 
 import httpx
 
-ENDPOINT = 'https://openrouter.ai/api/v1/chat/completions'
+from .llm import DEFAULT_MODEL, Endpoint
+
 STATUSES = {'looks_fine', 'check', 'skip_duplicate'}
 TAG_FIELDS = ('artist', 'title', 'album', 'genre')
 SYSTEM_PROMPT = '''Review music acquisition metadata for a human who will decide whether to publish.
@@ -216,13 +216,14 @@ def _status(files):
 
 class Reviewer:
     def __init__(self, config):
-        self._key = config.get('openrouter_api_key') or os.environ.get('OPENROUTER_API_KEY', '')
-        self.model = config.get('openrouter_model') or 'meta/muse-spark-1.3-contributor'
-        self.configured = bool(self._key) and config.get('review_advice', True)   # off: Jev already picks the album
+        self._endpoint = Endpoint(config)
+        self._key = self._endpoint.key
+        self.model = config.get('advice_model') or DEFAULT_MODEL
+        self.configured = bool(self._key) and config.get('review_advice', True)
 
     def review(self, job_payload):
         if not self.configured:
-            raise ReviewError('AI review is not configured. Add an OpenRouter API key or review manually.')
+            raise ReviewError('AI review is not configured. Add an llm_api_key or review manually.')
         if not isinstance(job_payload, dict):
             raise ReviewError('Invalid AI review request.')
         context, files = _sanitize(job_payload, self._key)
@@ -233,10 +234,8 @@ class Reviewer:
             content = {**context, 'files': batch, 'total_job_files': len(files),
                        'batch_start': offset, 'batch_is_subset': len(batch) != len(files)}
             try:
-                response = httpx.post(ENDPOINT,
-                    headers={'Authorization': 'Bearer ' + self._key, 'Content-Type': 'application/json', 'X-Title': 'Music acquisition metadata review'},
-                    json={'model': self.model, 'temperature': 0, 'max_tokens': 6000,
-                          'provider': {'require_parameters': True},
+                response = httpx.post(self._endpoint.url, headers=self._endpoint.headers(),
+                    json={'model': self.model, 'temperature': 0, 'max_tokens': 6000, 'reasoning_effort': 'none',
                           'messages': [{'role': 'system', 'content': SYSTEM_PROMPT},
                                        {'role': 'user', 'content': json.dumps(content, ensure_ascii=False)}],
                           'response_format': {'type': 'json_schema', 'json_schema': {'name': 'music_metadata_review', 'strict': True, 'schema': SCHEMA}}},
@@ -245,11 +244,11 @@ class Reviewer:
                 data = response.json()
             except httpx.HTTPStatusError as error:
                 code = error.response.status_code
-                detail = {401: 'OpenRouter rejected the API key.', 402: 'OpenRouter credits are insufficient.',
-                          429: 'OpenRouter rate limit reached. Retry later.'}.get(code, f'OpenRouter review failed with HTTP {code}.')
+                detail = {401: 'The model endpoint rejected the API key.', 402: 'The model key is over its spending limit.',
+                          429: 'Model rate limit reached. Retry later.'}.get(code, f'AI review failed with HTTP {code}.')
                 raise ReviewError(detail + ' Your files are unchanged; manual review remains available.') from None
             except (httpx.HTTPError, ValueError):
-                raise ReviewError('OpenRouter review is unavailable. Retry later or review manually; your files are unchanged.') from None
+                raise ReviewError('AI review is unavailable. Retry later or review manually; your files are unchanged.') from None
             try:
                 choice = data['choices'][0]
                 if not isinstance(choice, dict):

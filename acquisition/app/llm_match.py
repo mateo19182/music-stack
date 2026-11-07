@@ -15,15 +15,11 @@ from pathlib import PureWindowsPath
 
 import httpx
 
+from .llm import DEFAULT_MODEL, Endpoint, cost
+
 log = logging.getLogger("acquisition")
 
-ENDPOINT = "https://api.anthropic.com/v1/messages"
-OPENROUTER = "https://openrouter.ai/api/v1/chat/completions"
-DECISIONS = "https://openrouter.ai/api/alpha/decisions"   # TypeSafe Jev: typed answers with probabilities
-DEFAULT_MODEL = {"anthropic": "claude-haiku-5-5", "openrouter": "typesafe/jev-router", "decisions": "~typesafe/jev-latest"}
-MATCH_PROBABILITY = 0.5
 MAX_CANDIDATES = 25
-PRICES = {"claude-haiku-5-5": (0.10, 0.50)}   # USD per million input / output tokens
 
 SYSTEM = """You decide which music search results are a requested album, for a home music library.
 Each candidate is a Soulseek folder (path, file names, track count), a torrent release title, or a
@@ -78,9 +74,11 @@ TOOL = {
                 "match": {"type": "boolean"},
                 "problem": {"type": "string", "enum": ["none", "other_artist", "other_record", "chapter_or_part",
                                                         "version", "edition", "partial", "compilation", "unclear"]},
+                "p_wanted": {"type": "number", "description": "Probability, 0 to 1, that this candidate IS the wanted "
+                             "record: high when match is true, low when false; around 0.2-0.4 for a rejected but plausible one."},
                 "reason": {"type": "string", "description": "Under 15 words."},
             },
-            "required": ["id", "match", "problem", "reason"]}}},
+            "required": ["id", "match", "problem", "p_wanted", "reason"]}}},
         "required": ["verdicts"],
     },
 }
@@ -107,98 +105,37 @@ def describe_track(c):
 
 class Judge:
     def __init__(self, config, post=httpx.post):
-        self.provider = config.get("match_provider") or "anthropic"
-        self.key = config.get("anthropic_api_key" if self.provider == "anthropic" else "openrouter_api_key") or ""
-        self.model = config.get("match_model") or DEFAULT_MODEL.get(self.provider, "")
-        self.enabled = bool(self.key) and config.get("llm_matching", True)
-        self.none_gate = config.get("match_none_option", False)   # tested 2026-10-08: vetoed good albums (144 vs 147 of 151)
+        self.endpoint = Endpoint(config)
+        self.model = config.get("match_model") or DEFAULT_MODEL
+        self.enabled = bool(self.endpoint.key) and config.get("llm_matching", True)
         self.post = post
-        self.usage = {"calls": 0, "input": 0, "output": 0, "usd": 0.0}
+        self.usage = {"calls": 0, "input": 0, "output": 0}
 
     def cost(self):
-        if self.usage["usd"]:
-            return self.usage["usd"]   # OpenRouter reports what each call cost
-        price_in, price_out = PRICES.get(self.model, (0.10, 0.50))
-        return (self.usage["input"] * price_in + self.usage["output"] * price_out) / 1e6
+        return cost(self.model, self.usage["input"], self.usage["output"])
 
     def _call(self, request, system=SYSTEM):
-        """The model's tool input (the verdicts object), from either provider."""
-        content = json.dumps(request, ensure_ascii=False)
-        if self.provider == "openrouter":
-            response = self.post(OPENROUTER, timeout=120, headers={"Authorization": f"Bearer {self.key}"}, json={
-                "model": self.model, "max_tokens": 4000, "usage": {"include": True},
-                "messages": [{"role": "system", "content": system}, {"role": "user", "content": content}],
-                "tools": [{"type": "function", "function": {"name": TOOL["name"], "description": TOOL["description"],
-                                                            "parameters": TOOL["input_schema"]}}],
-                "tool_choice": {"type": "function", "function": {"name": TOOL["name"]}}})
-            response.raise_for_status()
-            data = response.json()
-            usage = data.get("usage") or {}
-            self._count(usage.get("prompt_tokens"), usage.get("completion_tokens"), usage.get("cost"))
-            calls = ((data.get("choices") or [{}])[0].get("message") or {}).get("tool_calls") or []
-            arguments = calls[0]["function"]["arguments"] if calls else "{}"
-            return json.loads(arguments) if isinstance(arguments, str) else arguments
-        response = self.post(ENDPOINT, timeout=60, headers={
-            "x-api-key": self.key, "anthropic-version": "2023-06-01", "content-type": "application/json"}, json={
-            "model": self.model, "max_tokens": 4000, "system": system,
-            "tools": [TOOL], "tool_choice": {"type": "tool", "name": "record_verdicts"},
-            "messages": [{"role": "user", "content": content}]})
+        """The model's forced tool call (the verdicts object). A forced tool call also keeps the
+        proxy from adding extended thinking, which this short classification does not need."""
+        response = self.post(self.endpoint.url, timeout=120, headers=self.endpoint.headers(), json={
+            "model": self.model, "max_tokens": 4000, "temperature": 0,
+            "messages": [{"role": "system", "content": system},
+                         {"role": "user", "content": json.dumps(request, ensure_ascii=False)}],
+            "tools": [{"type": "function", "function": {"name": TOOL["name"], "description": TOOL["description"],
+                                                        "parameters": TOOL["input_schema"]}}],
+            "tool_choice": {"type": "function", "function": {"name": TOOL["name"]}}})
         response.raise_for_status()
         data = response.json()
         usage = data.get("usage") or {}
-        self._count(usage.get("input_tokens"), usage.get("output_tokens"))
-        return next((b.get("input") for b in data.get("content") or [] if b.get("type") == "tool_use"), None) or {}
+        self._count(usage.get("prompt_tokens"), usage.get("completion_tokens"))
+        calls = ((data.get("choices") or [{}])[0].get("message") or {}).get("tool_calls") or []
+        arguments = calls[0]["function"]["arguments"] if calls else "{}"
+        return json.loads(arguments) if isinstance(arguments, str) else arguments
 
-    def _decide(self, request, count, system=SYSTEM, wanted="album"):
-        """Jev answers one short yes/no question per candidate, in parallel, with a probability each.
-        The matching rules travel once, in the shared state, not in every question."""
-        rules = system.split("A candidate matches only if", 1)[1].split("Answer with", 1)[0].strip()
-        request = {**request, "matching_rules": "A candidate matches only if " + rules}
-        questions = {f"c{n}": {"type": "noul", "instructions": f"Is candidate c{n} the wanted {wanted}, by matching_rules?",
-                               "criteria": {"true": f"Yes, it is the wanted {wanted}.", "false": "No."}}
-                     for n in range(count)}
-        if self.none_gate:
-            # One comparison across all candidates, with a way out: a lone or doubtful candidate
-            # is no longer judged in isolation.
-            questions["best"] = {"type": "choice", "instructions": "Which candidate is the wanted album, by matching_rules? "
-                                                                   "Answer none when no candidate is clearly the wanted album.",
-                                 "criteria": {**{f"c{n}": f"Candidate c{n}." for n in range(count)},
-                                              "none": "None of the candidates is the wanted album."}}
-        try:
-            response = self.post(DECISIONS, timeout=120, headers={"Authorization": f"Bearer {self.key}"}, json={
-                "model": self.model, "state": request, "questions": questions})
-            response.raise_for_status()
-            data = response.json()
-            answers = data["answers"]
-        except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
-            status = getattr(getattr(exc, "response", None), "status_code", None)
-            log.warning("Album matching model unavailable%s; using the rules", f" (HTTP {status})" if status else "")
-            return None
-        usage = data.get("usage") or {}
-        self._count(usage.get("input_tokens"), usage.get("output_tokens"), usage.get("cost"))
-        found = {}
-        for n in range(count):
-            p = (answers.get(f"c{n}") or {}).get("noul") if isinstance(answers, dict) else None
-            if isinstance(p, (int, float)) and 0 <= p <= 1:
-                found[n] = {"match": p >= MATCH_PROBABILITY, "problem": "none" if p >= MATCH_PROBABILITY else "unclear",
-                            "reason": f"{round(p * 100)}% likely the {wanted}", "probability": p}
-        if len(found) != count:
-            log.warning("Album matching model answered %d of %d candidates; using the rules", len(found), count)
-            return None
-        best = answers.get("best") if self.none_gate and isinstance(answers, dict) else None
-        if isinstance(best, dict) and best.get("choice") == "none":
-            none = (best.get("probabilities") or {}).get("none")
-            for verdict in found.values():
-                if verdict["match"]:
-                    verdict.update(match=False, problem="none_chosen",
-                                   reason=verdict["reason"] + f", but none of the candidates fits ({round((none or 0) * 100)}%)")
-        return found
-
-    def _count(self, tokens_in, tokens_out, usd=None):
+    def _count(self, tokens_in, tokens_out):
         self.usage["calls"] += 1
         self.usage["input"] += int(tokens_in or 0)
         self.usage["output"] += int(tokens_out or 0)
-        self.usage["usd"] += float(usd or 0)
 
     def verdicts(self, artist, album, candidates, year=None, tracklist=None):
         """{candidate index: verdict} for every candidate, or None (unavailable, error, incomplete answer)."""
@@ -220,11 +157,9 @@ class Judge:
                    "reference_tracklist": tracklist and {"title": tracklist.get("title"), "artist": tracklist.get("artist"),
                                                          "tracks": [{"title": t, "seconds": s} for t, s in tracklist.get("tracks") or []][:40]},
                    "candidates": {f"c{n}": describe_track(c) for n, c in enumerate(shown)}}
-        return self._judge(request, len(shown), TRACK_SYSTEM, "recording")
+        return self._judge(request, len(shown), TRACK_SYSTEM)
 
-    def _judge(self, request, count, system=SYSTEM, wanted="album"):
-        if self.provider == "decisions":
-            return self._decide(request, count, system, wanted)
+    def _judge(self, request, count, system=SYSTEM):
         try:
             answer = self._call(request, system)
         except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as exc:
@@ -243,8 +178,12 @@ class Judge:
                 continue
             id = str(v.get("id", ""))
             if id.startswith("c") and id[1:].isdigit() and int(id[1:]) < count and isinstance(v.get("match"), bool):
+                p = v.get("p_wanted")
+                # Only a probability that agrees with the verdict is kept: the YouTube fallback in
+                # wishlist reads it as "how plausible", and a rejection scored 0.9 would pass it.
+                ok = isinstance(p, (int, float)) and 0 <= p <= 1 and (p >= 0.5) == v["match"]
                 found[int(id[1:])] = {"match": v["match"], "problem": str(v.get("problem") or "")[:30],
-                                      "reason": str(v.get("reason") or "")[:200]}
+                                      "reason": str(v.get("reason") or "")[:200], "probability": p if ok else None}
         if len(found) != count:
             log.warning("Album matching model answered %d of %d candidates; using the rules", len(found), count)
             return None

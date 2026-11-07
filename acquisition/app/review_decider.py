@@ -10,10 +10,10 @@ import re
 
 import httpx
 
+from .llm import DEFAULT_MODEL, Endpoint
+
 log = logging.getLogger("acquisition.review_decider")
 
-OPENROUTER = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_MODEL = "openai/gpt-6-luna"
 ACTIONS = ("add", "replace", "skip", "unsure")
 
 SYSTEM = """You decide, for the owner of a personal music library, what happens to downloaded tracks
@@ -76,10 +76,10 @@ def _kbps(value):
 
 class Decider:
     def __init__(self, config, post=httpx.post):
-        self.key = config.get("openrouter_api_key") or ""
+        self.endpoint = Endpoint(config)
         self.model = config.get("review_model") or DEFAULT_MODEL
-        self.effort = config.get("review_effort") or "high"
-        self.enabled = bool(self.key) and config.get("review_decider", True)
+        self.effort = config.get("review_effort") or "high"   # OpenAI reasoning_effort: none, low, medium, high
+        self.enabled = bool(self.endpoint.key) and config.get("review_decider", True)
         self.post = post
 
     def request(self, job, records, plans):
@@ -122,8 +122,8 @@ class Decider:
             return None
         context, refs = self.request(job, records, plans)
         try:
-            response = self.post(OPENROUTER, timeout=300, headers={"Authorization": f"Bearer {self.key}"}, json={
-                "model": self.model, "reasoning": {"effort": self.effort}, "max_tokens": 20000,
+            response = self.post(self.endpoint.url, timeout=300, headers=self.endpoint.headers(), json={
+                "model": self.model, "reasoning_effort": self.effort, "max_tokens": 20000,
                 "messages": [{"role": "system", "content": SYSTEM},
                              {"role": "user", "content": json.dumps(context, ensure_ascii=False)}],
                 "response_format": {"type": "json_schema",
