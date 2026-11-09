@@ -21,4 +21,4 @@ jobs:
       - name: Backend tests
         run: PYTHONPATH=acquisition pytest -q acquisition/tests
       - name: Frontend syntax
-        run: node --check acquisition/app/static/app.js
+        run: for f in acquisition/app/static/js/*.js; do node --check "$f"; done

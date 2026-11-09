@@ -42,8 +42,10 @@ _audio_index_lock = threading.Lock()
 # Library-wide lookups, rebuilt at most once a minute: publishing a 66-track album used to
 # rescan the whole library (every provenance file twice, every audio file once) per track.
 CACHE_SECONDS = 60
-_provenance_cache = {'at': 0.0, 'root': None, 'records': {}}
-_digest_cache = {'at': 0.0, 'root': None, 'paths': {}}
+# -inf, not 0.0, marks a cache stale: time.monotonic() counts from boot, so on a machine up for
+# under CACHE_SECONDS (a fresh CI runner, a reboot) 0.0 would still look fresh.
+_provenance_cache = {'at': float('-inf'), 'root': None, 'records': {}}
+_digest_cache = {'at': float('-inf'), 'root': None, 'paths': {}}
 _cache_lock = threading.Lock()
 
 
@@ -64,7 +66,7 @@ def _json(path, data):
 
 def _forget():
     with _cache_lock:
-        _provenance_cache['at'] = _digest_cache['at'] = 0.0
+        _provenance_cache['at'] = _digest_cache['at'] = float('-inf')
 
 
 class _ExistingRecords(dict):
