@@ -982,7 +982,7 @@ def test_a_request_holds_at_its_copies_for_a_choice_and_pending_lists_it(backend
     chosen = client.post(f"/api/requests/{held['id']}/choose", json={"candidate_id": "c2"}).json()
     assert chosen["status"] == "wanted" and main.store.get("wishlist", held["id"])["pick"] == "c2"
     assert client.get("/api/pending").json()["choices"] == []
-    assert client.get("/api/requests/suggested").json() == {"items": []}   # not taken for a request id
+    assert client.get("/api/requests/suggested").json() == {"items": [], "requested": 0}   # not taken for a request id
     signin(main, client, monkeypatch, name="other", admin=False)
     assert client.get(f"/api/requests/{held['id']}").status_code == 404
 
@@ -1239,6 +1239,24 @@ def test_saved_tracks_can_bring_their_whole_album(backend, monkeypatch):
     assert main.store.get("wishlist", sly) is None and main.store.get("wishlist", vein) is None
     assert main.store.get("wishlist", other)["status"] == "suggested"
     assert main.store.get("wishlist", single)["status"] == "wanted"   # no album named: the track itself
+
+
+def test_suggestions_already_requested_by_track_or_album_leave_the_picker(backend, monkeypatch):
+    main, client = backend
+    signin(main, client, monkeypatch)
+    suggest = lambda title, album: main.wishlist.add("mateo", "Herbie Hancock", album, "Saved tracks", kind="track",
+                                                     title=title, status="suggested")["id"]
+    sly, chameleon, rockit = suggest("Sly", "Head Hunters (Remastered)"), suggest("Chameleon", ""), suggest("Rockit", "Future Shock")
+    remix = suggest("Watermelon Man", "Head Hunters (The Remixes)")
+    main.wishlist.add("mateo", "Herbie Hancock", "Head Hunters", "Saved albums")
+    main.wishlist.add("mateo", "Herbie Hancock", "", "Requests", kind="track", title="Chameleon (feat. Someone)")
+    main.wishlist.add("mateo", "Herbie Hancock", "Future Shock", "Saved albums", status="skipped")
+    picker = client.get("/api/requests/suggested").json()
+    assert {i["id"] for i in picker["items"]} == {rockit, remix} and picker["requested"] == 2
+    assert client.get("/api/requests/summary").json()["suggested"] == 2
+    listed = client.get("/api/requests", params={"status": "suggested"}).json()
+    assert listed["suggested"] == 2 and {i["id"] for i in listed["items"]} == {rockit, remix}
+    assert {sly, chameleon} <= {i["id"] for i in main.wishlist.items("mateo") if i["status"] == "suggested"}   # kept, only hidden
 
 
 def seed_requests(main, owner="mateo"):

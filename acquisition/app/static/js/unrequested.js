@@ -1,5 +1,7 @@
 // Not requested yet: tracks saved in your lists that are not in the library. Nothing is searched until chosen here.
-const unreq = { items: [], loaded: false, groups: [], selected: new Set(), shown: 40, open: new Set() };
+// `rank` keeps each group where it was while tracks leave it (got, discarded): only a change of filter,
+// grouping or sort, or coming back to the view, orders the groups again.
+const unreq = { items: [], loaded: false, groups: [], selected: new Set(), shown: 40, open: new Set(), rank: null, last: null };
 const UNREQ_GROUPS = {
   artist: (i) => i.artist || "Unknown artist",
   album: (i) => `${i.artist || "Unknown artist"} — ${i.album || "No album"}`,
@@ -8,9 +10,18 @@ const UNREQ_GROUPS = {
 const albumKey = (i) => (i.album ? `${i.artist}\u0000${i.album}`.toLocaleLowerCase().replace(/\s+/g, " ").trim() : "");
 // Every not-yet-requested track of the album, whichever list it was saved in.
 const albumTracks = (i) => unreq.items.filter((t) => t.album && albumKey(t) === albumKey(i));
+const byName = (a, b) => (a || "").localeCompare(b || "", undefined, { sensitivity: "base", numeric: true });
+const newest = (tracks) => Math.max(...tracks.map((t) => t.added_at || 0));
+const UNREQ_SORTS = {
+  count: (a, b) => b[1].length - a[1].length || byName(a[0], b[0]),
+  name: (a, b) => byName(a[0], b[0]),
+  recent: (a, b) => newest(b[1]) - newest(a[1]) || byName(a[0], b[0]),
+};
 async function loadUnrequested(force = false) {
   if (!unreq.loaded || force) {
-    unreq.items = (await api("/api/requests/suggested")).items;
+    const data = await api("/api/requests/suggested");
+    unreq.items = data.items.sort((a, b) => byName(a.artist, b.artist) || byName(a.album, b.album) || byName(a.title, b.title));
+    unreq.requested = data.requested || 0;
     unreq.loaded = true;
     unreq.albums = new Map();
     for (const i of unreq.items) if (i.album) unreq.albums.set(albumKey(i), (unreq.albums.get(albumKey(i)) || 0) + 1);
@@ -37,7 +48,10 @@ function renderUnrequested() {
     const key = UNREQ_GROUPS[by](i);
     groups.has(key) ? groups.get(key).push(i) : groups.set(key, [i]);
   }
-  unreq.groups = [...groups].sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
+  const sort = UNREQ_SORTS[$("#unreq-sort").value] || UNREQ_SORTS.count;
+  const rank = unreq.rank;
+  unreq.groups = [...groups].sort((a, b) => rank ? (rank.get(a[0]) ?? Infinity) - (rank.get(b[0]) ?? Infinity) || sort(a, b) : sort(a, b));
+  unreq.rank = new Map(unreq.groups.map(([key], n) => [key, n]));
   const shown = unreq.groups.slice(0, unreq.shown);
   const trackLabel = (t) => by === "artist" ? esc(t.title) + (t.album ? ` <span class="muted">· ${esc(t.album)}</span>` : "")
     : by === "album" ? esc(t.title) : `${esc(t.artist)} — ${esc(t.title)}`;
@@ -58,25 +72,38 @@ function renderUnrequested() {
       }).join("") + (unreq.groups.length > shown.length ? `<button class="quiet" id="unreq-more">Show more (${unreq.groups.length - shown.length} groups left)</button>` : "")
     : `<div class="empty">${unreq.items.length ? "Nothing matches the filter." : "Nothing left: every saved track is requested or in your library."}</div>`;
   const count = unreq.selected.size;
-  $("#unreq-summary").textContent = `${plural(matching.length, "track")}${matching.length !== unreq.items.length ? ` of ${unreq.items.length.toLocaleString()}` : ""} · ${plural(unreq.groups.length, by === "list" ? "list" : by)}`;
+  $("#unreq-summary").textContent = `${plural(matching.length, "track")}${matching.length !== unreq.items.length ? ` of ${unreq.items.length.toLocaleString()}` : ""} · ${plural(unreq.groups.length, by === "list" ? "list" : by)}${unreq.requested ? ` · ${unreq.requested.toLocaleString()} already requested, not shown` : ""}`;
   $("#unreq-selected").textContent = count ? `${count.toLocaleString()} selected` : "";
   $("#unreq-select-all").textContent = `Select all ${matching.length.toLocaleString()}`;
   for (const id of ["#unreq-get", "#unreq-albums", "#unreq-drop", "#unreq-clear"]) $(id).disabled = !count;
 }
 const rerenderUnrequested = () => {
   unreq.shown = 40;
+  unreq.rank = unreq.last = null;
   renderUnrequested();
 };
 $("#unreq-filter").addEventListener("input", rerenderUnrequested);
 $("#unreq-group").addEventListener("change", rerenderUnrequested);
+$("#unreq-sort").addEventListener("change", rerenderUnrequested);
 $("#unreq-list").addEventListener("change", (e) => {
   state.listFilter = e.target.value;
   rerenderUnrequested();
 });
+// Track boxes are handled on click, which carries Shift: a shift-click sets every visible track box
+// between the last one clicked and this one to this one's state.
+$("#unreq-items").addEventListener("click", (e) => {
+  const box = e.target;
+  if (!box.matches?.("input[data-unreq]")) return;
+  const visible = [...$("#unreq-items").querySelectorAll("input[data-unreq]")].filter((b) => b.closest("details")?.open);
+  const from = visible.findIndex((b) => b.dataset.unreq === unreq.last), to = visible.indexOf(box);
+  const range = e.shiftKey && from >= 0 && to >= 0 ? visible.slice(Math.min(from, to), Math.max(from, to) + 1) : [box];
+  for (const b of range) box.checked ? unreq.selected.add(b.dataset.unreq) : unreq.selected.delete(b.dataset.unreq);
+  unreq.last = box.dataset.unreq;
+  renderUnrequested();
+});
 $("#unreq-items").addEventListener("change", (e) => {
   const box = e.target;
-  if (box.dataset.unreq) box.checked ? unreq.selected.add(box.dataset.unreq) : unreq.selected.delete(box.dataset.unreq);
-  else if (box.dataset.unreqGroup)
+  if (box.dataset.unreqGroup)
     for (const t of unreq.groups[Number(box.dataset.unreqGroup)][1])
       box.checked ? unreq.selected.add(t.id) : unreq.selected.delete(t.id);
   renderUnrequested();
@@ -143,9 +170,14 @@ for (const [button, get, album] of [["#unreq-get", true, false], ["#unreq-albums
       await Promise.all([loadUnrequested(true), loadSummary()]);
     });
   });
-views.unrequested = { load: () => loadUnrequested(true) };
+views.unrequested = {
+  load: () => {
+    unreq.rank = unreq.last = null;
+    return loadUnrequested(true);
+  },
+};
 logoutHooks.push(() => {
-  Object.assign(unreq, { items: [], loaded: false, groups: [], shown: 40 });
+  Object.assign(unreq, { items: [], loaded: false, groups: [], shown: 40, rank: null, last: null });
   unreq.selected.clear();
   $("#unreq-items").innerHTML = "";
 });

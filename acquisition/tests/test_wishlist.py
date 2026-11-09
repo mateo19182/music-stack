@@ -365,6 +365,19 @@ class WishlistTests(unittest.TestCase):
         self.assertEqual(self.store.get("wishlist", item["id"])["status"], "have")
         self.assertEqual(sources.calls, [])
 
+    def test_a_saved_track_that_reaches_the_library_is_had_not_offered(self):
+        sources = FakeSources({"soulseek": [slsk("a")]})
+        w = self.wishlist(sources)
+        here = w.add("mateo", "Vulfpeck", "", "Saved tracks", kind="track", title="Sauna", status="suggested")
+        missing = w.add("mateo", "Vulfpeck", "", "Saved tracks", kind="track", title="Dean Town", status="suggested")
+        library = {"a": {"artists": {matching.key("Vulfpeck")}, "titles": {matching.track_key("Sauna (feat. Antwaun Stanley)")},
+                         "tracks": [], "qualities": []}}
+        with patch.object(Wishlist, "_library", return_value=library):
+            w.tick()
+        self.assertEqual(self.store.get("wishlist", here["id"])["status"], "have")
+        self.assertEqual(self.store.get("wishlist", missing["id"])["status"], "suggested")
+        self.assertEqual(sources.calls, [])
+
     def test_entries_without_an_album_are_skipped(self):
         w = self.wishlist(FakeSources({}))
         self.assertEqual(w.add("mateo", "", "Some mixtape talk")["status"], "skipped")
@@ -538,6 +551,16 @@ def test_a_track_is_in_the_library_by_artist_and_title_but_not_as_a_remix():
     assert matching.library_has_track(library, {"artist": "Vulfpeck", "title": "Sauna"})
     assert not matching.library_has_track(library, {"artist": "Vulfpeck", "title": "Birds of a Feather"})
     assert not matching.library_has_track(library, {"artist": "Someone Else", "title": "Sauna"})
+
+
+def test_tracks_in_library_agrees_with_library_has_track():
+    library = {"a": {"artists": {matching.key("Vulfpeck")}, "titles": {matching.track_key("Sauna (feat. Antwaun Stanley)"),
+                                                                      matching.track_key("Birds of a Feather (Remix)")}},
+               "b": {"artists": {matching.key("Kokoroko")}, "titles": {""}}}
+    items = [{"artist": a, "title": t} for a, t in [("Vulfpeck", "Sauna"), ("Vulfpeck", "Birds of a Feather"),
+                                                     ("Someone Else", "Sauna"), ("Kokoroko", ""), ("Vulfpeck & Friends", "Sauna")]]
+    assert matching.tracks_in_library(library, items) == [i for i in items if matching.library_has_track(library, i)]
+    assert len(matching.tracks_in_library(library, items)) == 2
 
 
 def test_a_compilation_is_searched_by_its_title_and_unrelated_lossless_cannot_crowd_it_out(tmp_path):

@@ -17,7 +17,7 @@ from mediafile import MediaFile
 from .store import Store, uid, now
 from .sources import Sources, SourceError, SoulseekUnavailable, DownloadCancelled, youtube_url, _timestamp
 from . import matching
-from .wishlist import KINDS, Wishlist, item_id as wishlist_item_id, lossy as wishlist_lossy
+from .wishlist import KINDS, Wishlist, covered_suggestions, item_id as wishlist_item_id, lossy as wishlist_lossy
 from .llm_match import Judge
 from typing import List, Literal
 from . import concerts
@@ -2208,11 +2208,12 @@ def list_requests(user=Depends(check_user), q: str = "", status: str = "", limit
     status (`suggested` too), or `active` (not settled); `list` to one list; `q` matches artist, album
     or title; `limit` caps the items."""
     everything = wishlist.items(user["username"])
+    covered = covered_suggestions(everything)
     items = [i for i in everything if i["status"] != "suggested"]
-    suggested = len(everything) - len(items)
+    suggested = len(everything) - len(items) - len(covered)
     lists = list(dict.fromkeys(i["list"] for i in items))
     if status == "suggested":
-        items = [i for i in everything if i["status"] == "suggested"]
+        items = [i for i in everything if i["status"] == "suggested" and i["id"] not in covered]
     elif status == "active":
         items = [i for i in items if i["status"] not in REQUEST_SETTLED]
     elif status and status != "all":
@@ -2239,7 +2240,11 @@ def request_summary(user=Depends(check_user)):
     def counts():
         return dict.fromkeys(REQUEST_STATUSES, 0)
     statuses, lists, suggested, lossy, upgrading, searched = counts(), {}, 0, 0, 0, None
-    for i in wishlist.items(user["username"]):
+    everything = wishlist.items(user["username"])
+    covered = covered_suggestions(everything)
+    for i in everything:
+        if i["id"] in covered:
+            continue   # its track or album is requested: counted there
         entry = lists.setdefault(i["list"], {"name": i["list"], "statuses": counts(), "suggested": 0, "lossy": 0, "total": 0})
         entry["total"] += 1
         if i["status"] == "suggested":
@@ -2269,9 +2274,13 @@ def request_summary(user=Depends(check_user)):
 
 @app.get("/api/requests/suggested")
 def suggested_requests(user=Depends(check_user)):
-    """Tracks offered for the owner to choose (saved elsewhere, missing here); none is searched until chosen."""
-    return {"items": [{k: i.get(k) for k in ("id", "artist", "title", "album", "list")}
-                      for i in wishlist.items(user["username"]) if i["status"] == "suggested"]}
+    """Tracks offered for the owner to choose (saved elsewhere, missing here); none is searched until chosen.
+    Those whose track or album is already requested are left out and counted in `requested`."""
+    everything = wishlist.items(user["username"])
+    covered = covered_suggestions(everything)
+    return {"items": [{k: i.get(k) for k in ("id", "artist", "title", "album", "list", "added_at")}
+                      for i in everything if i["status"] == "suggested" and i["id"] not in covered],
+            "requested": len(covered)}
 
 
 @app.post("/api/requests/choose")

@@ -15,7 +15,7 @@
     <script defer src="/static/js/review.js?v=20261103-2"></script>
     <script defer src="/static/js/needs.js?v=20261103-2"></script>
     <script defer src="/static/js/requests.js?v=20261103-2"></script>
-    <script defer src="/static/js/unrequested.js?v=20261103-2"></script>
+    <script defer src="/static/js/unrequested.js?v=20261109-1"></script>
     <script defer src="/static/js/overview.js?v=20261103-2"></script>
     <script defer src="/static/js/users.js?v=20261103-2"></script>
     <script defer src="/static/js/settings.js?v=20261103-2"></script>
@@ -93,11 +93,12 @@
 
         <section id="unrequested-view" hidden>
           <h1>Not requested yet</h1>
-          <p class="muted">Tracks saved in your lists that are not in your library. Nothing here is searched until you choose it. <strong>Get full album</strong> on a track, or <strong>Get full albums</strong> for the ticked tracks, requests the complete album, every track on it. <strong>Select saved from album</strong> only ticks the album's tracks in your lists. <strong>Discard</strong> removes tracks for good.</p>
+          <p class="muted">Tracks saved in your lists that are not in your library. Nothing here is searched until you choose it; tracks already requested, alone or with their album, are not shown. Shift-click a box to tick the range up to it. <strong>Get full album</strong> on a track, or <strong>Get full albums</strong> for the ticked tracks, requests the complete album, every track on it. <strong>Select saved from album</strong> only ticks the album's tracks in your lists. <strong>Discard</strong> removes tracks for good.</p>
           <div class="suggest-tools">
             <input id="unreq-filter" type="search" placeholder="Filter by artist, title or album" aria-label="Filter tracks" />
             <label>List<select id="unreq-list"><option value="">All lists</option></select></label>
             <label>Group by<select id="unreq-group"><option value="artist">Artist</option><option value="album">Album</option><option value="list">List</option></select></label>
+            <label>Sort<select id="unreq-sort"><option value="count">Most saved</option><option value="name">A–Z</option><option value="recent">Recently saved</option></select></label>
           </div>
           <div class="suggest-tools sticky">
             <span id="unreq-summary" class="muted"></span>

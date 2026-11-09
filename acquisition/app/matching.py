@@ -70,6 +70,16 @@ def library_has_track(library, item):
     return bool(wanted) and any(wanted in a.get('titles', ()) and artist_matches(artist, a['artists']) for a in library.values())
 
 
+def tracks_in_library(library, items):
+    """The items whose track the library holds: library_has_track for many items at once."""
+    by_title = collections.defaultdict(list)
+    for a in library.values():
+        for title in a.get('titles', ()):
+            by_title[title].append(a['artists'])
+    return [i for i in items if any(artist_matches(key(clean_artist(i['artist'])), artists)
+                                    for artists in by_title.get(track_key(i.get('title')) or None, ()))]
+
+
 MIXED = re.compile(r'\s*(?:-\s*mixed|[\(\[]\s*mixed\s*[\)\]])\s*$', re.I)
 
 

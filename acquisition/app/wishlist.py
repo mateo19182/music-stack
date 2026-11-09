@@ -90,6 +90,34 @@ def name(item):
     return item.get("album") if item.get("kind", "album") == "album" else item.get("title") or item.get("url") or ""
 
 
+OTHER_RECORD = re.compile(r"\b(?:" + "|".join(matching.UNWANTED + ("mix", "vip", "dub")) + r")", re.I)
+
+
+def _album_keys(artist, album):
+    """"X (Remastered)" is album X too; "X (The Remixes)" is another record."""
+    album = album or ""
+    brackets = "".join(re.findall(r"[\(\[].*?[\)\]]", album))
+    names = (album,) if OTHER_RECORD.search(brackets) else (album, re.sub(r"\s*[\(\[].*?[\)\]]", "", album))
+    return {(artist, matching.album_key(a)) for a in names if matching.album_key(a)}
+
+
+def covered_suggestions(items):
+    """Ids of the suggestions already asked for another way: the same track requested in another
+    list, or its album requested. They leave the picker while that request stands; a stopped one
+    does not count."""
+    tracks, albums = set(), set()
+    ident = lambda i: matching.key(matching.clean_artist(i["artist"]))
+    for i in items:
+        if i["status"] in ("suggested", "skipped"):
+            continue
+        if i.get("kind") == "track":
+            tracks.add((ident(i), matching.track_key(i.get("title"))))
+        elif i.get("kind", "album") == "album":
+            albums |= _album_keys(ident(i), i.get("album"))
+    return {i["id"] for i in items if i["status"] == "suggested"
+            and ((ident(i), matching.track_key(i.get("title"))) in tracks or _album_keys(ident(i), i.get("album")) & albums)}
+
+
 class Wishlist:
     def __init__(self, store, config, sources, enqueue, soulseek_ready=lambda: True, clock=time.time, judge=None,
                  tracklist=None, youtube_ready=lambda: True, youtube_enabled=lambda: True):
@@ -182,11 +210,14 @@ class Wishlist:
 
     # ---- the loop ------------------------------------------------------------------------
     def tick(self):
+        everything = self.items()
+        library = self._library() if everything else None
+        if library is not None:
+            self._settle_suggestions(everything, library)
         # Suggestions wait for the owner to choose them; they are never searched.
-        items = [i for i in self.items() if i.get("status") not in ("skipped", "suggested")]
+        items = [i for i in everything if i.get("status") not in ("skipped", "suggested")]
         if not items:
             return
-        library = self._library()
         jobs = {j["id"]: j for j in self.store.list("jobs")}
         # A few searches per tick (each can take a minute): job updates for other requests stay prompt.
         self._searches_left = int(self.config.get("wishlist_searches_per_tick", 3))
@@ -203,6 +234,13 @@ class Wishlist:
                 self.sync_playlists(library)
             except Exception as exc:
                 log.warning("Playlist sync failed: %s", str(exc)[:200])
+
+    def _settle_suggestions(self, everything, library):
+        """A saved track that reached the library some other way is had, no longer offered."""
+        waiting = [i for i in everything if i.get("status") == "suggested" and i.get("kind") == "track"]
+        for item in matching.tracks_in_library(library, waiting):
+            item.update(status="have", note="In the library", candidates=[])
+            self.save(item)
 
     def _advance(self, item, library, jobs, everything):
         item.setdefault("kind", "album")
