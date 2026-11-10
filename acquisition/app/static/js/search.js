@@ -192,6 +192,7 @@ function renderResults(data) {
   state.results = data.results || [];
   state.searchStatus = data.status || "complete";
   if ("error" in data) state.searchError = data.error;
+  if ("note" in data) state.searchNote = data.note;
   $("#search-results").hidden = false;
   const searching = SEARCHING.includes(state.searchStatus);
   const formats = [...new Set(state.results.flatMap(resultFiles).map(resultFormat).filter(Boolean))].sort();
@@ -212,7 +213,9 @@ function renderResults(data) {
     : state.searchStatus === "failed"
       ? `<span class="error">${esc(state.searchError || "Search failed. Try again.")}</span>`
       : esc(`${strong.length} match${strong.length === 1 ? "" : "es"}${weak.length ? `, ${weak.length} partial` : ""}${sources.length ? ` · ${sources.map(([s, n]) => `${s} ${n}`).join(", ")}` : ""}${filtered ? ` · ${shown.length} of ${state.results.length} files shown` : ""}`);
-  const warning = state.searchStatus !== "failed" && state.searchError ? `<p class="error">${esc(state.searchError)}</p>` : "";
+  const warning =
+    (state.searchStatus !== "failed" && state.searchError ? `<p class="error">${esc(state.searchError)}</p>` : "") +
+    (state.searchNote ? `<p class="muted">${esc(state.searchNote)}</p>` : "");
   const list = (groups) => `<div class="result-list">${groups.map(resultRow).join("")}</div>`;
   $("#results").innerHTML = searching
     ? ""
@@ -260,6 +263,7 @@ async function runSearch() {
   const generation = ++state.searchGeneration;
   state.searchSource = input.source;
   state.searchError = null;
+  state.searchNote = null;
   renderResults({ results: [], status: "searching" });
   const data = await api("/api/search", input).catch((error) => {
     renderResults({ results: [], status: "failed", error: error.message });
@@ -367,7 +371,16 @@ $("#search-form [name=query]").addEventListener("input", (e) => {
   if (!$("#search-form .precise").hidden) showPrecise(false);
   if (queryIsLink() && e.inputType === "insertFromPaste") readLink(e.target.value.trim());
 });
+// Typing a title or an album in the separate fields says what is searched for.
+$("#search-form .precise").addEventListener("input", (e) => {
+  const title = $("#search-form [name=title]").value.trim();
+  if (e.target.name === "album" || e.target.name === "title")
+    $(`#search-form [name=kind][value=${title ? "track" : "album"}]`).checked = true;
+});
+const savedKind = localStorage.getItem("searchKind");
+if (savedKind === "album" || savedKind === "track") $(`#search-form [name=kind][value=${savedKind}]`).checked = true;
 $("#search-form").addEventListener("change", (e) => {
+  if (e.target.name === "kind") localStorage.setItem("searchKind", e.target.value);
   if (e.target.name === "source" && e.target.value === "torrent")
     $("#search-form [name=kind][value=album]").checked = true;
   if (e.target.name === "kind" && e.target.value === "track" && $("#search-form [name=source][value=torrent]").checked)
