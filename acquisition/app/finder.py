@@ -57,7 +57,7 @@ Which results are the record:
   sped-up or karaoke version, a compilation or soundtrack bundle, unless the request names that version
 - an album must be complete or nearly: compare with the reference tracklist; one missing track or a bonus track or
   two is fine, a folder holding a few songs of the album is not
-- a song: the same recording; its length should match the reference within about 5 seconds; it may sit in a
+- a song: pick files from kind track searches, never a folder or release; the same recording; its length should match the reference within about 5 seconds; it may sit in a
   folder of another release (single, EP, compilation); a file found by its title must have the artist in its path
 - names may be messy: years, formats, catalog numbers, scene names, track numbers, other scripts are fine
 - substitute true marks a copy that is close but not exactly the request, for the owner to decide: another edition
@@ -213,6 +213,8 @@ class Finder:
             c = shown.get(str((p or {}).get("id") or "")) if isinstance(p, dict) else None
             if not c or matching.provider(c) in seen or not eligible(c, avoid):
                 continue
+            if item["kind"] == "track" and c.get("kind") != "track":
+                continue   # a song is one file, not the folder or release around it
             seen.add(matching.provider(c))
             c = {**c, "judged": "model", "reason": str(p.get("reason") or "")[:200]}
             if p.get("substitute") is True:

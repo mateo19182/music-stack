@@ -543,6 +543,16 @@ def test_the_search_budget_and_unavailable_sources_are_the_model_s_to_handle(tmp
     assert store.get("wishlist", item["id"])["status"] == "not_found"
 
 
+def test_a_song_request_takes_files_not_the_album_folder_around_them(tmp_path):
+    store, queued = Store(tmp_path / "a.db"), []
+    folder = slsk("usb", folder="Fred again.. - USB")
+    f, _ = finder([search("fred again usb")], [("finish", {"picks": [{"id": "r1", "reason": "album holding the song"}], "note": "x"})])
+    w = _wishlist(store, FakeSources({"soulseek": [folder]}), f, queued)
+    item = w.add("mateo", "Fred again..", "USB", kind="track", title="Berwyn")
+    w.tick()
+    assert queued == [] and store.get("wishlist", item["id"])["status"] == "not_found"
+
+
 def test_a_substitute_waits_for_a_choice_and_a_single_s_song_keeps_its_title(tmp_path):
     store, queued = Store(tmp_path / "a.db"), []
     song = {"id": "s-gibbs", "source": "soulseek", "kind": "track", "username": "gibbs", "title": "1995", "free_slots": True,
