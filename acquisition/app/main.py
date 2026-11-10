@@ -15,7 +15,7 @@ from starlette.background import BackgroundTask
 from mediafile import MediaFile
 
 from .store import Store, uid, now
-from .sources import Sources, SourceError, SoulseekUnavailable, DownloadCancelled, youtube_url, _timestamp
+from .sources import Sources, SourceError, SoulseekUnavailable, PremiumFormatMissing, DownloadCancelled, youtube_url, _timestamp
 from . import matching
 from .wishlist import KINDS, Wishlist, covered_suggestions, item_id as wishlist_item_id, lossy as wishlist_lossy
 from . import finder as finding
@@ -937,6 +937,8 @@ def worker(stages=("queued", "process_queued", "publish_queued"), quick_only=Fal
                                  detail="Soulseek connection problem; retries automatically. " + str(exc)[:300])
                 continue
             log.exception("Job %s failed at %s", id, failed_stage)
+            if isinstance(exc, PremiumFormatMissing):
+                _premium["checked"] = 0.0   # check the login now, not up to six hours from now
             if job["stage"] == "downloading" and job["candidate"].get("source") == "soulseek":
                 # Requests this job left waiting in slskd would hold up every later download (on
                 # 2026-10-09 some 14,000 piled up). Finished parts stay on disk; a retry asks again.

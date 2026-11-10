@@ -39,6 +39,8 @@ SoundCloud, Bandcamp and Vimeo URLs are supported.
    searched until you press Search all parked: missing requests search again and
    lossy ones look for a lossless copy. YouTube is used only with a Premium login (256 kbps), one album at a
    time with pauses between tracks, and can be switched off (`youtube_enabled`).
+   The login is checked every six hours, and at once when a download finds no
+   Premium format; an expired login sends a Telegram alert and stops YouTube.
    A compilation by "Various Artists" is searched by its title.
 2. To pick a copy yourself, search, filter results by file type and quality, and
    choose **Get this**: that copy is tried first, then others if it fails.
