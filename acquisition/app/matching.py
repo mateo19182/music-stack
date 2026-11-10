@@ -60,8 +60,8 @@ def in_library(navidrome_db):
 def track_key(title):
     """A track title without "(feat. X)" and other bracketed credits, but with a version that
     makes it another recording ("(Remix)", "(Live)")."""
-    title = str(title or '')
-    kept = [m for m in re.findall(r'[\(\[](.*?)[\)\]]', title) if re.search('|'.join(UNWANTED + ('edit', 'mix', 'version', 'vip', 'dub')), m, re.I)]
+    title = re.sub(r'\s+(?:-\s+)?(?:feat|ft)\.?\s[^\(\[]*$', '', str(title or ''), flags=re.I)   # Spotify's "Song - feat. X"
+    kept = [m for m in re.findall(r'[\(\[](.*?)[\)\]]', title) if re.search('|'.join(UNWANTED + ('edit', 'mix', 'version', 'vip', 'dub', 'alternate', 'demo')), m, re.I)]
     return key(re.sub(r'\s*[\(\[].*?[\)\]]', '', title) + ' '.join(kept))
 
 
@@ -210,8 +210,10 @@ def matches(album, text):
 
 
 def library_has(library, item):
-    # A single or two from an album is not the album: those get downloaded whole.
-    return len(album_tracks(library, item)) >= 4
+    # A single or two from an album is not the album: those get downloaded whole. A record of
+    # fewer than four tracks (a single asked for as an album) is had once all of them are there.
+    reference = (item.get('tracklist') or {}).get('tracks') or ()
+    return len(album_tracks(library, item)) >= min(4, len(reference) or 4)
 
 
 def superseded(item, everything):

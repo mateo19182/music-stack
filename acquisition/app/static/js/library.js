@@ -94,6 +94,39 @@ async function loadLibrary() {
   $("#pagination").innerHTML =
     `<button class="quiet" data-page="${state.page - 1}" ${state.page <= 1 ? "disabled" : ""}>Previous</button><span>Page ${state.page} of ${pages}</span><button class="quiet" data-page="${state.page + 1}" ${state.page >= pages ? "disabled" : ""}>Next</button>`;
 }
+async function loadDuplicates() {
+  const data = await api("/api/library/duplicates");
+  if (!state.authenticated) return;
+  state.libraryGeneration++;
+  state.libraryFiles = Object.fromEntries(data.groups.flat().map((f) => [f.id, f]));
+  $("#library-count").textContent = `${data.extra} extra ${data.extra === 1 ? "copy" : "copies"} of ${data.groups.length} songs`;
+  $("#pagination").innerHTML = "";
+  const back = '<button type="button" class="quiet" data-close-duplicates>Back to library</button>';
+  $("#library").innerHTML = data.groups.length
+    ? `<div class="panel"><p class="muted">Each song here is in your library more than once: same artist and title, lengths within 3 seconds. The best copy (lossless, then bitrate, then the fuller album) is kept; the ticked copies go to the app's trash, where they can be restored by hand. Untick a copy that is really another version.</p><div class="actions"><button type="button" data-remove-duplicates>Move ticked copies to trash</button>${back}</div></div>` +
+      data.groups
+        .map(
+          (group) =>
+            `<section class="duplicate-group">${group
+              .map(
+                (f, i) =>
+                  `<article class="library-row"><div class="track-info"><h3>${esc(f.title || f.filename || "Untitled")}</h3><span class="muted">${esc([f.artist, f.filename].filter(Boolean).join(" · "))}</span></div><span class="album-name muted">${esc(f.album || "")}</span><label class="checkbox"><input type="checkbox" data-duplicate="${esc(f.id)}" ${i ? "checked" : ""}>${i ? "Extra copy" : "Keep (best)"}</label><div class="actions">${downloads(f)}</div></article>`,
+              )
+              .join("")}</section>`,
+        )
+        .join("")
+    : `<div class="empty">No song is in your library twice. ${back}</div>`;
+}
+async function removeDuplicates() {
+  const ids = [...document.querySelectorAll("[data-duplicate]:checked")].map((input) => input.dataset.duplicate);
+  if (!ids.length) return toast("Tick the copies to remove.", true);
+  if (!confirm(`Move ${ids.length} ${ids.length === 1 ? "copy" : "copies"} to the trash?`)) return;
+  for (let i = 0; i < ids.length; i += 50)
+    await api("/api/library/remove", { file_ids: ids.slice(i, i + 50) });
+  toast(`Moved ${ids.length} to the trash.`);
+  await loadDuplicates();
+}
+$("#library-duplicates").addEventListener("click", (e) => busy(e.currentTarget, loadDuplicates));
 $("#library-form").addEventListener("submit", (e) => {
   e.preventDefault();
   state.page = 1;
@@ -166,6 +199,8 @@ document.addEventListener("click", (e) => {
     row.insertAdjacentHTML("afterend", tagEditor(state.libraryFiles[button.dataset.editTags]));
     row.nextElementSibling.querySelector("input").focus();
   } else if (button.dataset.closeTags !== undefined) button.closest("form").remove();
+  else if (button.dataset.removeDuplicates !== undefined) busy(button, removeDuplicates);
+  else if (button.dataset.closeDuplicates !== undefined) busy(button, loadLibrary);
   else if (button.dataset.page) {
     state.page = Number(button.dataset.page);
     busy(button, async () => {

@@ -1,4 +1,5 @@
-from app.review_questions import plan
+from app.duplicates import groups
+from app.review_questions import plan, plans
 
 
 def track(**kw):
@@ -59,3 +60,26 @@ def test_album_decides_between_another_copy_and_another_recording():
     assert plan(track(album='Hill Climber', possible_duplicates=[longer]))['replace'] == [longer]
     # With no album to compare, it is still asked.
     assert plan(track(possible_duplicates=[library(album='Hill Climber', duration=260)]))['action'] == 'ask'
+
+
+def test_a_song_a_download_holds_twice_keeps_its_best_copy():
+    records = [track(id='a', path='/in/01 - Sauna [4f1ad36f].flac'), track(id='b', path='/in/01 - Sauna.flac'),
+               track(id='c', path='/in/02 - Sauna.mp3', format='mp3', bitrate=320_000, duration=193),
+               track(id='d', path='/in/03 - Sauna (Remix).flac', title='Sauna (Remix)')]
+    result = plans(records)
+    assert result['b']['action'] == 'add' and result['d']['action'] == 'add'
+    assert result['a'] == result['c'] == {'action': 'skip', 'reason': 'repeat', 'questions': []}
+
+
+def test_library_duplicates_leave_live_records_and_other_lengths_apart():
+    files = [{'id': 'studio', 'artist': 'Vulfpeck', 'title': 'Dean Town', 'album': 'The Beautiful Game', 'duration': 211,
+              'format': 'MP3', 'bitrate': 320_000, 'path': '/library/Vulfpeck/The Beautiful Game/Dean Town.mp3'},
+             {'id': 'live', 'artist': 'Vulfpeck', 'title': 'Dean Town', 'album': 'Live at Madison Square Garden', 'duration': 212,
+              'format': 'flac', 'bitrate': 900_000, 'path': '/library/Vulfpeck/Live/Dean Town.flac'},
+             {'id': 'opus', 'artist': 'JPEGMAFIA', 'title': 'Steppa Pig', 'album': 'SCARING THE HOES', 'duration': 207.8,
+              'format': 'opus', 'bitrate': 256_000, 'path': '/library/JPEGMAFIA/STH/Steppa Pig.ogg'},
+             {'id': 'flac', 'artist': 'JPEGMAFIA x Danny Brown', 'title': 'Steppa Pig', 'album': 'SCARING THE HOES', 'duration': 207.8,
+              'format': 'flac', 'bitrate': 900_000, 'path': '/library/JPEGMAFIA x Danny Brown/STH/03 - Steppa Pig.flac'},
+             {'id': 'edit', 'artist': 'JPEGMAFIA', 'title': 'Steppa Pig', 'album': 'Singles', 'duration': 180,
+              'format': 'flac', 'bitrate': 900_000, 'path': '/library/JPEGMAFIA/Singles/Steppa Pig.flac'}]
+    assert [[f['id'] for f in g] for g in groups(files)] == [['flac', 'opus']]

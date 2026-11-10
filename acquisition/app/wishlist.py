@@ -299,6 +299,11 @@ class Wishlist:
             item["note"] = "Added to the library (lossy); parked for a lossless search" if lossy(item) else "Added to the library"
             self.save(item)
             return False
+        if stage == "rejected" and job.get("already_had") and not upgrade:
+            # Every track of the copy was already in the library: the request is had, not failed.
+            item.update(status="have", job_id=None, candidates=[], pinned=False, note="Already in the library")
+            self.save(item)
+            return False
         outcome = {"published": "wrong record", "rejected": "rejected in review", "cancelled": "cancelled"}.get(stage, "failed")
         error = job.get("error") or ""
         candidate = job.get("candidate") or {}

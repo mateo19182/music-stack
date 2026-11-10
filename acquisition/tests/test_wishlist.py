@@ -307,6 +307,17 @@ class WishlistTests(unittest.TestCase):
         self.assertEqual(self.store.get("wishlist", item["id"])["status"], "gave_up")
         self.assertEqual([c["username"] for c in self.queued], ["busy", "wrong", "busy"])
 
+    def test_a_copy_whose_tracks_are_all_in_the_library_makes_the_request_had(self):
+        sources = FakeSources({"soulseek": [slsk("a"), slsk("b")]})
+        w = self.wishlist(sources)
+        item = w.add("mateo", "Moor Mother", "Jazz Codes")
+        w.tick()
+        self.finish(item["id"], "rejected", already_had=True)
+        w.tick()
+        got = self.store.get("wishlist", item["id"])
+        self.assertEqual((got["status"], got["note"]), ("have", "Already in the library"))
+        self.assertEqual([c["username"] for c in self.queued], ["a"])   # no next copy
+
     def test_a_link_is_downloaded_as_given_once(self):
         w = self.wishlist(FakeSources({}))
         item = w.add("mateo", "", list_name="Requests", kind="link", url="https://youtu.be/dQw4w9WgXcQ", link_kind="track")
@@ -685,3 +696,16 @@ class PhraseSources(FakeSources):
         if source == "soulseek" and self.dropped in query.casefold():
             return []
         return [c for c in self.results.get(source, []) if c.get("kind", kind) == kind]
+
+
+def test_spotify_feat_titles_and_records_under_four_tracks_count_as_in_the_library():
+    assert matching.track_key("Westmoreland - feat. Asheber") == matching.track_key("Westmoreland (feat. Asheber)") \
+        == matching.track_key("Westmoreland")
+    assert matching.track_key("Feat. Nobody") == matching.key("Feat. Nobody")   # a title, not a credit
+    assert matching.track_key("Find You ft. BABii (club mix)") != matching.track_key("Find You")
+    assert matching.track_key("Cousin Mary (Alternate Take)") != matching.track_key("Cousin Mary")
+    library = {"a": {"keys": {matching.album_key("If U Ever")}, "numbers": set(), "artists": {"overmono"}, "tracks": ["t1"]}}
+    single = {"artist": "Overmono", "album": "If U Ever"}
+    assert matching.library_has(library, {**single, "tracklist": {"tracks": [["If U Ever", 288]]}})
+    assert not matching.library_has(library, single)   # no reference: one track is not the album
+    assert not matching.library_has(library, {**single, "tracklist": {"tracks": [["A", 1], ["B", 2]]}})

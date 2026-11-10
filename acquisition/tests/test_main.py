@@ -715,6 +715,36 @@ def test_auto_add_publishes_only_tracks_without_questions(backend, monkeypatch):
     assert main.store.get("jobs", later)["stage"] == "rejected"
 
 
+def test_a_download_with_nothing_new_is_marked_as_already_had(backend, monkeypatch):
+    main, client = backend
+    signin(main, client, monkeypatch)
+    client.post("/api/settings/auto-add", json={"search": True, "import": False})
+    candidate = {"source": "soulseek", "requested_artist": "Artist"}
+    main.store.put("jobs", "had", {"candidate": candidate, "source": "soulseek", "label": "Song", "prepared": []},
+                   owner="mateo", stage="review", created_at="2026-01-01")
+    path = main.STATE / "had.mp3"
+    path.write_bytes(b"audio")
+    main.store.put("files", "had", {"artist": "Artist", "title": "Song", "candidate": candidate, "duplicate_path": "/library/x.mp3"},
+                   job_id="had", owner="mateo", published=0, path=str(path))
+    assert main.auto_add("had") is None
+    job = main.store.get("jobs", "had")
+    assert job["stage"] == "rejected" and job["already_had"] is True
+
+
+def test_library_duplicates_lists_each_song_held_twice_best_copy_first(backend, monkeypatch):
+    main, client = backend
+    signin(main, client, monkeypatch)
+    for id, fmt, bitrate in (("lossy", "opus", 256_000), ("flac", "flac", 900_000), ("other", "flac", 900_000)):
+        path = main.LIBRARY / "Artist" / f"{id}.{fmt}"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"audio")
+        main.store.put("files", id, {"artist": "Artist", "title": "Other" if id == "other" else "Song", "album": "Album",
+                                     "duration": 200, "format": fmt, "bitrate": bitrate},
+                       owner="mateo", published=1, path=str(path))
+    data = client.get("/api/library/duplicates").json()
+    assert data["extra"] == 1 and [[f["id"] for f in g] for g in data["groups"]] == [["flac", "lossy"]]
+
+
 def test_the_review_model_decides_open_questions_and_leaves_only_its_doubts(backend, monkeypatch):
     main, client = backend
     signin(main, client, monkeypatch)

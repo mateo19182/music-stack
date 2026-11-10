@@ -58,7 +58,10 @@ SoundCloud, Bandcamp and Vimeo URLs are supported.
    library version, which moves to a trash folder; an equal or worse copy is skipped.
    The same title on the same album is the same recording, whatever the lengths;
    on another album it is only when the lengths agree within 3 seconds, and
-   otherwise the new track is added alongside it.
+   otherwise the new track is added alongside it. A song a download holds twice
+   keeps only its best copy. A download with nothing new marks its request as
+   already had. **Library → Duplicates** lists songs already in the library more
+   than once, best copy first, and moves the extra copies to the trash.
 4. With automatic adding on (Requests, separately for requests and inbox
    imports), tracks with nothing to decide go straight into the library. The
    open questions below go to a model first (`review_model`, default
