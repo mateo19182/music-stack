@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from app import matching
 from app.store import Store, now, uid
+from app import wishlist as wishlist_module
 from app.wishlist import Wishlist
 
 
@@ -682,3 +683,70 @@ def test_an_album_the_song_is_not_on_is_left_out_and_rules_decide_without_the_mo
     w.add("mateo", "Vulfpeck", "", "Requests", kind="track", title="Sauna")
     w.tick()
     assert [c["username"] for c in queued2] == ["a"]
+
+
+class PhraseSources(FakeSources):
+    """Soulseek as its server behaves: nothing at all for a query holding a dropped phrase."""
+    def __init__(self, results, dropped):
+        super().__init__(results)
+        self.dropped = dropped
+
+    def search(self, query, source, kind):
+        self.calls.append((query, source))
+        if source == "soulseek" and self.dropped in query.casefold():
+            return []
+        return [c for c in self.results.get(source, []) if c.get("kind", kind) == kind]
+
+
+def test_a_name_the_soulseek_server_drops_is_searched_by_its_longest_word(tmp_path):
+    store, queued = Store(tmp_path / "a.db"), []
+    sources = PhraseSources({"soulseek": [track_file("a", "Kanye West - POWER")]}, "kanye west")
+    w = _wishlist(store, sources, FakeJudge(accept={"a"}), queued)
+    w.add("mateo", "Kanye West", "My Beautiful Dark Twisted Fantasy", "Saved tracks", kind="track", title="POWER")
+    w.tick()
+    assert [q for q, s in sources.calls if s == "soulseek"] == ["Kanye West POWER", "kanye POWER"]
+    assert queued[-1]["username"] == "a"
+
+
+def test_results_that_are_not_the_record_do_not_trigger_the_shorter_name(tmp_path):
+    store, queued = Store(tmp_path / "a.db"), []
+    sources = FakeSources({"soulseek": [slsk("other", folder="Someone Else - Another Record")]})
+    w = _wishlist(store, sources, FakeJudge(accept=set()), queued)
+    w.add("mateo", "Moor Mother", "Jazz Codes")
+    w.tick()
+    assert not any(q.startswith("moor ") or q.startswith("mother ") for q, _ in sources.calls)
+    assert wishlist_module.short_artist("Moor Mother") == "mother" and wishlist_module.short_artist("Burial") == ""
+
+
+def test_a_one_track_single_asked_for_as_an_album_is_searched_as_its_song(tmp_path):
+    store, queued = Store(tmp_path / "a.db"), []
+    song = track_file("a", "Freddie Gibbs, The Alchemist - 1995")
+    sources = PhraseSources({"soulseek": [song]}, "never dropped")
+    w = _wishlist(store, sources, FakeJudge(accept={"a"}), queued)
+    w.tracklist = lambda item: {"title": "1995", "type": "Single", "tracks": [("1995", 289)]}
+    item = w.add("mateo", "Freddie Gibbs", "1995", "Saved albums")
+    w.tick()
+    assert queued[-1]["username"] == "a" and queued[-1]["kind"] == "track"
+    assert queued[-1]["requested_title"] == "1995" and "requested_album" not in queued[-1]
+    assert store.get("wishlist", item["id"])["kind"] == "album"
+
+
+def test_not_found_says_when_youtube_was_not_searched(tmp_path):
+    store, queued = Store(tmp_path / "a.db"), []
+    w = _wishlist(store, FakeSources({}), FakeJudge(accept=set()), queued)
+    w.youtube_ready = lambda: False
+    item = w.add("mateo", "Moor Mother", "Jazz Codes")
+    w.tick()
+    assert "YouTube was not searched" in store.get("wishlist", item["id"])["note"]
+
+
+def test_a_song_by_title_alone_must_name_the_artist_somewhere_in_its_path(tmp_path):
+    store, queued = Store(tmp_path / "a.db"), []
+    other = {**track_file("hsy", "x"), "filename": "Music\\HSY\\2015 Bask\\02 Acid Peel.flac"}
+    mine = {**track_file("tb", "x"), "filename": "Music\\Tony Bontana\\My Leg\\01 Acid Peel.mp3", "format": "mp3", "bitrate": 320}
+    w = _wishlist(store, FakeSources({"soulseek": [other, mine]}), FakeJudge(accept={"hsy", "tb"}), queued)
+    w.add("mateo", "Tony Bontana", "My Leg", "Saved tracks", kind="track", title="Acid Peel")
+    w.tick()
+    assert [c["username"] for c in queued] == ["tb"]
+    assert wishlist_module.names_artist({"filename": "音楽\\アトラスサウンドチーム\\Joy.flac"}, "アトラスサウンドチーム")
+    assert wishlist_module.names_artist({"filename": "Music\\Kanye\\Power.flac"}, "Kanye West")

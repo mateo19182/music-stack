@@ -51,6 +51,23 @@ def search_artist(artist):
     return "" if matching.key(first) in {"variousartists", "various", "va", "vvaa"} else first
 
 
+def short_artist(artist):
+    """The artist's longest word, for a search the Soulseek server dropped: it silently answers
+    nothing to some names as a phrase ("kanye west"), not to their words ("kanye power" works)."""
+    whole = soulseek_query(search_artist(artist))
+    word = max((w for w in whole.split() if len(w) >= 3), key=len, default="")
+    return word if word != whole else ""
+
+
+def names_artist(c, artist):
+    """A Soulseek file whose path names the artist (whole, or by short_artist). A search by title
+    alone finds same-titled songs by others, and the model has passed them (2026-11-09: HSY's
+    "Acid Peel" for Tony Bontana's)."""
+    path = str(c.get("filename") or "")
+    keys = {matching.key(matching.clean_artist(artist)), matching.key(short_artist(artist))} - {""}
+    return any(k in flat for k in keys for flat in (matching.key(path), re.sub(r"\W", "", path.casefold())))
+
+
 def soulseek_queries(album, artist, year=None):
     """Artist + album; the album alone (the server drops some artist names); the artist alone
     (typos in the album name); album + year for short titles under a dropped artist name."""
@@ -412,7 +429,8 @@ class Wishlist:
             why = "No other copies found" if why == "Not found" else why
             item.update(status="gave_up", note=f"{why} ({len(item['tried'])} tried)")
         else:
-            item.update(status="not_found", note="Not found on Soulseek, RuTracker or YouTube Music")
+            item.update(status="not_found", note="Not found on Soulseek, RuTracker or YouTube Music" if self.youtube_ready()
+                        else "Not found on Soulseek or RuTracker; YouTube was not searched (Premium login expired or YouTube paused)")
         self.save(item)
 
     def _search(self, item):
@@ -429,13 +447,18 @@ class Wishlist:
 
         def soulseek():
             results = []
-            queries = ([f"{first} {title}".strip(), title if len(matching.key(title)) >= 8 else None] if track
-                       else soulseek_queries(album, artist, year))
-            for query in filter(None, queries):
+            queries = list(filter(None, [f"{first} {title}".strip(), title if len(matching.key(title)) >= 8 else None] if track
+                                  else soulseek_queries(album, artist, year)))
+            short = short_artist(artist)
+            while queries:
+                query = queries.pop(0)
                 found = self.sources().search(query, "soulseek", item["kind"])
                 results += found   # the model may accept folders the rules would not: keep every step's results
                 if (matching.ranked_tracks(found, artist, title, avoid, album=album) if track else matching.ranked(found, album, artist, avoid)):
                     break
+                if not found and short and first and first.casefold() in query.casefold():
+                    # Nothing at all, not even unrelated files: the server dropped the artist's name.
+                    queries.insert(0, matching.re.sub(matching.re.escape(first), short, query, flags=matching.re.I))
             return results
 
         def torrent():
@@ -478,7 +501,18 @@ class Wishlist:
                 log.info("Request %s: %s search failed: %s", item["id"], source, str(exc)[:200])
         if track:
             return self._rank_track(item, results, avoid, title)
-        return self._rank(item, results, avoid)
+        return self._rank(item, results, avoid) or self._single_as_track(item)
+
+    def _single_as_track(self, item):
+        """A one-track single asked for as an album ("1995"): its folder is seldom shared, its song
+        is, often inside the album it later joined. Searched as that song; the copy is a track."""
+        if "tracklist" not in item:
+            item["tracklist"] = self.tracklist(item) or None
+        tracks = (item.get("tracklist") or {}).get("tracks") or []
+        if len(tracks) != 1 or not tracks[0][0]:
+            return []
+        found = self._search({**item, "kind": "track", "title": tracks[0][0]})
+        return found and [{**c, "requested_title": tracks[0][0]} for c in found]
 
     def _rank_track(self, item, results, avoid, title):
         """The model decides which files are the song; code keeps the facts (quality floor, uploaders
@@ -510,7 +544,8 @@ class Wishlist:
         item["rejected"] = [{"source": c.get("source"), "name": c.get("filename") or c.get("title"),
                              "problem": verdicts[n]["problem"], "reason": verdicts[n]["reason"]}
                             for n, c in enumerate(shown) if not verdicts[n]["match"]][:8]
-        best = sorted((n for n in range(len(shown)) if verdicts[n]["match"]),
+        best = sorted((n for n in range(len(shown)) if verdicts[n]["match"]
+                       and (shown[n].get("source") != "soulseek" or names_artist(shown[n], artist))),
                       key=lambda n: (-matching.quality(shown[n]),) + matching.availability(shown[n]))
         return [{**shown[n], "judged": "model", "reason": verdicts[n]["reason"]} for n in best[:8]]
 
@@ -594,7 +629,7 @@ class Wishlist:
         candidate.update(requested_artist=matching.clean_artist(item["artist"]) or None, wishlist_id=item["id"],
                          # Albums and tracks from YouTube: Premium quality or nothing. A link is taken as given.
                          premium_only=item["kind"] != "link")
-        if item["kind"] == "album":
+        if item["kind"] == "album" and not candidate.get("requested_title"):   # a single's song keeps its title instead
             candidate["requested_album"] = item["album"]
         elif item["kind"] == "track":
             candidate["requested_title"] = item["title"]
