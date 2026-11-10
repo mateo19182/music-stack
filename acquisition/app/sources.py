@@ -114,6 +114,10 @@ class SoulseekUnavailable(SourceError):
     """slskd or its network is down or overloaded: not the uploader's fault, so the job waits."""
 
 
+class PremiumFormatMissing(SourceError):
+    """A Premium-only YouTube download found no Premium format: usually the login has expired."""
+
+
 def _array(value):
     if isinstance(value, list):
         return value
@@ -988,6 +992,8 @@ class Sources:
             if cancelled():
                 raise DownloadCancelled("Download cancelled. Retry to resume.") from None
             reason = re.sub(r"\x1b\[[0-9;]*m", "", str(exc)).replace("ERROR: ", "")[:240]
+            if candidate.get("premium_only") and "Requested format is not available" in reason:
+                raise PremiumFormatMissing(f"YouTube offered no Premium format ({reason}). Retry or choose another candidate.") from None
             raise SourceError(f"yt-dlp download failed ({reason}). Retry or choose another candidate.") from None
         files = [p for p in destination.iterdir() if p.is_file() and p.suffix.lstrip(".").lower() in AUDIO_EXTENSIONS]
         expected_ids = {str(entry["id"]) for entry in entries}

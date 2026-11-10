@@ -1128,6 +1128,33 @@ def test_expired_login_alert_is_limited_for_24_hours_across_recovery_and_restart
     assert sum("expired" in text for text in sent) == 2
 
 
+def test_a_premium_download_without_premium_formats_checks_the_login_now(backend, monkeypatch):
+    main, _ = backend
+    from app.sources import PremiumFormatMissing
+    main.store.put("jobs", "yt", {"candidate": {"source": "youtube", "kind": "track", "premium_only": True}},
+                   owner="mateo", stage="queued", created_at="2026-01-01")
+    def download(*args, **kwargs):
+        raise PremiumFormatMissing("YouTube offered no Premium format")
+    update = main.store.update_job
+    def update_job(id, **changes):
+        update(id, **changes)
+        if changes.get("stage") == "failed":
+            main.stop.set()
+    monkeypatch.setattr(main.Sources, "download", download)
+    monkeypatch.setattr(main.store, "update_job", update_job)
+    monkeypatch.setattr(main, "_premium", {"checked": 1e12, "alerted": False, "working": True})
+    main.stop.clear()
+    try:
+        main.worker(("queued",))
+    finally:
+        main.stop.clear()
+    assert main.store.get("jobs", "yt")["stage"] == "failed"
+    assert main._premium["checked"] == 0
+    monkeypatch.setattr(main.Sources, "youtube_premium", lambda self: False)
+    main.youtube_premium_alert(lambda text: True, clock=lambda: main.PREMIUM_CHECK_SECONDS)
+    assert main._premium["working"] is False
+
+
 def test_failed_expired_login_alert_can_retry(backend, monkeypatch):
     main, _ = backend
     monkeypatch.setattr(main.Sources, "youtube_premium", lambda self: False)

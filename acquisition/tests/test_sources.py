@@ -191,6 +191,26 @@ class SourceTests(unittest.TestCase):
                 sources.download({'source': 'youtube', 'kind': 'album', 'url': 'https://youtube.com/playlist?list=x'},
                                  destination, lambda _: None, lambda: False)
 
+    def test_a_premium_download_without_premium_formats_says_so(self):
+        from unittest.mock import MagicMock
+        from app.sources import PremiumFormatMissing
+        def context(options):
+            downloader = MagicMock()
+            def extract(url, download=False):
+                if download:
+                    raise RuntimeError("ERROR: [youtube] abc: Requested format is not available. Use --list-formats")
+                return {'id': 'abc', 'title': 'Song'}
+            downloader.extract_info.side_effect = extract
+            result = MagicMock()
+            result.__enter__.return_value = downloader
+            return result
+        for premium, error in [(True, PremiumFormatMissing), (False, SourceError)]:
+            with self.subTest(premium=premium), TemporaryDirectory() as destination, \
+                    patch('app.sources.yt_dlp.YoutubeDL', side_effect=context), self.assertRaises(SourceError) as raised:
+                Sources({}).download({'source': 'youtube', 'kind': 'track', 'url': 'https://youtu.be/abc', 'premium_only': premium},
+                                     destination, lambda _: None, lambda: False)
+            self.assertIs(type(raised.exception), error)
+
     def test_ytdlp_does_not_promote_uploader_or_categories_to_music_tags(self):
         from unittest.mock import MagicMock
         with TemporaryDirectory() as destination:
