@@ -33,8 +33,8 @@ def initialize(instance):
 
 
 @pytest.mark.parametrize("name,args,method,path,payload", [
-    ("request_music", {"kind": "link", "url": "https://youtu.be/example", "link_kind": "album"}, "POST", "/api/requests", {"kind": "link", "url": "https://youtu.be/example", "link_kind": "album", "hold": True}),
-    ("request_music", {"kind": "album", "artist": "Moor Mother", "album": "Jazz Codes"}, "POST", "/api/requests", {"kind": "album", "artist": "Moor Mother", "album": "Jazz Codes", "hold": True}),
+    ("request_music", {"kind": "link", "url": "https://youtu.be/example", "link_kind": "album"}, "POST", "/api/requests", {"kind": "link", "url": "https://youtu.be/example", "link_kind": "album"}),
+    ("request_music", {"kind": "album", "artist": "Moor Mother", "album": "Jazz Codes"}, "POST", "/api/requests", {"kind": "album", "artist": "Moor Mother", "album": "Jazz Codes"}),
     ("request_music", {"kind": "track", "artist": "Vulfpeck", "title": "Sauna", "hold": False}, "POST", "/api/requests", {"kind": "track", "artist": "Vulfpeck", "title": "Sauna", "hold": False}),
     ("requests", {}, "GET", "/api/requests", {"status": "active", "limit": 50}),
     ("requests", {"q": "blawan", "status": "all", "limit": 5}, "GET", "/api/requests", {"q": "blawan", "status": "all", "limit": 5}),

@@ -1874,3 +1874,8 @@ table.users tr.no-access td {
 .unreq-head button.link:hover {
   color: inherit;
 }
+
+.duplicate-group {
+  margin-top: 14px;
+  border-top: 2px solid var(--border);
+}

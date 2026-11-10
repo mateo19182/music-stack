@@ -2,13 +2,14 @@
 
 A track with no questions can be added without review when its owner turned
 automatic adding on. Identical copies and equal or worse copies of a recording
-already in the library are skipped; clearly better copies replace it.
+already in the library are skipped; clearly better copies replace it. A song a
+download holds twice keeps only its best copy.
 """
 import re
 
+from .duplicates import LOSSLESS, SAME_RECORDING_SECONDS, groups
+
 LONG_SECONDS = 20 * 60
-SAME_RECORDING_SECONDS = 3
-LOSSLESS = {'flac', 'alac', 'wav', 'aiff', 'ape', 'wavpack', 'pcm_s16le', 'pcm_s24le', 'pcm_s16be', 'pcm_s24be'}
 
 
 def _identity(value):
@@ -96,3 +97,13 @@ def plan(record, track_count=1):
     if action == 'replace':
         return {'action': 'replace', 'replace': same_recording(record, versions), 'questions': []}
     return {'action': action or 'add', 'questions': []}
+
+
+def plans(records):
+    """plan() for every track of one download, by id; a repeat of a song in it is skipped for its best copy."""
+    result = {r['id']: plan(r, len(records)) for r in records}
+    for copies in groups(records):
+        for r in copies[1:]:
+            if result[r['id']]['action'] != 'skip':
+                result[r['id']] = {'action': 'skip', 'reason': 'repeat', 'questions': []}
+    return result

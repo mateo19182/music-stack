@@ -62,7 +62,10 @@ Which results are the record:
 - names may be messy: years, formats, catalog numbers, scene names, track numbers, other scripts are fine
 - substitute true marks a copy that is close but not exactly the request, for the owner to decide: another edition
   of the album (the plain album for a deluxe one, or the reverse), a single's song inside the album it joined, or a
-  release whose name differs from the request's when the request's name looks like a mistake for it
+  release whose name differs from the request's when the request's name looks like a mistake for it, a clean
+  (edited) version of an explicit song. Only the record matters: a lossy format, credits listed in the title
+  ("[Kanye West; Big Sean]", "(feat. X)"), "Album Version", catalog numbers or another folder do not make a copy
+  of the same recording a substitute
 - never pick another record by the artist, not even as a substitute
 Call finish with an empty list when nothing is the record."""
 

@@ -24,6 +24,7 @@ from .audio_models import SAMPLE_RATE, models_at
 from .descriptors import fill_descriptors
 from .files import link, move
 from .lookup import Catalog, _identity
+from .duplicates import lead
 from .matching import clean_artist, key, track_key
 from .tags import set_tag, split_values
 
@@ -811,8 +812,6 @@ class Ingestor:
             return re.sub(r'[^\w]', '', str(value or '').casefold())
         # The lead artist and the title without credits: "KAYTRANADA, Syd" / "YOU'RE THE ONE" is
         # "KAYTRANADA" / "YOU'RE THE ONE (feat. Syd)". A remix or live take keeps its version word.
-        def lead(value):
-            return key(re.sub(r'^the\s+', '', clean_artist(value), flags=re.I))   # "Roots" is "The Roots"
         artist, title = normalized(record.get('artist')), normalized(record.get('title'))
         if not artist or not title:
             return matches

@@ -16,7 +16,7 @@ from mediafile import MediaFile
 
 from .store import Store, uid, now
 from .sources import Sources, SourceError, SoulseekUnavailable, PremiumFormatMissing, DownloadCancelled, youtube_url, _timestamp
-from . import matching
+from . import duplicates, matching
 from .wishlist import KINDS, Wishlist, covered_suggestions, item_id as wishlist_item_id, lossy as wishlist_lossy
 from . import finder as finding
 from .finder import Finder
@@ -31,7 +31,7 @@ from .audio_models import models_at
 from .sharing import Sharing
 from .llm_review import Reviewer, ReviewError
 from .review_summary import summarize
-from .review_questions import plan as review_plan
+from .review_questions import plans as review_plans_for
 from .review_decider import Decider
 
 log = logging.getLogger("acquisition")
@@ -529,8 +529,9 @@ def job_view(job):
     if source_url:
         result["request"]["source_url"] = source_url
     if job.get("stage") == "review":
+        plans = review_plans_for([{**raw, "possible_duplicates": view["possible_duplicates"]} for raw, view in zip(files, result["files"])])
         for raw, view in zip(files, result["files"]):
-            view["plan"] = review_plan({**raw, "possible_duplicates": view["possible_duplicates"]}, len(files))
+            view["plan"] = plans[raw["id"]]
         result["review_summary"] = summarize(job, result["files"], per_track=False)
         if any(view["plan"]["action"] == "ask" for view in result["files"]):
             result["review_summary"].update(status="check", label="Check before approving")
@@ -1930,7 +1931,8 @@ def auto_add(id):
     later = {i for i, p in plans.items() if p["action"] == "ask"}
     if not selected:
         if not later:
-            store.transition_job(id, {"review"}, "rejected", detail="Nothing new: every track is already in your library", auto_skipped=True)
+            store.transition_job(id, {"review"}, "rejected", detail="Nothing new: every track is already in your library",
+                                 auto_skipped=True, already_had=True)
         return None
     replace = {r["path"]: [v["path"] for v in plans[r["id"]]["replace"] if v.get("path")]
                for r in records if plans[r["id"]]["action"] == "replace"}
@@ -1939,9 +1941,9 @@ def auto_add(id):
 
 
 def review_plans(records):
-    return {r["id"]: review_plan({**r, "possible_duplicates": [
+    return review_plans_for([{**r, "possible_duplicates": [
         {**v, "replaceable": Path(v["path"]).resolve().is_relative_to(LIBRARY)} if v.get("path") else v
-        for v in r.get("possible_duplicates", [])]}, len(records)) for r in records}
+        for v in r.get("possible_duplicates", [])]} for r in records])
 
 
 def model_decide(id):
@@ -2096,6 +2098,14 @@ def library(
         "keys": keys,
         "invalid_key_count": invalid_keys,
     }
+
+
+@app.get("/api/library/duplicates")
+def library_duplicates(user=Depends(check_user)):
+    """Library tracks that are one recording more than once, the best copy first in each group."""
+    groups = duplicates.groups(store.list("files", "published=1"))
+    groups.sort(key=lambda g: (str(g[0].get("artist") or "").casefold(), str(g[0].get("title") or "").casefold()))
+    return {"groups": [[file_view(r) for r in g] for g in groups], "extra": sum(len(g) - 1 for g in groups)}
 
 
 @app.post("/api/files/{id}/tags")
