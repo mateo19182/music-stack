@@ -60,9 +60,10 @@ Which results are the record:
 - a song: the same recording; its length should match the reference within about 5 seconds; it may sit in a
   folder of another release (single, EP, compilation); a file found by its title must have the artist in its path
 - names may be messy: years, formats, catalog numbers, scene names, track numbers, other scripts are fine
-- an edition (deluxe, expanded, remaster) asked for: prefer it; when only the plain album exists, pick it with
-  substitute true. Same for the edition when the plain album was asked for. Anything else that is close but not
-  exactly the request (a single's song inside its album, a different release of the same songs) is a substitute too.
+- substitute true marks a copy that is close but not exactly the request, for the owner to decide: another edition
+  of the album (the plain album for a deluxe one, or the reverse), a single's song inside the album it joined, or a
+  release whose name differs from the request's when the request's name looks like a mistake for it
+- never pick another record by the artist, not even as a substitute
 Call finish with an empty list when nothing is the record."""
 
 SEARCH_TOOL = {"name": "search", "description": "Search one source. Returns numbered results; their ids are what finish takes.",
