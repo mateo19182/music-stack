@@ -17,6 +17,7 @@ const state = {
   searchQuality: "",
   searchStatus: "complete",
   searchError: null,
+  searchNote: null,
   searchSource: "all",
   link: null,
   libraryGeneration: 0,

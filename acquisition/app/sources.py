@@ -25,6 +25,9 @@ AUDIO_EXTENSIONS = {"mp3", "flac", "m4a", "aac", "ogg", "opus", "wav", "aiff", "
 # Names the Soulseek server drops whole searches for (an empty answer, not an error).
 # A "*name" wildcard does not get through either, so the word is left out of the query.
 FILTERED_TERMS = {"jpegmafia", "overmono"}
+# Phrases it drops while their words get through; searching them is also followed by the server
+# closing the connection (2026-11-10, "kanye west power"), so they never leave the app.
+FILTERED_PHRASES = {"kanye west": "kanye"}
 # Same set Nicotine+ turns into spaces, plus Spanish/typographic marks.
 _PUNCTUATION = re.compile(r"[!\"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~¡¿’‘“”–—·•]")
 ACRONYM = re.compile(r"\b(?:[^\W\d_]\.){2,}")
@@ -43,7 +46,10 @@ def soulseek_query(text):
     text = re.sub(r"\s(?:feat|ft|featuring)\b.*$", " ", text)
     words = _PUNCTUATION.sub(" ", text).split()
     words = [w for w in words if (len(w) > 1 or w.isdigit()) and w not in FILTERED_TERMS]
-    return " ".join(words)
+    query = " ".join(words)
+    for phrase, kept in FILTERED_PHRASES.items():
+        query = re.sub(rf"\b{phrase}\b", kept, query)
+    return query
 
 
 def without_accents(text):

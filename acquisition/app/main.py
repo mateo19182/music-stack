@@ -18,7 +18,8 @@ from .store import Store, uid, now
 from .sources import Sources, SourceError, SoulseekUnavailable, DownloadCancelled, youtube_url, _timestamp
 from . import matching
 from .wishlist import KINDS, Wishlist, covered_suggestions, item_id as wishlist_item_id, lossy as wishlist_lossy
-from .llm_match import Judge
+from . import finder as finding
+from .finder import Finder
 from typing import List, Literal
 from . import concerts
 from .health import SoulseekHealth, telegram
@@ -313,11 +314,11 @@ def soulseek_watcher():
         stop.wait(60)
 
 
-match_judge = Judge(config)
+match_finder = Finder(config)
 review_decider = Decider(config)
 wishlist = Wishlist(store, config, lambda: Sources(config), lambda candidate, user: enqueue(candidate, user),
                     soulseek_ready=lambda: soulseek_health.ready(), youtube_ready=lambda: config.get("youtube_enabled", True) and _premium["working"] is True,
-                    youtube_enabled=lambda: config.get("youtube_enabled", True), judge=match_judge if match_judge.enabled else None)
+                    youtube_enabled=lambda: config.get("youtube_enabled", True), finder=match_finder if match_finder.enabled else None)
 
 
 def wishlist_worker():
@@ -767,13 +768,16 @@ def request_scan(done="Published"):
 def do_search(id, user, body):
     sources = Sources(config)
     try:
-        query = body.query.strip() or " ".join(
-            x for x in [body.artist, body.title, body.album] if x
-        )
-        results = sources.search(query, body.source, body.kind)
-        for candidate in results:
-            candidate["match"], candidate["named"] = matching.relevance(candidate, query)
-        results.sort(key=lambda c: (-c["match"], -c["named"], -(matching.quality(c) or 0)) + matching.availability(c))
+        name = (body.album if body.kind == "album" else body.title) or body.title or body.album
+        query = body.query.strip() or " ".join(x for x in [body.artist, name] if x)
+        results, note = finding.search(sources, query, body.source, body.kind), None
+        if body.artist and name and body.source in ("all", "soulseek") and not any(c["source"] == "soulseek" for c in results):
+            # The Soulseek server silently answers nothing to some artist names ("overmono"): the title alone.
+            known = {c["id"] for c in results}
+            results += [c for c in finding.search(sources, name, "soulseek", body.kind) if c["id"] not in known]
+            note = f"Soulseek found nothing for “{query}” (it ignores some artist names); its results are for “{name}”."
+        elif body.query.strip() and body.source in ("all", "soulseek") and not any(c["source"] == "soulseek" for c in results):
+            note = "Soulseek found nothing. It ignores some artist names: try the album or song title alone."
         for candidate in results:
             candidate["id"] = hashlib.sha256(
                 (id + candidate["id"]).encode()
@@ -787,6 +791,7 @@ def do_search(id, user, body):
         record = {
             "results": results,
             "error": " ".join(sources.last_errors.values()) or None,
+            "note": note,
         }
         store.put("searches", id, record, owner=user["username"], status="done")
     except Exception as exc:
@@ -2228,8 +2233,8 @@ def list_requests(user=Depends(check_user), q: str = "", status: str = "", limit
     if limit > 0:
         items = items[:min(limit, 500)]
     jobs = request_jobs(user)
-    matching = {"model": match_judge.model if match_judge.enabled else None, "calls": match_judge.usage["calls"],
-                "cost_usd": round(match_judge.cost(), 4)}   # since the app started
+    matching = {"model": match_finder.model if match_finder.enabled else None, "calls": match_finder.usage["calls"],
+                "cost_usd": round(match_finder.cost(), 4)}   # since the app started
     return {"lists": lists, "items": [wishlist.view(i, jobs) for i in items], "total": total, "matching": matching,
             "suggested": suggested}
 

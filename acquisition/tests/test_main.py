@@ -1381,6 +1381,27 @@ def test_search_results_with_every_searched_word_come_first(backend, monkeypatch
         ("01 Good Lies.flac", 1), ("01 Good Lies.mp3", 1), ("02 Feelings Plain.flac", 0.5), ("Lies.mp3", 0.33)]
 
 
+def test_a_search_by_artist_and_album_the_soulseek_server_ignores_retries_the_album_alone(backend, monkeypatch):
+    main, client = backend
+    signin(main, client, monkeypatch)
+    folder = {"id": "f", "source": "soulseek", "kind": "album", "title": "Good Lies", "directory": "Music\\Good Lies",
+              "leaf_folder": "Good Lies", "format": "flac", "file_count": 14, "free_slots": True}
+    calls = []
+    def search(self, query, source, kind):
+        calls.append((query, source, kind))
+        return [] if "overmono" in query.casefold() else [dict(folder)]
+    monkeypatch.setattr(main.Sources, "search", search)
+    id = client.post("/api/search", json={"artist": "Overmono", "album": "Good Lies", "kind": "album", "source": "soulseek"}).json()["id"]
+    for _ in range(100):
+        record = client.get(f"/api/search/{id}").json()
+        if record["status"] != "searching":
+            break
+        time.sleep(0.02)
+    assert calls == [("Overmono Good Lies", "soulseek", "album"), ("Good Lies", "soulseek", "album")]
+    assert [r["directory"] for r in record["results"]] == ["Music\\Good Lies"]
+    assert "ignores some artist names" in record["note"]
+
+
 def test_a_playlist_link_requests_each_track_and_links_are_read(backend, monkeypatch):
     main, client = backend
     signin(main, client, monkeypatch)

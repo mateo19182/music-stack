@@ -8,6 +8,7 @@ import sys
 
 import httpx
 import pytest
+from unittest.mock import patch
 
 from agent_tools import AcquisitionTools, CredentialError, PROTOCOL_VERSION, ProtocolError, TOOLS, load_credentials, serve
 
@@ -70,7 +71,7 @@ def test_tools_use_exact_api_contract(bridge, name, args, method, path, payload)
 
 
 @pytest.mark.parametrize("name,args", [
-    ("enqueue", {"candidate_id": "x"}), ("request_music", {"candidate_id": "x"}), ("request_music", {"kind": "album", "approve": True}),
+    ("enqueue", {"candidate_id": "x"}), ("request_music", {"candidate_id": ""}), ("search", {"kind": "playlist"}), ("search", {"wait": 5}), ("request_music", {"kind": "album", "approve": True}),
     ("request_music", {"kind": "playlist"}), ("request_music", {"hold": "yes"}),
     ("requests", {"status": "wrong"}), ("requests", {"limit": 0}), ("requests", {"id": ""}),
     ("request_action", {"id": "r"}), ("request_action", {"id": "r", "action": "cancel"}), ("request_action", {"id": "r", "action": "retry"}),
@@ -87,6 +88,27 @@ def test_invalid_inputs_never_reach_http(bridge, name, args):
         instance.call(name, args)
     assert failure.value.code == -32602
     assert received == []
+
+
+def test_search_waits_for_the_results_and_returns_them_compact():
+    seen = []
+    def answer(request):
+        seen.append((request.method, request.url.path))
+        if request.method == "POST":
+            return httpx.Response(200, json={"id": "s1", "status": "searching", "results": []})
+        status = "searching" if len(seen) < 3 else "done"
+        results = [{"id": "c1", "source": "soulseek", "kind": "album", "username": "u", "directory": "Music\\Good Lies",
+                    "files": [{"filename": "Music\\Good Lies\\01 Feelings Plain.flac", "duration": 245, "size": 9}],
+                    "format": "flac", "file_count": 1, "queue_length": 0, "owner": "mateo"}] if status == "done" else []
+        return httpx.Response(200, json={"status": status, "results": results, "note": None, "error": None})
+    instance = AcquisitionTools("https://acquire.example", "private-token", transport=httpx.MockTransport(answer))
+    with patch("agent_tools.time.sleep"):
+        result = instance.call("search", {"artist": "Overmono", "album": "Good Lies"})
+    assert seen == [("POST", "/api/search"), ("GET", "/api/search/s1"), ("GET", "/api/search/s1")]
+    data = result["structuredContent"]
+    assert data["status"] == "done" and data["count"] == 1
+    assert data["results"][0] == {"id": "c1", "source": "soulseek", "kind": "album", "username": "u", "directory": "Music\\Good Lies",
+                                  "format": "flac", "file_count": 1, "queue_length": 0, "files": ["01 Feelings Plain.flac (245s)"]}
 
 
 @pytest.mark.parametrize("status", [301, 400, 401, 403, 404, 409, 422, 429, 500, 503])
@@ -137,7 +159,7 @@ def test_handshake_registry_notifications_and_invalid_requests(bridge):
     initialize(instance)
     assert instance.handle({"jsonrpc": "2.0", "id": 2, "method": "ping"})["result"] == {}
     registry = instance.handle({"jsonrpc": "2.0", "id": 3, "method": "tools/list"})["result"]["tools"]
-    assert len(registry) == 10
+    assert len(registry) == 11
     assert [item["name"] for item in registry if "review" in item["name"]] == ["decide_review"]
     assert not any(any(word in item["name"] for word in ["publish", "delete", "sharing", "approve"]) for item in registry)
     for item in registry:

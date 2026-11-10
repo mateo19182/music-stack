@@ -1,8 +1,8 @@
 """Requests: everything the owner asks for, and the one way music gets downloaded.
 
-A request is an album, a track, or an exact link. For albums and tracks: search every source
-at once, keep what is that record, sort by quality, try the best copy, and take the next one
-when a download fails. One search: when nothing is found, or every copy failed, the request is
+A request is an album, a track, or an exact link. For albums and tracks: the finder (app.finder)
+searches every source and keeps what is that record, sorted by quality; try the best copy, and
+take the next one when a download fails. One search: when nothing is found, or every copy failed, the request is
 parked. A copy picked from search results is tried first; if it fails, the request searches like
 any other. A link is downloaded as given, once.
 
@@ -23,16 +23,15 @@ import time
 import httpx
 
 from . import matching
+from .finder import MAX_ALBUM_FILES
 from .lookup import album_tracklist
-from .sources import SourceError, SoulseekUnavailable, soulseek_query, youtube_url
+from .sources import SourceError, SoulseekUnavailable, youtube_url
 
 log = logging.getLogger("acquisition")
 
 DAY = 24 * 3600
 LOSSLESS = 3                   # matching.quality of a lossless copy
-MAX_ALBUM_FILES = 60           # a bigger Soulseek folder is a collection, not one album
 MAX_TRIED = 16                 # copies tried before a request gives up, over its search and the one that follows
-YOUTUBE_TITLE_FLOOR = 0.2      # 2026-10-09: right albums scored 0.23 and 0.40, same-titled ones by others 0.03-0.18
 ACTIVE = ("queued", "downloading", "process_queued", "processing", "publish_queued", "publishing")
 DONE = ("not_found", "gave_up", "skipped")
 KINDS = ("album", "track", "link")
@@ -49,35 +48,6 @@ def search_artist(artist):
     """The artist to put in a search: none for a compilation, whose folders rarely say "Various Artists"."""
     first = matching.clean_artist(artist)
     return "" if matching.key(first) in {"variousartists", "various", "va", "vvaa"} else first
-
-
-def short_artist(artist):
-    """The artist's longest word, for a search the Soulseek server dropped: it silently answers
-    nothing to some names as a phrase ("kanye west"), not to their words ("kanye power" works)."""
-    whole = soulseek_query(search_artist(artist))
-    word = max((w for w in whole.split() if len(w) >= 3), key=len, default="")
-    return word if word != whole else ""
-
-
-def names_artist(c, artist):
-    """A Soulseek file whose path names the artist (whole, or by short_artist). A search by title
-    alone finds same-titled songs by others, and the model has passed them (2026-11-09: HSY's
-    "Acid Peel" for Tony Bontana's)."""
-    path = str(c.get("filename") or "")
-    keys = {matching.key(matching.clean_artist(artist)), matching.key(short_artist(artist))} - {""}
-    return any(k in flat for k in keys for flat in (matching.key(path), re.sub(r"\W", "", path.casefold())))
-
-
-def soulseek_queries(album, artist, year=None):
-    """Artist + album; the album alone (the server drops some artist names); the artist alone
-    (typos in the album name); album + year for short titles under a dropped artist name."""
-    first = search_artist(artist)
-    name = matching.re.sub(r"\s*[\(\[].*?[\)\]]", "", album).strip() or album
-    ladder = [f"{first} {name}".strip(), name if len(matching.key(name)) >= 5 or len(name.split()) >= 2 else None,
-              first if len(matching.key(first)) >= 3 else None,
-              f"{name} {year}" if year and len(matching.key(name)) < 5 else None]
-    # The app cleans queries the same way; skip rungs that would send an identical search.
-    return list({soulseek_query(q): q for q in reversed([q for q in ladder if q]) if soulseek_query(q)}.values())[::-1]
 
 
 def avoided(item):
@@ -136,10 +106,10 @@ def covered_suggestions(items):
 
 
 class Wishlist:
-    def __init__(self, store, config, sources, enqueue, soulseek_ready=lambda: True, clock=time.time, judge=None,
+    def __init__(self, store, config, sources, enqueue, soulseek_ready=lambda: True, clock=time.time, finder=None,
                  tracklist=None, youtube_ready=lambda: True, youtube_enabled=lambda: True):
         self.store, self.config, self.sources, self.enqueue = store, config, sources, enqueue
-        self.judge = judge   # app.llm_match.Judge, or None: the matching rules alone
+        self.finder = finder   # app.finder.Finder, or None: one plain search and the matching rules
         self.tracklist = tracklist or self._musicbrainz_tracklist
         # YouTube: links need it switched on; albums and tracks need the Premium login too,
         # since without it YouTube is ~130 kbps.
@@ -366,7 +336,7 @@ class Wishlist:
         if upgrade:
             untried = [c for c in untried if not c.get("other_artist")]
         # A YouTube album under another artist's name ("Homework" by Mato for Daft Punk) waits for a choice.
-        if untried and (item.get("hold") or untried[0].get("other_artist")) and not upgrade and item["kind"] != "link":
+        if untried and (item.get("hold") or untried[0].get("other_artist") or untried[0].get("substitute")) and not upgrade and item["kind"] != "link":
             chosen = [c for c in untried if c.get("id") == item.get("pick")]
             if not chosen:
                 self._hold(item, untried)
@@ -396,6 +366,7 @@ class Wishlist:
         found = self._search(item)
         if found is None:
             return   # a search error, not "not found": try next tick
+        item["search_errors"] = 0   # saved with what the search found
         if upgrade:
             found = [c for c in found if (matching.quality(c) or 0) > (item.get("quality") or 0)]
         item.update(candidates=found, searched_at=now)
@@ -434,157 +405,68 @@ class Wishlist:
         self.save(item)
 
     def _search(self, item):
-        """Every source at once, then one ranked list. None when Soulseek could not be searched
-        (an error is not "not found"); a tracker or YouTube error only leaves their copies out."""
+        """The finder (the model searches and picks), or without it one plain search per source and
+        the matching rules. None when Soulseek could not be searched (an error is not "not found");
+        a tracker or YouTube error only leaves their copies out."""
         if item["kind"] == "link":
             return [link_candidate(item["url"], item.get("link_kind", "track"))]
         if not self.soulseek_ready():
             return None
-        album, artist, year, title = item["album"], item["artist"], item.get("year"), matching.unmixed(item.get("title", ""))
         avoid = avoided(item)
-        first = search_artist(artist)
+        if item.get("album") and "tracklist" not in item:
+            item["tracklist"] = self.tracklist(item) or None
+        reference = item.get("tracklist")
+        if item["kind"] == "track" and reference and not any(
+                matching.track_key(t) == matching.track_key(item["title"]) for t, _ in reference.get("tracks") or []):
+            reference = None   # the song is not on that album: a hint that would only mislead
+        found = None
+        if self.finder:
+            try:
+                found = self.finder.find(item, self.sources(), avoid, self.youtube_ready(), reference)
+            except SoulseekUnavailable:
+                raise
+            except SourceError as exc:
+                return self._search_failed(item, exc)
+        if found is None:
+            found = self._rules_search(item, avoid)
+        return None if found is None else [self._other_artist(c, item["artist"]) for c in found]
+
+    def _search_failed(self, item, exc, limit=3):
+        """A Soulseek error is retried next tick, but not for ever: some words make the server close
+        the connection on every search (2026-11-09, twenty minutes of "the who")."""
+        log.info("Request %s: Soulseek search failed: %s", item["id"], str(exc)[:200])
+        item["search_errors"] = item.get("search_errors", 0) + 1
+        if item["search_errors"] >= limit and not item.get("upgrade_wanted"):
+            item.update(status="not_found", candidates=[], search_errors=0,
+                        note=f"Soulseek failed on {limit} searches in a row ({str(exc)[:120]}); parked")
+        self.save(item)
+        return None
+
+    def _rules_search(self, item, avoid):
+        """Without the model: artist and title on every source at once, ranked by app.matching."""
         track = item["kind"] == "track"
-
-        def soulseek():
-            results = []
-            queries = list(filter(None, [f"{first} {title}".strip(), title if len(matching.key(title)) >= 8 else None] if track
-                                  else soulseek_queries(album, artist, year)))
-            short = short_artist(artist)
-            while queries:
-                query = queries.pop(0)
-                found = self.sources().search(query, "soulseek", item["kind"])
-                results += found   # the model may accept folders the rules would not: keep every step's results
-                if (matching.ranked_tracks(found, artist, title, avoid, album=album) if track else matching.ranked(found, album, artist, avoid)):
-                    break
-                if not found and short and first and first.casefold() in query.casefold():
-                    # Nothing at all, not even unrelated files: the server dropped the artist's name.
-                    queries.insert(0, matching.re.sub(matching.re.escape(first), short, query, flags=matching.re.I))
-            return results
-
-        def torrent():
-            if track or not self.sources().torrents_configured():
-                return []
-            plain = matching.re.sub(r"\s*[\(\[].*?[\)\]]", "", album).strip() or album
-            results = []
-            for query in dict.fromkeys(q for q in (f"{first} {plain}".strip(), first) if q):
-                found = self.sources().search(query, "torrent", "album")
-                results += found
-                if any(c.get("source") == "torrent" for c in matching.ranked(found, album, artist, avoid)):
-                    break
-            return results
-
-        def youtube():
-            if not self.youtube_ready():
-                return []
-            # Requests take YouTube only at Premium quality (256 kbps), so that is what these copies are.
-            if track:
-                return [{**c, "premium_only": True} for c in self.sources().search(f"{first} {title}".strip(), "youtube", "track")]
-            # The album title alone too: blog lists misspell artists ("Andrea" for Andrae Durden).
-            results, seen = [], set()
-            for query in dict.fromkeys((f"{first} {album}".strip(), album.strip())):
-                found = self.sources().search(query, "youtube", "album")
-                results += [{**c, "premium_only": True} for c in found if c.get("url") not in seen]
-                seen |= {c.get("url") for c in found}
-            return results
-
-        with concurrent.futures.ThreadPoolExecutor(3) as pool:
-            futures = {n: pool.submit(fn) for n, fn in (("soulseek", soulseek), ("torrent", torrent), ("youtube", youtube))}
+        name = matching.unmixed(item["title"]) if track else item["album"]
+        plain = re.sub(r"\s*[\(\[].*?[\)\]]", "", name).strip() or name
+        query = f"{search_artist(item['artist'])} {plain}".strip()
+        runs = {"soulseek": item["kind"]} | ({} if track else {"torrent": "album"}) | ({"youtube": item["kind"]} if self.youtube_ready() else {})
+        with concurrent.futures.ThreadPoolExecutor(len(runs)) as pool:
+            futures = {source: pool.submit(self.sources().search, query, source, kind) for source, kind in runs.items()}
         results = []
         for source, future in futures.items():
             try:
-                results += future.result()
+                found = future.result()
             except SoulseekUnavailable:
                 raise
             except SourceError as exc:
                 if source == "soulseek":
-                    return None
+                    return self._search_failed(item, exc)
                 log.info("Request %s: %s search failed: %s", item["id"], source, str(exc)[:200])
+                continue
+            # Requests take YouTube only at Premium quality (256 kbps), so that is what these copies are.
+            results += [{**c, "premium_only": True} for c in found] if source == "youtube" else found
         if track:
-            return self._rank_track(item, results, avoid, title)
-        return self._rank(item, results, avoid) or self._single_as_track(item)
-
-    def _single_as_track(self, item):
-        """A one-track single asked for as an album ("1995"): its folder is seldom shared, its song
-        is, often inside the album it later joined. Searched as that song; the copy is a track."""
-        if "tracklist" not in item:
-            item["tracklist"] = self.tracklist(item) or None
-        tracks = (item.get("tracklist") or {}).get("tracks") or []
-        if len(tracks) != 1 or not tracks[0][0]:
-            return []
-        found = self._search({**item, "kind": "track", "title": tracks[0][0]})
-        return found and [{**c, "requested_title": tracks[0][0]} for c in found]
-
-    def _rank_track(self, item, results, avoid, title):
-        """The model decides which files are the song; code keeps the facts (quality floor, uploaders
-        tried) and orders the matches by quality and availability. Without a usable answer from the
-        model, the matching rules decide."""
-        artist, album = item["artist"], item.get("album") or ""
-        pool = [c for c in results if c.get("kind") == "track" and matching.quality(c) is not None
-                and matching.provider(c) not in avoid]
-        if not (self.judge and pool):
-            return matching.ranked_tracks(results, artist, title, avoid, album=album)
-        # The files naming most of the request first, one per uploader, so a flood of other songs
-        # cannot push them past what the model sees.
-        wanted = set(matching.words(title)) | set(matching.words(artist))
-        def named(c):
-            leaf = str(c.get("filename") or "").replace("\\", "/").rsplit("/", 1)[-1] or str(c.get("title") or "")
-            return len(wanted & set(matching.words(leaf)))
-        pool.sort(key=lambda c: (-named(c), -matching.quality(c)) + matching.availability(c))
-        seen = set()
-        pool = [c for c in pool if not (matching.provider(c) in seen or seen.add(matching.provider(c)))]
-        if album and "tracklist" not in item:
-            item["tracklist"] = self.tracklist(item) or None
-        reference = item.get("tracklist")
-        if reference and not any(matching.track_key(t) == matching.track_key(title) for t, _ in reference.get("tracks") or []):
-            album, reference = "", None   # the song is not on that album: a hint that would only mislead
-        verdicts = self.judge.track_verdicts(artist, title, pool, album, reference)
-        if verdicts is None:
-            return matching.ranked_tracks(results, artist, title, avoid, album=album)
-        shown = pool[:len(verdicts)]
-        item["rejected"] = [{"source": c.get("source"), "name": c.get("filename") or c.get("title"),
-                             "problem": verdicts[n]["problem"], "reason": verdicts[n]["reason"]}
-                            for n, c in enumerate(shown) if not verdicts[n]["match"]][:8]
-        best = sorted((n for n in range(len(shown)) if verdicts[n]["match"]
-                       and (shown[n].get("source") != "soulseek" or names_artist(shown[n], artist))),
-                      key=lambda n: (-matching.quality(shown[n]),) + matching.availability(shown[n]))
-        return [{**shown[n], "judged": "model", "reason": verdicts[n]["reason"]} for n in best[:8]]
-
-    def _rank(self, item, results, avoid):
-        """The model decides which results are the album; code orders them by quality and source.
-        Without a usable answer from the model, the matching rules decide, as before."""
-        album, artist = item["album"], item["artist"]
-        pool = [c for c in results if self._eligible(c, avoid)]
-        # Results the rules recognise first, so a flood of unrelated ones cannot push them past what the model sees.
-        pool.sort(key=lambda c: (not matching.identity(c, album, artist), -matching.quality(c)) + matching.availability(c))
-        verdicts = None
-        if self.judge and pool:
-            if "tracklist" not in item:
-                item["tracklist"] = self.tracklist(item) or None
-            verdicts = self.judge.verdicts(artist, album, pool, item.get("year"), item.get("tracklist"))
-        if verdicts is None:
-            return matching.ranked(results, album, artist, avoid)
-        shown = pool[:len(verdicts)]
-        item["rejected"] = [{"source": c.get("source"), "name": c.get("directory") or c.get("title"),
-                             "problem": verdicts[n]["problem"], "reason": verdicts[n]["reason"]}
-                            for n, c in enumerate(shown) if not verdicts[n]["match"]][:8]
-        best, seen = [], set()
-        for n, c in enumerate(shown):
-            who = matching.provider(c)
-            if verdicts[n]["match"] and who not in seen:
-                seen.add(who)
-                best.append({**c, "judged": "model", "reason": verdicts[n]["reason"]})
-        if not best:
-            # Last resort: an official YouTube Music album with the requested title, word for word and
-            # in order, that the model found at least plausible (a misspelled artist, "BLINDAO" under a
-            # collaborator's channel). Same-titled records by other artists score under this floor.
-            wanted = " ".join(matching.words(album))
-            for n, c in enumerate(shown):
-                p = verdicts[n].get("probability") or 0
-                title = f' {" ".join(matching.words(c.get("title")))} '
-                if c.get("source") == "youtube" and wanted and f" {wanted} " in title and p >= YOUTUBE_TITLE_FLOOR:
-                    best.append({**c, "judged": "model", "reason": verdicts[n]["reason"] + "; exact title on YouTube Music"})
-                    break
-        return [self._other_artist(c, artist) for c in best[:8]]
+            return matching.ranked_tracks(results, item["artist"], name, avoid, album=item.get("album") or "")
+        return matching.ranked(results, item["album"], item["artist"], avoid)
 
     @staticmethod
     def _other_artist(c, artist):
@@ -599,17 +481,6 @@ class Wishlist:
             return c
         name = c.get("artist") or re.sub(r"\s*-\s*Topic$", "", str(c.get("uploader") or ""))
         return {**c, "other_artist": True, "reason": f"{c.get('reason', '')}; credited to {name}, not {artist}".lstrip("; ")}
-
-    @staticmethod
-    def _eligible(c, avoid):
-        """Facts, not judgement: an album-sized result of acceptable quality from a source we may still try."""
-        if c.get("kind") != "album" or matching.quality(c) is None or matching.provider(c) in avoid:
-            return False
-        if c.get("source") == "soulseek":
-            return not c.get("mixed_formats") and 2 <= (c.get("file_count") or 0) <= MAX_ALBUM_FILES
-        if c.get("source") == "torrent":
-            return (c.get("seeders") or 0) > 0
-        return c.get("source") == "youtube" and bool(c.get("official"))
 
     def _musicbrainz_tracklist(self, item):
         try:
@@ -712,7 +583,7 @@ class Wishlist:
                         "source": (job.get("candidate") or {}).get("source")} if job else None}
 
     def detail(self, item, jobs=None):
-        """One request with every copy it found, for whoever chooses: the matching model's reasons,
+        """One request with every copy it found, for whoever chooses: the search model's reasons, its searches,
         the files in each copy, what was tried and what the model turned down."""
         tried = avoided(item)
         copies = []
@@ -726,6 +597,8 @@ class Wishlist:
                            "duration": c.get("duration"), "size": c.get("size"), "file_count": c.get("file_count") or len(files),
                            "files": files, "seeders": c.get("seeders"), "queue_length": c.get("queue_length"),
                            "free_slots": c.get("free_slots"), "reason": c.get("reason"), "judged": c.get("judged"),
+                           "substitute": bool(c.get("substitute")),
                            "tried": matching.provider(c) in tried, "chosen": bool(item.get("pick")) and c.get("id") == item.get("pick")})
         return {**self.view(item, jobs), "copies": copies, "tracklist": item.get("tracklist"),
+                "searches": item.get("searches", []), "search_note": item.get("search_note"),
                 "year": item.get("year"), "added_at": item.get("added_at")}

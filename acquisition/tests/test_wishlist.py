@@ -5,7 +5,13 @@ from unittest.mock import patch
 
 from app import matching
 from app.store import Store, now, uid
+import json as jsonlib
+
+import httpx
+
+from app import finder as finder_module
 from app import wishlist as wishlist_module
+from app.finder import Finder
 from app.wishlist import Wishlist
 
 
@@ -415,59 +421,6 @@ def test_a_discography_must_be_the_same_artist_not_one_sharing_a_word():
     assert [bool(f) for f in found] == [False, False, False, True]
 
 
-class FakeJudge:
-    def __init__(self, accept=None, fail=False):
-        self.accept, self.fail, self.seen = accept, fail, []
-
-    def verdicts(self, artist, album, candidates, year=None, tracklist=None):
-        self.seen.append([matching.provider(c) for c in candidates])
-        if self.fail:
-            return None
-        return {n: {"match": matching.provider(c) in self.accept, "problem": "none" if matching.provider(c) in self.accept
-                    else "other_record", "reason": "test"} for n, c in enumerate(candidates)}
-
-    def track_verdicts(self, artist, title, candidates, album=None, tracklist=None):
-        self.track_request = (title, album, tracklist)
-        return self.verdicts(artist, album, candidates)
-
-
-
-
-def _wishlist(store, sources, judge, queued):
-    def enqueue(candidate, user):
-        id = uid()
-        store.put("jobs", id, {"candidate": candidate, "source": candidate["source"]}, owner=user["username"],
-                  stage="queued", created_at=now())
-        queued.append(candidate)
-        return {"id": id}
-    return Wishlist(store, {"navidrome_db": "/nonexistent"}, lambda: sources, enqueue, judge=judge, tracklist=lambda item: None)
-
-
-def test_the_model_decides_which_results_are_the_album(tmp_path):
-    store, queued = Store(tmp_path / "a.db"), []
-    # A scene folder the rules reject, and a chapter the rules accept: the model's verdict wins.
-    scene = slsk("scene", folder="Moor_Mother-Jazz_Codes-(ANTI123)-WEB-FLAC-2022-DASH")
-    chapter = slsk("chapter", folder="Moor Mother - Jazz Codes Order")
-    judge = FakeJudge(accept={"scene"})
-    w = _wishlist(store, FakeSources({"soulseek": [chapter, scene]}), judge, queued)
-    item = w.add("mateo", "Moor Mother", "Jazz Codes")
-    w.tick()
-    assert [c["username"] for c in queued] == ["scene"]
-    saved = store.get("wishlist", item["id"])
-    assert [c["judged"] for c in saved["candidates"]] == ["model"]
-    assert saved["rejected"][0]["name"].endswith("Jazz Codes Order")
-
-
-def test_without_a_model_answer_the_rules_decide_as_before(tmp_path):
-    store, queued = Store(tmp_path / "a.db"), []
-    w = _wishlist(store, FakeSources({"soulseek": [slsk("a"), slsk("chapter", folder="Moor Mother - Jazz Codes Order")]}),
-                  FakeJudge(fail=True), queued)
-    w.add("mateo", "Moor Mother", "Jazz Codes")
-    w.tick()
-    assert [c["username"] for c in queued] == ["a"]
-    assert "judged" not in queued[0]
-
-
 def test_failed_downloads_take_the_next_copy_instead_of_retrying(tmp_path):
     store, queued = Store(tmp_path / "a.db"), []
     w = _wishlist(store, FakeSources({"soulseek": [slsk("a"), slsk("b")]}), None, queued)
@@ -492,58 +445,145 @@ def test_a_timed_out_browse_takes_the_next_copy(tmp_path):
     assert [c["username"] for c in queued] == ["a", "b"]
 
 
+def _wishlist(store, sources, finder, queued, youtube=True):
+    def enqueue(candidate, user):
+        id = uid()
+        store.put("jobs", id, {"candidate": candidate, "source": candidate["source"]}, owner=user["username"],
+                  stage="queued", created_at=now())
+        queued.append(candidate)
+        return {"id": id}
+    return Wishlist(store, {"navidrome_db": "/nonexistent"}, lambda: sources, enqueue, finder=finder,
+                    tracklist=lambda item: None, youtube_ready=lambda: youtube)
 
 
+class ScriptedModel:
+    """The model's side of the finder: each turn's tool calls, in order; what it was sent is kept."""
+    def __init__(self, *turns):
+        self.turns, self.sent = list(turns), []
 
-class OddsJudge:
-    """Decisions-style verdicts: nothing matches, with a probability per title."""
-    def __init__(self, odds):
-        self.odds = odds
+    def __call__(self, url, json=None, **kwargs):
+        self.sent.append(jsonlib.loads(jsonlib.dumps(json)))   # the finder keeps adding to its messages
+        turn = self.turns.pop(0)
+        if turn is None:
+            return httpx.Response(503, request=httpx.Request("POST", url))
+        calls = [{"id": f"call{n}", "type": "function", "function": {"name": name, "arguments": jsonlib.dumps(args)}}
+                 for n, (name, args) in enumerate(turn)]
+        return httpx.Response(200, request=httpx.Request("POST", url), json={
+            "choices": [{"message": {"role": "assistant", "content": "", "tool_calls": calls}}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 10}})
 
-    def verdicts(self, artist, album, candidates, year=None, tracklist=None):
-        return {n: {"match": False, "problem": "unclear", "probability": self.odds[c["title"]], "reason": "x"}
-                for n, c in enumerate(candidates)}
+    def shown(self, turn):
+        """The results the model was shown in a turn's request: {id: description}."""
+        return {k: v for m in self.sent[turn]["messages"] if m["role"] == "tool"
+                for k, v in jsonlib.loads(m["content"]).get("shown", {}).items()}
 
 
-def test_an_exact_youtube_title_the_model_finds_plausible_is_the_last_resort(tmp_path):
+def finder(*turns):
+    model = ScriptedModel(*turns)
+    return Finder({"llm_api_key": "test"}, post=model), model
+
+
+def search(query, source="soulseek", kind="album"):
+    return ("search", {"query": query, "source": source, "kind": kind})
+
+
+def test_the_model_searches_and_picks_and_code_keeps_the_facts(tmp_path):
     store, queued = Store(tmp_path / "a.db"), []
-    sources = FakeSources({"youtube": [yt("Parallel Movement", "BDTom - Topic", "OLAK5uy_b"), yt("BLINDAO", "marquitos", "OLAK5uy_a")]})
-    w = _wishlist(store, sources, OddsJudge({"BLINDAO": 0.4, "Parallel Movement": 0.17}), queued)
-    item = w.add("mateo", "ODDLIQUOR", "BLINDAO")
+    scene = slsk("scene", folder="Moor_Mother-Jazz_Codes-(ANTI123)-WEB-FLAC-2022-DASH")
+    mp3 = slsk("mp3", fmt="mp3", bitrate=320)
+    low = slsk("low", fmt="mp3", bitrate=128)
+    f, model = finder([search("moor mother jazz codes")],
+                      [("finish", {"picks": [{"id": "r2", "reason": "320"}, {"id": "r1", "reason": "scene rip"},
+                                             {"id": "r9", "reason": "never shown"}], "note": "found it"})])
+    w = _wishlist(store, FakeSources({"soulseek": [mp3, scene, low]}), f, queued)
+    item = w.add("mateo", "Moor Mother", "Jazz Codes")
     w.tick()
-    assert ("BLINDAO", "youtube") in sources.calls   # the title alone is searched too
-    # Under a collaborator's channel: it waits for a choice rather than downloading on its own.
-    held = store.get("wishlist", item["id"])
-    assert queued == [] and held["status"] == "choice" and "credited to marquitos" in held["candidates"][0]["reason"]
-    w.choose(held, held["candidates"][0]["id"])
-    w.tick()
-    assert [c["title"] for c in queued] == ["BLINDAO"]
+    # The 128k copy is never shown; an id the model invents is dropped; lossless goes first.
+    assert len(model.shown(1)) == 2
+    assert [c["username"] for c in queued] == ["scene"]
+    saved = store.get("wishlist", item["id"])
+    assert [c["username"] for c in saved["candidates"]] == ["scene", "mp3"]
+    assert saved["candidates"][0]["reason"] == "scene rip" and saved["search_note"] == "found it"
+    assert saved["searches"] == [{"query": "moor mother jazz codes", "source": "soulseek", "kind": "album", "results": 3}]
 
 
-def test_a_same_titled_youtube_album_by_another_artist_waits_even_when_the_model_takes_it(tmp_path):
+def test_the_model_searches_again_when_a_name_is_dropped(tmp_path):
     store, queued = Store(tmp_path / "a.db"), []
-    sources = FakeSources({"youtube": [yt("Homework", "Mato - Topic", "OLAK5uy_m", artist="Mato"),
-                                       yt("Discovery", "Daft Punk - Topic", "OLAK5uy_p", artist="Daft Punk")]})
-    w = _wishlist(store, sources, OddsJudge({"Homework": 0.82, "Discovery": 0.9}), queued)
-    w.judge.verdicts = lambda *a, **k: {0: {"match": True, "problem": None, "probability": 0.82, "reason": "x"}}
-    item = w.add("mateo", "Daft Punk", "Homework")
+    f, model = finder([search("overmono good lies")], [search("good lies")],
+                      [("finish", {"picks": [{"id": "r1", "reason": "the album"}], "note": "artist name ignored"})])
+    sources = PhraseSources({"soulseek": [slsk("a", folder="Overmono - Good Lies")]}, "overmono")
+    w = _wishlist(store, sources, f, queued)
+    w.add("mateo", "Overmono", "Good Lies")
     w.tick()
-    assert queued == [] and store.get("wishlist", item["id"])["status"] == "choice"
-    assert not Wishlist._other_artist(yt("Discovery", "Daft Punk - Topic", "x"), "Daft Punk").get("other_artist")
-    assert not Wishlist._other_artist(yt("Naloxona", "Andrae Durden - Topic", "x"), "Andrea Durden").get("other_artist")
+    assert jsonlib.loads(model.sent[1]["messages"][-1]["content"])["results"] == 0
+    assert [c["username"] for c in queued] == ["a"]
 
 
-def test_same_titled_youtube_albums_the_model_doubts_are_not_taken(tmp_path):
+def test_without_the_model_one_plain_search_and_the_rules_decide(tmp_path):
     store, queued = Store(tmp_path / "a.db"), []
-    # Other artists' records: exact title but under the floor, or the title's words out of order.
-    sources = FakeSources({"youtube": [yt("Liquor Store Run", "LiL'WooFyWooF - Topic", "OLAK5uy_c"),
-                                       yt("Indigo Blue", "Evan Purdy - Topic", "OLAK5uy_d")]})
-    w = _wishlist(store, sources, OddsJudge({"Liquor Store Run": 0.06, "Indigo Blue": 0.5}), queued)
-    w.add("mateo", "bastienGOAT", "Liquor Store Run")
+    f, _ = finder(None)
+    sources = FakeSources({"soulseek": [slsk("a"), slsk("chapter", folder="Moor Mother - Jazz Codes Order")]})
+    w = _wishlist(store, sources, f, queued)
+    w.add("mateo", "Moor Mother", "Jazz Codes")
     w.tick()
-    w.add("mateo", "Darius C", "Blue Indigo")
+    assert [c["username"] for c in queued] == ["a"] and "judged" not in queued[0]
+    assert ("Moor Mother Jazz Codes", "soulseek") in sources.calls
+
+
+def test_the_search_budget_and_unavailable_sources_are_the_model_s_to_handle(tmp_path):
+    store, queued = Store(tmp_path / "a.db"), []
+    turns = [[search(f"q{n}")] for n in range(finder_module.MAX_SEARCHES + 1)]
+    f, model = finder(*turns, [search("x", "youtube"), search("x", "torrent", "track")], [("finish", {"picks": [], "note": "nothing"})])
+    w = _wishlist(store, FakeSources({}), f, queued, youtube=False)
+    item = w.add("mateo", "Moor Mother", "Jazz Codes")
     w.tick()
-    assert queued == []
+    answers = [jsonlib.loads(m["content"]) for m in model.sent[-1]["messages"] if m["role"] == "tool"]
+    assert answers[finder_module.MAX_SEARCHES] == {"error": "No searches left: call finish."}
+    assert [a["error"] for a in answers[-2:]] == ["YouTube is not available now.", "Torrents hold whole releases: search kind album."]
+    assert store.get("wishlist", item["id"])["status"] == "not_found"
+
+
+def test_a_substitute_waits_for_a_choice_and_a_single_s_song_keeps_its_title(tmp_path):
+    store, queued = Store(tmp_path / "a.db"), []
+    song = {"id": "s-gibbs", "source": "soulseek", "kind": "track", "username": "gibbs", "title": "1995", "free_slots": True,
+            "filename": "Music\\Freddie Gibbs\\Alfredo 2\\07 1995.flac", "format": "flac", "duration": 170}
+    f, _ = finder([search("freddie gibbs 1995", kind="track")],
+                  [("finish", {"picks": [{"id": "r1", "reason": "the single's song", "substitute": True}], "note": "single"})])
+    w = _wishlist(store, FakeSources({"soulseek": [song]}), f, queued)
+    item = w.add("mateo", "Freddie Gibbs", "1995")
+    w.tick()
+    saved = store.get("wishlist", item["id"])
+    assert saved["status"] == "choice" and queued == []
+    assert w.detail(saved)["copies"][0]["substitute"] is True
+    w.choose(saved, "s-gibbs")
+    w.tick()
+    assert queued[0]["requested_title"] == "1995" and "requested_album" not in queued[0]
+
+
+def test_a_request_whose_soulseek_search_keeps_failing_is_parked(tmp_path):
+    store, queued = Store(tmp_path / "a.db"), []
+    class Failing(FakeSources):
+        def search(self, query, source, kind):
+            self.calls.append((query, source))
+            raise wishlist_module.SourceError("Soulseek returned HTTP 409: not logged in")
+    sources = Failing({})
+    w = _wishlist(store, sources, None, queued)
+    item = w.add("mateo", "JPEGMAFIA", "The Who", kind="track", title="The Who")
+    for _ in range(3):
+        w.tick()
+    saved = store.get("wishlist", item["id"])
+    assert saved["status"] == "not_found" and "3 searches in a row" in saved["note"]
+    w.tick()
+    assert len([c for c in sources.calls if c[1] == "soulseek"]) == 3
+
+
+def test_a_soulseek_folder_far_bigger_than_an_album_is_not_a_candidate():
+    album = {"source": "soulseek", "kind": "album", "format": "mp3", "bitrate": 320, "username": "u"}
+    assert finder_module.eligible({**album, "file_count": 12})
+    # An uploader's 480-track "club adjacent" folder, once judged 51% likely the album.
+    assert not finder_module.eligible({**album, "file_count": 480})
+    assert finder_module.eligible({**album, "file_count": finder_module.MAX_ALBUM_FILES})
+    assert not finder_module.eligible({**album, "file_count": 12}, {"u"})
 
 
 def test_a_track_is_in_the_library_by_artist_and_title_but_not_as_a_remix():
@@ -564,24 +604,10 @@ def test_tracks_in_library_agrees_with_library_has_track():
     assert len(matching.tracks_in_library(library, items)) == 2
 
 
-def test_a_compilation_is_searched_by_its_title_and_unrelated_lossless_cannot_crowd_it_out(tmp_path):
-    store, queued = Store(tmp_path / "a.db"), []
-    junk = [torrent(f"j{n}", title=f"Various Artists - Zen Classical Vol. {n} - 2014, FLAC (tracks)") for n in range(30)]
-    copy = slsk("warp", fmt="mp3", bitrate=320, files=12, folder="We Are Reasonable People")
-    sources = FakeSources({"soulseek": [copy], "torrent": junk})
-    judge = FakeJudge(accept={"warp"})
-    w = _wishlist(store, sources, judge, queued)
-    w.add("mateo", "Various Artists", "We Are Reasonable People")
-    w.tick()
-    assert [c["username"] for c in queued] == ["warp"]
-    assert judge.seen[0][0] == "warp"
-    assert all("Various" not in query for query, _ in sources.calls)
-
-
 def test_an_old_youtube_copy_is_upgraded_by_premium_youtube(tmp_path):
     store, queued = Store(tmp_path / "a.db"), []
     w = _wishlist(store, FakeSources({"youtube": [yt("Jazz Codes", "Moor Mother - Topic", "OLAK5uy_j", "Moor Mother")]}),
-                  FakeJudge(fail=True), queued)
+                  None, queued)
     item = w.add("mateo", "Moor Mother", "Jazz Codes")
     saved = store.get("wishlist", item["id"])
     saved.update(status="have", quality=0, upgrade_wanted=True)
@@ -591,19 +617,10 @@ def test_an_old_youtube_copy_is_upgraded_by_premium_youtube(tmp_path):
     assert matching.quality(queued[-1]) == 2
 
 
-def test_a_soulseek_folder_far_bigger_than_an_album_is_not_a_candidate():
-    from app.wishlist import MAX_ALBUM_FILES, Wishlist
-    album = {"source": "soulseek", "kind": "album", "format": "mp3", "bitrate": 320, "username": "u"}
-    assert Wishlist._eligible({**album, "file_count": 12}, set())
-    # An uploader's 480-track "club adjacent" folder, once judged 51% likely the album.
-    assert not Wishlist._eligible({**album, "file_count": 480}, set())
-    assert Wishlist._eligible({**album, "file_count": MAX_ALBUM_FILES}, set())
-
-
 def test_a_held_request_waits_at_its_copies_until_one_is_chosen(tmp_path):
     store, queued = Store(tmp_path / "a.db"), []
     sources = FakeSources({"soulseek": [slsk("a"), slsk("b", "mp3", 320)]})
-    w = _wishlist(store, sources, FakeJudge(accept={"a", "b"}), queued)
+    w = _wishlist(store, sources, None, queued)
     item = w.add("mateo", "Moor Mother", "Jazz Codes", hold=True)
     w.tick()
     saved = store.get("wishlist", item["id"])
@@ -635,7 +652,7 @@ def test_a_held_request_waits_at_its_copies_until_one_is_chosen(tmp_path):
 
 def test_a_held_request_with_a_picked_result_or_a_link_needs_no_choice(tmp_path):
     store, queued = Store(tmp_path / "a.db"), []
-    w = _wishlist(store, FakeSources({}), FakeJudge(accept={"a"}), queued)
+    w = _wishlist(store, FakeSources({}), None, queued)
     w.add("mateo", "Moor Mother", "Jazz Codes", pick=slsk("a"), hold=True)
     w.add("mateo", "", "", kind="link", url="https://youtu.be/dQw4w9WgXcQ", link_kind="track", hold=True)
     w.tick()
@@ -645,44 +662,6 @@ def test_a_held_request_with_a_picked_result_or_a_link_needs_no_choice(tmp_path)
 def track_file(user, name, fmt="flac", bitrate=None, free=True):
     return {"id": f"s-{user}", "source": "soulseek", "kind": "track", "username": user, "free_slots": free,
             "filename": f"Music\\100 gecs\\{name}.{fmt}", "format": fmt, "bitrate": bitrate, "duration": 175}
-
-
-def test_the_model_decides_which_files_are_the_song_and_code_orders_them(tmp_path):
-    store, queued = Store(tmp_path / "a.db"), []
-    sources = FakeSources({"soulseek": [track_file("mp3", "hand crushed by a mallet (remix)", "mp3", 320),
-                                        track_file("laura", "hand crushed by a mallet (Laura Les Remix)"),
-                                        track_file("odd", "100 gecs - gecgecgec remix of a mallet"),
-                                        track_file("flac", "05 hand crushed by a mallet (Remix)", free=False),
-                                        track_file("low", "hand crushed by a mallet (remix)", "mp3", 128)]})
-    judge = FakeJudge(accept={"mp3", "flac", "odd"})
-    w = _wishlist(store, sources, judge, queued)
-    w.tracklist = lambda item: {"title": "1000 gecs and The Tree of Clues", "tracks": [("hand crushed by a mallet (Remix)", 175)]}
-    item = w.add("mateo", "100 gecs", "1000 gecs and The Tree of Clues", "Requests", kind="track",
-                 title="hand crushed by a mallet (Remix) [feat. Fall Out Boy]")
-    w.tick()
-    saved = store.get("wishlist", item["id"])
-    # Lossless first (a free slot before a queue), then 320; a 128k is never shown; the file naming least goes last.
-    assert [c["username"] for c in saved["candidates"]] == ["odd", "flac", "mp3"]
-    assert "low" not in judge.seen[0] and judge.seen[0][-1] == "odd"
-    assert saved["candidates"][1]["judged"] == "model" and saved["rejected"][0]["name"].endswith("(Laura Les Remix).flac")
-    assert judge.track_request[1] == "1000 gecs and The Tree of Clues"
-
-
-def test_an_album_the_song_is_not_on_is_left_out_and_rules_decide_without_the_model(tmp_path):
-    store, queued = Store(tmp_path / "a.db"), []
-    sources = FakeSources({"soulseek": [track_file("a", "Vulfpeck - Sauna")]})
-    judge = FakeJudge(accept={"a"})
-    w = _wishlist(store, sources, judge, queued)
-    w.tracklist = lambda item: {"title": "The Beautiful Game", "tracks": [("Animal Spirits", 200)]}
-    w.add("mateo", "Vulfpeck", "The Beautiful Game", "Requests", kind="track", title="Sauna")
-    w.tick()
-    assert judge.track_request == ("Sauna", "", None) and queued[-1]["username"] == "a"
-    store2, queued2 = Store(tmp_path / "b.db"), []
-    w = _wishlist(store2, FakeSources({"soulseek": [track_file("a", "Vulfpeck - Sauna"), track_file("b", "Sauna Time")]}),
-                  FakeJudge(fail=True), queued2)
-    w.add("mateo", "Vulfpeck", "", "Requests", kind="track", title="Sauna")
-    w.tick()
-    assert [c["username"] for c in queued2] == ["a"]
 
 
 class PhraseSources(FakeSources):
@@ -696,57 +675,3 @@ class PhraseSources(FakeSources):
         if source == "soulseek" and self.dropped in query.casefold():
             return []
         return [c for c in self.results.get(source, []) if c.get("kind", kind) == kind]
-
-
-def test_a_name_the_soulseek_server_drops_is_searched_by_its_longest_word(tmp_path):
-    store, queued = Store(tmp_path / "a.db"), []
-    sources = PhraseSources({"soulseek": [track_file("a", "Kanye West - POWER")]}, "kanye west")
-    w = _wishlist(store, sources, FakeJudge(accept={"a"}), queued)
-    w.add("mateo", "Kanye West", "My Beautiful Dark Twisted Fantasy", "Saved tracks", kind="track", title="POWER")
-    w.tick()
-    assert [q for q, s in sources.calls if s == "soulseek"] == ["Kanye West POWER", "kanye POWER"]
-    assert queued[-1]["username"] == "a"
-
-
-def test_results_that_are_not_the_record_do_not_trigger_the_shorter_name(tmp_path):
-    store, queued = Store(tmp_path / "a.db"), []
-    sources = FakeSources({"soulseek": [slsk("other", folder="Someone Else - Another Record")]})
-    w = _wishlist(store, sources, FakeJudge(accept=set()), queued)
-    w.add("mateo", "Moor Mother", "Jazz Codes")
-    w.tick()
-    assert not any(q.startswith("moor ") or q.startswith("mother ") for q, _ in sources.calls)
-    assert wishlist_module.short_artist("Moor Mother") == "mother" and wishlist_module.short_artist("Burial") == ""
-
-
-def test_a_one_track_single_asked_for_as_an_album_is_searched_as_its_song(tmp_path):
-    store, queued = Store(tmp_path / "a.db"), []
-    song = track_file("a", "Freddie Gibbs, The Alchemist - 1995")
-    sources = PhraseSources({"soulseek": [song]}, "never dropped")
-    w = _wishlist(store, sources, FakeJudge(accept={"a"}), queued)
-    w.tracklist = lambda item: {"title": "1995", "type": "Single", "tracks": [("1995", 289)]}
-    item = w.add("mateo", "Freddie Gibbs", "1995", "Saved albums")
-    w.tick()
-    assert queued[-1]["username"] == "a" and queued[-1]["kind"] == "track"
-    assert queued[-1]["requested_title"] == "1995" and "requested_album" not in queued[-1]
-    assert store.get("wishlist", item["id"])["kind"] == "album"
-
-
-def test_not_found_says_when_youtube_was_not_searched(tmp_path):
-    store, queued = Store(tmp_path / "a.db"), []
-    w = _wishlist(store, FakeSources({}), FakeJudge(accept=set()), queued)
-    w.youtube_ready = lambda: False
-    item = w.add("mateo", "Moor Mother", "Jazz Codes")
-    w.tick()
-    assert "YouTube was not searched" in store.get("wishlist", item["id"])["note"]
-
-
-def test_a_song_by_title_alone_must_name_the_artist_somewhere_in_its_path(tmp_path):
-    store, queued = Store(tmp_path / "a.db"), []
-    other = {**track_file("hsy", "x"), "filename": "Music\\HSY\\2015 Bask\\02 Acid Peel.flac"}
-    mine = {**track_file("tb", "x"), "filename": "Music\\Tony Bontana\\My Leg\\01 Acid Peel.mp3", "format": "mp3", "bitrate": 320}
-    w = _wishlist(store, FakeSources({"soulseek": [other, mine]}), FakeJudge(accept={"hsy", "tb"}), queued)
-    w.add("mateo", "Tony Bontana", "My Leg", "Saved tracks", kind="track", title="Acid Peel")
-    w.tick()
-    assert [c["username"] for c in queued] == ["tb"]
-    assert wishlist_module.names_artist({"filename": "音楽\\アトラスサウンドチーム\\Joy.flac"}, "アトラスサウンドチーム")
-    assert wishlist_module.names_artist({"filename": "Music\\Kanye\\Power.flac"}, "Kanye West")
