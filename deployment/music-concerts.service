@@ -7,9 +7,10 @@ OnFailure=music-concerts-failure.service
 
 [Service]
 Type=oneshot
-WorkingDirectory=%h/services/music-stack/concerts
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=%h/services/music-stack/concerts/.venv/bin/python -m concert_alerts sync
+# Installed with: uv tool install git+https://github.com/mateo19182/concert-alerts@v0.1.0
+ExecStart=%h/.local/bin/concert-alerts --config %h/services/music-stack/config/concerts/config.json sync
+TimeoutStartSec=10min
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true

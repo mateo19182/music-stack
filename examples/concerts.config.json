@@ -1,4 +1,6 @@
 {
+  "country": "ES",
+  "timezone": "Europe/Madrid",
   "navidrome_db": "../navidrome/navidrome.db",
   "state_db": "../../state/concerts/events.db",
   "report": "../../state/concerts/latest.json",
@@ -9,5 +11,85 @@
   "artist_overrides": {},
   "dice_enabled": false,
   "dice_notify": false,
-  "dice_page_budget": 150
+  "dice_page_budget": 150,
+  "preferred_areas": [
+    {
+      "label": "A Coruña · Galicia",
+      "cities": [
+        "A Coruña",
+        "La Coruña",
+        "A Coruna",
+        "La Coruna"
+      ]
+    },
+    {
+      "label": "Galicia",
+      "cities": [
+        "Santiago de Compostela",
+        "Vigo",
+        "Ferrol",
+        "Lugo",
+        "Ourense",
+        "Orense",
+        "Pontevedra"
+      ],
+      "states": [
+        "Galicia",
+        "A Coruña",
+        "La Coruña",
+        "A Coruna",
+        "La Coruna",
+        "Lugo",
+        "Ourense",
+        "Orense",
+        "Pontevedra"
+      ],
+      "state_codes": [
+        "GA",
+        "C",
+        "LU",
+        "OU",
+        "PO"
+      ],
+      "postcodes": [
+        "15",
+        "27",
+        "32",
+        "36"
+      ]
+    },
+    {
+      "label": "Madrid",
+      "cities": [
+        "Madrid"
+      ],
+      "states": [
+        "Madrid",
+        "Comunidad de Madrid"
+      ],
+      "state_codes": [
+        "M",
+        "MD"
+      ],
+      "postcodes": [
+        "28"
+      ]
+    },
+    {
+      "label": "Barcelona",
+      "cities": [
+        "Barcelona"
+      ],
+      "states": [
+        "Barcelona"
+      ],
+      "state_codes": [
+        "B"
+      ],
+      "postcodes": [
+        "08"
+      ]
+    }
+  ],
+  "user_agent": "music-stack-concerts/0.1 (personal concert alerts; permitted by DICE)"
 }

@@ -1,4 +1,4 @@
-"""Read-only view of the concert worker's report (concerts/); never contacts event providers."""
+"""Read-only view of the concert worker's report (concert-alerts); never contacts event providers."""
 
 from __future__ import annotations
 
