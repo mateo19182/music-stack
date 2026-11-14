@@ -103,8 +103,10 @@ album releases. Existing album tags are retained and can be corrected in review.
 ## Layout
 
 - `acquisition/`: FastAPI app, workers, classic frontend, tests and MCP bridge.
-- `concerts/`: library-based concert alerts across Spain; see [setup and coverage](concerts/README.md).
-  Acquire's Concerts tab (all signed-in users) reads its report through a read-only mount.
+- Concert alerts run [concert-alerts](https://github.com/mateo19182/concert-alerts) against this
+  library with `config/concerts/config.json` (template `examples/concerts.config.json`) and
+  `deployment/music-concerts.*`. Acquire's Concerts tab (all signed-in users) reads its report
+  (`state/concerts/latest.json`) through a read-only mount.
 - `compose.yaml`: acquisition, Navidrome and the legacy URL redirect. Project `music-stack`.
 - `compose.sources.yaml`: slskd, Gluetun, Deemix, web proxy and optional Beets.
   Project `lidarr`; its network is `lidarr_default`.
